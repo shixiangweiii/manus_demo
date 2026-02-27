@@ -1,0 +1,51 @@
+Manus AI Agent Architecture Overview
+
+Manus is a general-purpose AI agent that bridges the gap between thought and action.
+It operates through a multi-agent architecture where specialized agents collaborate
+to solve complex tasks autonomously.
+
+Core Design Principles:
+1. Plan-and-Execute: Tasks are first decomposed into structured plans with clear steps
+   before any execution begins. This ensures systematic progress and allows for
+   dynamic re-planning when unexpected situations arise.
+
+2. ReAct (Reasoning + Acting): During execution, the agent follows a
+   Thought-Action-Observation loop. It first reasons about the current situation,
+   then takes an action (using tools), and finally observes the result before
+   deciding the next step.
+
+3. Multi-Agent Coordination: Different specialized agents handle different aspects:
+   - Planner Agent: Decomposes high-level tasks into executable steps
+   - Executor Agent: Carries out individual steps using available tools
+   - Reflector Agent: Validates results and provides quality feedback
+   - Orchestrator Agent: Coordinates the overall workflow
+
+Memory System:
+- Short-term Memory: Maintains recent conversation context using a sliding window
+  approach. This provides immediate context for ongoing interactions.
+- Long-term Memory: Persists task summaries and learnings across sessions. Enables
+  the agent to recall past experiences and avoid repeating mistakes.
+
+Context Management:
+When conversation history grows too long, the context manager automatically
+compresses older messages into concise summaries using the LLM itself. This
+preserves important information while staying within token limits.
+
+Knowledge Retrieval:
+The agent can access a knowledge base of documents to inform its planning and
+execution. Documents are indexed and retrieved based on relevance to the current
+task, providing domain-specific context.
+
+Tool System:
+Agents can interact with the external world through a pluggable tool system:
+- Web Search: Query information from the internet
+- Code Execution: Run Python code to perform computations
+- File Operations: Read and write files for data processing
+
+The tool system uses OpenAI-compatible function calling, allowing the LLM to
+naturally select and invoke tools as part of its reasoning process.
+
+Reflection and Verification:
+After task execution, a dedicated reflection step evaluates the quality of
+results. If the outcome doesn't meet standards, the system can trigger
+re-planning with specific feedback, creating a self-improving loop.

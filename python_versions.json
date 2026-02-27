@@ -1,0 +1,52 @@
+[
+  {
+    "version": "Python 3.12",
+    "release_year": 2023,
+    "status": "Current"
+  },
+  {
+    "version": "Python 3.11",
+    "release_year": 2022,
+    "status": "Active"
+  },
+  {
+    "version": "Python 3.10",
+    "release_year": 2021,
+    "status": "Active"
+  },
+  {
+    "version": "Python 3.9",
+    "release_year": 2020,
+    "status": "Active"
+  },
+  {
+    "version": "Python 3.8",
+    "release_year": 2019,
+    "status": "Security"
+  },
+  {
+    "version": "Python 3.7",
+    "release_year": 2018,
+    "status": "Security"
+  },
+  {
+    "version": "Python 3.6",
+    "release_year": 2016,
+    "status": "End of Life"
+  },
+  {
+    "version": "Python 3.5",
+    "release_year": 2015,
+    "status": "End of Life"
+  },
+  {
+    "version": "Python 3.4",
+    "release_year": 2014,
+    "status": "End of Life"
+  },
+  {
+    "version": "Python 2.7",
+    "release_year": 2010,
+    "status": "End of Life"
+  }
+]

@@ -1,0 +1,8 @@
+openai
+pydantic
+rich
+python-dotenv
+
+# Testing (optional)
+pytest
+pytest-asyncio

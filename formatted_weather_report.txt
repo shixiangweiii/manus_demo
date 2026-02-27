@@ -1,0 +1,35 @@
+
+==========================================
+WEATHER REPORT FOR New York, US
+==========================================
+
+CURRENT CONDITIONS:
+• Weather: Clear - clear sky
+• Temperature: 22.5°C
+• Feels Like: 22.8°C
+• Temperature Range: 21.0°C to 24.0°C
+
+ATMOSPHERIC CONDITIONS:
+• Humidity: 65%
+• Pressure: 1013 hPa
+• Visibility: 10.0 km
+
+WIND CONDITIONS:
+• Wind Speed: 3.6 m/s
+• Wind Direction: 200°
+
+CLOUD COVER:
+• Cloudiness: 0%
+
+LOCATION DETAILS:
+• Coordinates: 40.7143°N, -74.0060°W
+• Timezone: UTC-4
+
+TIMESTAMP:
+• Data Time: 2026-02-17 20:42:59
+• Sunrise: 06:30:00
+• Sunset: 19:45:00
+
+==========================================
+API Response Code: 200
+==========================================
