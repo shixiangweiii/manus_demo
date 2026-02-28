@@ -313,6 +313,146 @@ class Reflection(BaseModel):
 
 
 # ======================================================================
+# Emergent Planning (v5)
+# 隐式规划模型（v5 新增）
+# ======================================================================
+
+class TodoStatus(str, Enum):
+    """
+    TODO item lifecycle states for emergent planning.
+    隐式规划中 TODO 项的生命周期状态。
+    """
+    PENDING = "pending"           # 等待执行
+    IN_PROGRESS = "in_progress"   # 正在执行
+    COMPLETED = "completed"       # 已完成
+    BLOCKED = "blocked"           # 被阻塞（依赖未完成）
+
+
+class TodoItem(BaseModel):
+    """
+    A single TODO item in the emergent planning system.
+    隐式规划系统中的单个 TODO 项。
+
+    Unlike TaskNode in DAG planning, TODO items are:
+    - Flat structure (no hierarchy)
+    - Dynamically created/updated during execution
+    - Managed in a centralized TODO list
+    - Self-organized by the LLM through natural language reasoning
+
+    与 DAG 规划中的 TaskNode 不同，TODO 项具有以下特征：
+    - 扁平结构（无层级）
+    - 执行过程中动态创建/更新
+    - 在集中式 TODO 列表中管理
+    - 通过 LLM 的自然语言推理自组织
+    """
+    id: int = Field(description="Unique TODO identifier")                          # TODO 唯一 ID
+    description: str = Field(description="What needs to be accomplished")          # TODO 描述
+    status: TodoStatus = TodoStatus.PENDING                                         # 当前状态
+    dependencies: list[int] = Field(default_factory=list, description="IDs of prerequisite TODOs")  # 前置 TODO ID 列表
+    result: str | None = None                                                       # 执行结果文本
+    created_at: float = Field(default_factory=time.time, description="Creation timestamp")  # 创建时间戳
+    updated_at: float = Field(default_factory=time.time, description="Last update timestamp")  # 最后更新时间戳
+
+
+class TodoList(BaseModel):
+    """
+    Centralized TODO list for emergent planning.
+    隐式规划的集中式 TODO 列表。
+
+    This is the core data structure for Claude Code-style planning:
+    - All TODOs are stored here
+    - LLM can add, update, or complete TODOs during execution
+    - The executor selects the next TODO based on dependencies and status
+
+    这是 Claude Code 风格规划的核心数据结构：
+    - 存储所有 TODO 项
+    - LLM 可在执行过程中添加、更新或完成 TODO
+    - 执行器根据依赖关系和状态选择下一个 TODO
+    """
+    task: str = Field(description="Original user task")                            # 原始用户任务
+    todos: dict[int, TodoItem] = Field(default_factory=dict, description="TODO items indexed by ID")  # 按 ID 索引的 TODO 项
+    next_id: int = Field(default=1, description="Next available TODO ID")          # 下一个可用 TODO ID
+
+    def add_todo(self, description: str, dependencies: list[int] | None = None) -> TodoItem:
+        """
+        Add a new TODO to the list. Returns the created TODO item.
+        向 TODO 列表添加新项，返回创建的 TODO 项。
+        """
+        todo = TodoItem(
+            id=self.next_id,
+            description=description,
+            dependencies=dependencies or [],
+        )
+        self.todos[self.next_id] = todo
+        self.next_id += 1
+        return todo
+
+    def get_pending_todos(self) -> list[TodoItem]:
+        """
+        Get all TODOs that are ready to execute (PENDING or IN_PROGRESS).
+        获取所有可执行的 TODO 项（状态为 PENDING 或 IN_PROGRESS）。
+        """
+        return [
+            todo for todo in self.todos.values()
+            if todo.status in (TodoStatus.PENDING, TodoStatus.IN_PROGRESS)
+        ]
+
+    def get_ready_todos(self) -> list[TodoItem]:
+        """
+        Get TODOs whose dependencies are all COMPLETED.
+        获取所有依赖已满足的 TODO 项。
+        """
+        ready = []
+        for todo in self.todos.values():
+            if todo.status != TodoStatus.PENDING:
+                continue
+            # 检查所有依赖是否已完成
+            deps_completed = all(
+                self.todos.get(dep_id, TodoItem(id=dep_id, description="")).status == TodoStatus.COMPLETED
+                for dep_id in todo.dependencies
+            )
+            if deps_completed:
+                ready.append(todo)
+        return ready
+
+    def mark_completed(self, todo_id: int, result: str) -> None:
+        """
+        Mark a TODO as completed with the given result.
+        将 TODO 标记为已完成，并记录结果。
+        """
+        if todo_id in self.todos:
+            self.todos[todo_id].status = TodoStatus.COMPLETED
+            self.todos[todo_id].result = result
+            self.todos[todo_id].updated_at = time.time()
+
+    def mark_in_progress(self, todo_id: int) -> None:
+        """
+        Mark a TODO as in progress.
+        将 TODO 标记为正在执行。
+        """
+        if todo_id in self.todos:
+            self.todos[todo_id].status = TodoStatus.IN_PROGRESS
+            self.todos[todo_id].updated_at = time.time()
+
+    def is_complete(self) -> bool:
+        """
+        Check if all TODOs are completed.
+        检查是否所有 TODO 都已完成。
+        """
+        return all(todo.status == TodoStatus.COMPLETED for todo in self.todos.values())
+
+    def has_pending(self) -> bool:
+        """
+        Check if there are any pending or in-progress TODOs.
+        检查是否有待执行的 TODO。
+        """
+        return any(
+            todo.status in (TodoStatus.PENDING, TodoStatus.IN_PROGRESS)
+            for todo in self.todos.values()
+        )
+
+
+# ======================================================================
 # Memory
 # 记忆模型
 # ======================================================================

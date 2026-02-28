@@ -53,6 +53,12 @@ ADAPT_PLAN_MIN_COMPLETED = int(os.getenv("ADAPT_PLAN_MIN_COMPLETED", "1"))  # �
 # --- 工具路由（v3 新增）---
 TOOL_FAILURE_THRESHOLD = int(os.getenv("TOOL_FAILURE_THRESHOLD", "2"))  # 连续失败多少次后建议切换工具
 
+# --- Emergent Planning (v5) ---
+# --- 隐式规划（v5 新增）---
+EMERGENT_PLANNING_ENABLED = os.getenv("EMERGENT_PLANNING_ENABLED", "true").lower() == "true"  # 是否启用隐式规划模式
+MAX_TODO_ITEMS = int(os.getenv("MAX_TODO_ITEMS", "20"))  # TODO 列表最大项数
+TODO_COMPRESSION_THRESHOLD = float(os.getenv("TODO_COMPRESSION_THRESHOLD", "0.8"))  # 上下文窗口使用率达到 80% 时压缩 TODO
+
 # --- Tools ---
 # --- 工具参数 ---
 SANDBOX_DIR = os.path.expanduser(os.getenv("SANDBOX_DIR", "~/.manus_demo/sandbox"))  # 文件操作沙箱目录（防止越权访问）

@@ -3,8 +3,12 @@
 一个面向教学的多智能体系统 Demo，帮助你理解自主 AI Agent 的核心原理：
 **分层规划、DAG 并行执行、工具调用、状态机驱动、自我反思与纠错**。
 
-> **v4 当前**：混合规划路由（两阶段分类器自动选择 v1 扁平计划或 v2 DAG）、
-> 简单任务走 v1 省 token，复杂任务走 v2 支持并行与容错。
+> **v5 当前**：新增 Claude Code 风格的隐式规划（Emergent Planning），
+> 通过 TODO 列表管理和 `while(tool_use)` 主循环实现规划涌现，
+> 适合探索性、需求不明确的开放式任务。
+>
+> **v4**：混合规划路由（两阶段分类器自动选择 v1 扁平计划、v2 DAG 或 v5 隐式规划）、
+> 简单任务走 v1 省 token，复杂任务走 v2 支持并行与容错，探索性任务走 v5 灵活应对。
 >
 > **v3**：执行期间动态自适应规划（超步间 LLM 评估 → DAG 增删改节点）、
 > 工具路由（连续失败自动建议切换替代工具）、DAG 运行时变更 API。
@@ -31,9 +35,10 @@ User Task
                      │
                      ▼
 ┌─────────────────────────────────────────────────┐
-│  (v4) classify_task → simple | complex          │
+│  (v4/v5) classify_task → simple | complex | emergent  │
 │  simple: Planner.create_plan() → flat Plan      │
 │  complex: Planner.create_dag() → TaskDAG        │
+│  emergent: EmergentPlanner.execute() → TodoList │
 │  Task → Goal → SubGoals → Actions               │
 └────────────────────┬────────────────────────────┘
                      │
@@ -74,7 +79,8 @@ User Task
 
 | 模式 | 说明 |
 |------|------|
-| **Hybrid Plan Routing** (v4) | 两阶段分类器（规则快筛 + LLM 兜底）自动选择 simple(v1) 或 complex(v2) 路径 |
+| **Hybrid Plan Routing** (v4) | 两阶段分类器（规则快筛 + LLM 兜底）自动选择 simple(v1)、complex(v2) 或 emergent(v5) 路径 |
+| **Emergent Planning** (v5) | Claude Code 风格，通过 TODO 列表管理和 `while(tool_use)` 主循环实现规划涌现，适合探索性任务 |
 | **Hierarchical Planning** | Goal → SubGoal → Action 三层分解，每个节点带 exit criteria + 风险评估 |
 | **DAG Execution** | 节点按拓扑序执行，无依赖的节点自动**并行** (Super-step 模型) |
 | **State Machine** | 节点生命周期 `PENDING → READY → RUNNING → COMPLETED / FAILED` 由状态机强制校验 |
@@ -102,7 +108,8 @@ manus_demo/
 │   ├── orchestrator.py             #   Orchestrator — 全流程协调
 │   ├── planner.py                  #   Planner — 分层规划，输出 TaskDAG
 │   ├── executor.py                 #   Executor — ReAct 循环 + 工具调用
-│   └── reflector.py                #   Reflector — 结果验证、质量评估
+│   ├── reflector.py                #   Reflector — 结果验证、质量评估
+│   └── emergent_planner.py         #   EmergentPlanner (v5) — Claude Code 风格隐式规划
 │
 ├── dag/                            # DAG 执行引擎
 │   ├── graph.py                    #   TaskDAG — 图结构、拓扑排序、就绪检测
@@ -131,13 +138,19 @@ manus_demo/
 │   └── client.py                   # OpenAI 兼容 API 封装
 │
 ├── tests/
-│   └── test_dag_capabilities.py    # 单元测试 (规划、并行执行、条件分支/回滚、v3 自适应)
+│   ├── test_dag_capabilities.py    # 单元测试 (规划、并行执行、条件分支/回滚、v3 自适应)
+│   ├── test_emergent_planning.py   # v5 单元测试 (TODO 列表管理、EmergentPlanner)
+│   └── test_emergent_simple.py     # v5 简单测试脚本 (无需 pytest)
 │
 └── docs/                           # 项目文档
     ├── upgrade-plan-v3.md          #   v3 升级计划 (含完成状态)
     ├── hybrid-plan-routing-v4.md   #   v4 混合规划路由说明
     ├── dynamic-features-v1-vs-v2.md#   v1→v2→v3 动态性对比分析
-    └── data-structures-and-algorithms.md  # 数据结构与算法详解
+    ├── emergent-planning-v5.md     #   v5 隐式规划系统详解
+    ├── emergent-planning-test-scenarios-v5.md  # v5 测试用例集
+    ├── data-structures-and-algorithms.md  # 数据结构与算法详解
+    ├── codemap-v4.md               #   完整代码地图 (已更新为 v5)
+    └── planning-test-scenarios-v4.md  # v4 测试用例集
 ```
 
 ## Quick Start
@@ -221,11 +234,12 @@ You > 帮我调研 Python 的异步编程模型，并生成一份简要报告保
 python main.py "计算前 10 个斐波那契数并保存到文件"
 ```
 
-**强制规划路径**（调试用）— 通过环境变量指定 v1 或 v2：
+**强制规划路径**（调试用）— 通过环境变量指定 v1/v2/v5：
 
 ```bash
-PLAN_MODE=simple python main.py   # 始终使用扁平计划 (v1)
+PLAN_MODE=simple python main.py    # 始终使用扁平计划 (v1)
 PLAN_MODE=complex python main.py   # 始终使用 DAG 计划 (v2)
+PLAN_MODE=emergent python main.py  # 始终使用隐式规划 (v5)
 ```
 
 **详细日志模式** — 显示 DEBUG 级别日志：
@@ -240,7 +254,14 @@ python main.py -v "搜索 Python 最新版本"
 测试不依赖 LLM API，通过 Mock 验证 DAG 基础设施：
 
 ```bash
+# v2/v3/v4 DAG 测试
 python -m pytest tests/test_dag_capabilities.py -v
+
+# v5 隐式规划测试
+python -m pytest tests/test_emergent_planning.py -v
+
+# v5 简单测试（无需 pytest）
+python tests/test_emergent_simple.py
 ```
 
 输出示例：
@@ -297,7 +318,10 @@ tests/test_dag_capabilities.py::TestAdaptivePlanningIntegration::test_adaptive_p
 | `CODE_EXEC_TIMEOUT` | `30` | Python 代码执行超时 (秒) |
 | `SANDBOX_DIR` | `~/.manus_demo/sandbox` | 文件操作沙箱目录 |
 | `MEMORY_DIR` | `~/.manus_demo` | 长期记忆存储目录 |
-| `PLAN_MODE` | `auto` | (v4) 规划路由：`auto`=混合分类 / `simple`=强制 v1 / `complex`=强制 v2 |
+| `PLAN_MODE` | `auto` | (v4) 规划路由：`auto`=混合分类 / `simple`=强制 v1 / `complex`=强制 v2 / `emergent`=强制 v5 |
+| `EMERGENT_PLANNING_ENABLED` | `true` | (v5) 是否启用隐式规划模式 |
+| `MAX_TODO_ITEMS` | `20` | (v5) TODO 列表最大项数 |
+| `TODO_COMPRESSION_THRESHOLD` | `0.8` | (v5) 上下文窗口使用率达到 80% 时压缩 TODO |
 | `ADAPTIVE_PLANNING_ENABLED` | `true` | (v3) 是否启用超步间自适应规划 |
 | `ADAPT_PLAN_INTERVAL` | `1` | (v3) 每隔几个超步执行一次自适应检查 |
 | `ADAPT_PLAN_MIN_COMPLETED` | `1` | (v3) 至少完成几个 ACTION 节点后才启动自适应 |

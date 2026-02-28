@@ -8,6 +8,7 @@ The orchestrator manages the full lifecycle of a task:
   3. Route to appropriate planning path:
      - simple: v1 flat Plan -> sequential execution -> reflect
      - complex: v2 DAG -> parallel super-step execution -> reflect_dag
+     - emergent: v5 emergent planning via TODO list (Claude Code style)
   4. Handle re-planning if reflection fails
   5. Store learnings in long-term memory
 
@@ -17,13 +18,16 @@ Orchestrator 管理任务的完整生命周期：
   3. 路由到对应规划路径：
      - simple：v1 扁平 Plan -> 顺序执行 -> reflect
      - complex：v2 DAG -> 并行 Super-step 执行 -> reflect_dag
+     - emergent：v5 隐式规划（Claude Code 风格）-> TODO 列表管理 -> 汇总结果
   4. 若反思失败则处理重规划
   5. 将学习成果存入长期记忆
 
 v2: DAG-based execution with parallel super-steps.
 v4: Hybrid routing — automatically selects v1 or v2 based on task complexity.
+v5: Added emergent planning path — Claude Code style TODO list management.
 v2：基于 DAG 的并行 Super-step 执行。
 v4：混合路由——根据任务复杂度自动选择 v1 或 v2 路径。
+v5：新增隐式规划路径——Claude Code 风格的 TODO 列表管理。
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ import logging
 from typing import Any, Callable
 
 import config
+from agents.emergent_planner import EmergentPlannerAgent
 from agents.executor import ExecutorAgent
 from agents.planner import PlannerAgent
 from agents.reflector import ReflectorAgent
@@ -51,7 +56,7 @@ logger = logging.getLogger(__name__)
 class OrchestratorAgent:
     """
     Top-level agent that orchestrates the hybrid Plan-Execute-Reflect pipeline.
-    顶层智能体，编排混合「规划-执行-反思」流水线。
+    顶层智能体，编排混合「规划 - 执行 - 反思」流水线。
 
     v4 Architecture (hybrid routing):
     v4 架构（混合路由）：
@@ -64,21 +69,21 @@ class OrchestratorAgent:
         [Planner.classify_task()] ── two-stage hybrid classifier
                                      （两阶段混合分类器：规则快筛 + LLM 兜底）
            |
-      +----+----+
-      |         |
-    simple    complex
-      |         |
-      v         v
-    [Planner.create_plan()]    [Planner.create_dag()]
-    flat 2-6 steps              3-level DAG
-      |                           |
-      v                           v
-    [Executor] sequential       [DAGExecutor] parallel super-steps
-      |                           |
-      v                           v
-    [Reflector.reflect()]      [Reflector.reflect_dag()]
-      |                           |
-      v                           v
+      +----+----+----+
+      |    |    |
+    simple complex emergent
+      |    |    |
+      v    v    v
+    [Planner.create_plan()]    [Planner.create_dag()]    [EmergentPlanner.execute()]
+    flat 2-6 steps              3-level DAG               TODO list management
+      |                           |                        |
+      v                           v                        v
+    [Executor] sequential       [DAGExecutor] parallel    [while(tool_use)]
+      |                           |                        |
+      v                           v                        v
+    [Reflector.reflect()]      [Reflector.reflect_dag()]  [compile results]
+      |                           |                        |
+      v                           v                        v
     Final Answer ── stored in long-term memory（存入长期记忆）
     """
 
@@ -99,6 +104,11 @@ class OrchestratorAgent:
             context_manager=self.context_manager,
         )
         self.reflector = ReflectorAgent(self.llm_client, self.context_manager)
+        self.emergent_planner = EmergentPlannerAgent(
+            self.llm_client,
+            tools=tools or [],
+            context_manager=self.context_manager,
+        )
 
         # Memory & knowledge（记忆和知识检索）
         self.short_term = ShortTermMemory()    # 短期记忆：当前会话上下文
@@ -124,10 +134,10 @@ class OrchestratorAgent:
         流程：
           1. Gather context (memory + knowledge) / 收集上下文
           2. Classify task complexity (rules + LLM fallback) / 分类任务复杂度
-          3a. Simple -> v1 flat plan -> sequential execute -> reflect
-              简单 -> v1 扁平计划 -> 顺序执行 -> 反思
-          3b. Complex -> v2 DAG -> parallel super-step execute -> reflect_dag
-              复杂 -> v2 DAG -> 并行 Super-step 执行 -> 反思
+          3. Route to appropriate planning mode:
+             - simple: v1 flat plan -> sequential execute -> reflect
+             - complex: v2 DAG -> parallel super-step execute -> reflect_dag
+             - emergent: v5 emergent planning via TODO list
           4. Store in memory / 存入长期记忆
         """
         self._emit("task_start", {"task": task})
@@ -150,11 +160,15 @@ class OrchestratorAgent:
             plan = await self.planner.create_plan(task, combined_context)
             self._emit("plan", plan)
             final_answer = await self._execute_and_reflect_simple(task, plan, combined_context)
-        else:
+        elif complexity == "complex":
             self._emit("phase", "Planning (v2 hierarchical DAG)...")
             dag = await self.planner.create_dag(task, combined_context)
             self._emit("dag_created", dag)
             final_answer = await self._execute_dag_and_reflect(dag)
+        else:
+            # v5: Emergent planning mode (Claude Code style)
+            self._emit("phase", "Planning (v5 emergent via TODO list)...")
+            final_answer = await self._execute_emergent(task, combined_context)
 
         # --- Phase 4: Store in memory ---
         # --- 阶段 4：存入长期记忆 ---
@@ -193,7 +207,7 @@ class OrchestratorAgent:
 
     # ------------------------------------------------------------------
     # Simple Execute-Reflect loop (v1 path)
-    # 简单执行-反思循环（v1 路径）
+    # 简单执行 - 反思循环（v1 路径）
     # ------------------------------------------------------------------
 
     async def _execute_and_reflect_simple(
@@ -281,8 +295,27 @@ class OrchestratorAgent:
         return "\n\n".join(r.output for r in successful)
 
     # ------------------------------------------------------------------
+    # Emergent Planning execution (v5 path)
+    # 隐式规划执行（v5 路径）
+    # ------------------------------------------------------------------
+
+    async def _execute_emergent(self, task: str, context: str) -> str:
+        """
+        Execute task using emergent planning (Claude Code style).
+        使用隐式规划执行任务（Claude Code 风格）。
+
+        This delegates to EmergentPlannerAgent which manages TODO list
+        dynamically during execution.
+        委托给 EmergentPlannerAgent，在执行过程中动态管理 TODO 列表。
+        """
+        self._emit("phase", "Executing with emergent planning (TODO list)...")
+        final_answer = await self.emergent_planner.execute(task, context)
+        self._emit("phase", "Emergent planning completed.")
+        return final_answer
+
+    # ------------------------------------------------------------------
     # DAG Execute-Reflect loop (v2 path)
-    # DAG 执行-反思循环（v2 路径）
+    # DAG 执行 - 反思循环（v2 路径）
     # ------------------------------------------------------------------
 
     async def _execute_dag_and_reflect(self, dag: TaskDAG) -> str:
