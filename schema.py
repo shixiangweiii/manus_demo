@@ -434,6 +434,16 @@ class TodoList(BaseModel):
             self.todos[todo_id].status = TodoStatus.IN_PROGRESS
             self.todos[todo_id].updated_at = time.time()
 
+    def mark_pending(self, todo_id: int) -> None:
+        """
+        Mark a TODO as pending (for retry after failure).
+        将 TODO 标记为等待执行（用于失败后重试）。
+        修复 Critical #3: 状态机不闭合问题。
+        """
+        if todo_id in self.todos:
+            self.todos[todo_id].status = TodoStatus.PENDING
+            self.todos[todo_id].updated_at = time.time()
+
     def is_complete(self) -> bool:
         """
         Check if all TODOs are completed.

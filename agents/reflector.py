@@ -113,7 +113,7 @@ class ReflectorAgent(BaseAgent):
         )
 
         try:
-            data = await self.think_json(prompt, temperature=0.1)  # 低温度保证判断稳定性
+            data = await self.think_json(prompt, temperature=0.1)
             passed = data.get("passed", True)
             reason = data.get("reason", "")
             logger.info(
@@ -122,9 +122,10 @@ class ReflectorAgent(BaseAgent):
             )
             return passed
         except Exception as exc:
-            # 验证失败时默认通过，避免因 LLM 异常阻断正常流程
-            logger.warning("[Reflector] Exit criteria check failed for %s: %s. Defaulting to pass.", node.id, exc)
-            return True
+            # 修复 High #4: 验证失败时返回 False，触发重规划
+            # 而不是默认通过（默认通过会抑制重规划，导致失败被静默放过）
+            logger.error("[Reflector] Exit criteria check failed for %s: %s. Marking as failed to trigger replan.", node.id, exc)
+            return False
 
     # ------------------------------------------------------------------
     # Full DAG reflection (v2)
@@ -176,13 +177,14 @@ class ReflectorAgent(BaseAgent):
                 suggestions=data.get("suggestions", []),
             )
         except Exception as exc:
-            logger.error("[Reflector] Failed to parse reflection: %s", exc)
-            # 解析失败时默认通过，避免因 LLM 异常导致无限重规划
+            # 修复 High #4: 解析失败时返回 False，触发重规划
+            # 而不是默认通过（默认通过会抑制重规划，导致失败被静默放过）
+            logger.error("[Reflector] Failed to parse reflection: %s. Triggering replan.", exc)
             reflection = Reflection(
-                passed=True,
-                score=0.5,
-                feedback=f"Reflection parsing failed: {exc}. Defaulting to pass.",
-                suggestions=[],
+                passed=False,
+                score=0.3,
+                feedback=f"Reflection parsing failed: {exc}. Re-planning recommended.",
+                suggestions=["Check LLM output format", "Retry with simpler prompt"],
             )
 
         logger.info(

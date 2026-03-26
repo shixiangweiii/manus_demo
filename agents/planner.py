@@ -146,15 +146,16 @@ You MUST respond with a valid JSON object in this exact format:
 
 class PlannerAgent(BaseAgent):
     """
-    Hybrid planner with automatic v1/v2 routing.
-    混合规划智能体，自动路由 v1 扁平计划 / v2 DAG 分层计划。
+    Hybrid planner with automatic v1/v2/v5 routing.
+    混合规划智能体，自动路由 v1 扁平计划 / v2 DAG 分层计划 / v5 隐式规划。
 
     Workflow:
     工作流程：
-      1. classify_task()     -> Two-stage hybrid classifier (rules + LLM fallback)
-                                两阶段混合分类器（规则快筛 + LLM 兜底）
+      1. classify_task()     -> Three-stage hybrid classifier (rules + LLM fallback)
+                                三阶段混合分类器（规则快筛 + LLM 兜底）
       2a. create_plan()      -> v1 flat plan (simple tasks / 简单任务)
       2b. create_dag()       -> v2 hierarchical DAG (complex tasks / 复杂任务)
+      2c. [EmergentPlanner]  -> v5 emergent planning (exploratory tasks / 探索性任务)
       3. replan/replan_subtree() -> Re-planning for respective path
                                     各路径对应的重规划方法
     """
@@ -181,6 +182,18 @@ class PlannerAgent(BaseAgent):
         r"|\bsearch\b|\bfind\b|\banalyze\b|\bcalculate\b|\bgenerate\b|\bcreate\b"
         r"|\bwrite\b|\bdownload\b|\bsave\b|\bcompare\b|\bsummarize\b|\btranslate\b"
         r"|\bbuild\b|\bdeploy\b|\btest\b|\bscrape\b|\bcrawl\b|\bcollect\b|\bresearch\b",
+        re.IGNORECASE,
+    )
+    # v5: 探索性/不确定性任务的关键词模式（适合隐式规划）
+    _EXPLORATORY_PATTERN = re.compile(
+        r"探索|调研|研究|分析.*并.*建议|检查.*并.*修复|优化|改进|评估|审查|review"
+        r"|investigate|explore|research|analyze.*and.*suggest|check.*and.*fix"
+        r"|optimize|improve|evaluate|assess|review|audit",
+        re.IGNORECASE,
+    )
+    _UNCERTAINTY_PATTERN = re.compile(
+        r"不确定|可能|也许|大概|尝试|看看|试着|了解"
+        r"|\buncertain\b|\bmaybe\b|\bperhaps\b|\bpossibly\b|\btry\b|\bexplore\b|\binvestigate\b",
         re.IGNORECASE,
     )
 
@@ -233,13 +246,15 @@ class PlannerAgent(BaseAgent):
         Stage 1：基于规则启发式的快速分类器。
 
         Scores the task text on multiple dimensions. Returns:
-          - "simple"   if score <= -2  (strongly simple signals)
-          - "complex"  if score >= 3   (strongly complex signals)
+          - "simple"    if score <= -2  (strongly simple signals)
+          - "complex"   if score >= 3   (strongly complex signals)
+          - "emergent"  if exploratory/uncertainty patterns detected (v5 routing)
           - "ambiguous" otherwise       (needs LLM to decide)
 
         按多个维度对任务文本打分。返回：
           - "simple"    分数 <= -2（强简单信号）
           - "complex"   分数 >= 3 （强复杂信号）
+          - "emergent"  探索性/不确定性模式检测到时（v5 路由）
           - "ambiguous" 其他（需要 LLM 裁决）
         """
         score = 0
@@ -274,6 +289,14 @@ class PlannerAgent(BaseAgent):
         elif action_verb_count <= 1:
             score -= 1
 
+        # 修复 High #7: 检测探索性/不确定性任务模式
+        exploratory_hits = len(self._EXPLORATORY_PATTERN.findall(task))
+        uncertainty_hits = len(self._UNCERTAINTY_PATTERN.findall(task))
+        if exploratory_hits >= 1 or uncertainty_hits >= 1:
+            logger.debug("[Planner] Detected exploratory/uncertainty patterns: exploratory=%d, uncertainty=%d",
+                         exploratory_hits, uncertainty_hits)
+            return "emergent"
+
         logger.debug("[Planner] Rule score for '%s...': %d", task[:40], score)
 
         if score <= -2:
@@ -290,23 +313,26 @@ class PlannerAgent(BaseAgent):
         Prompt is kept minimal (~60 input tokens) with temperature=0.0
         for deterministic output. Defaults to "complex" on failure.
 
+        修复 High #7: 添加 "emergent" 选项，用于探索性/开放性任务。
+
         Prompt 保持极简（~60 输入 tokens），temperature=0.0 确保确定性输出。
         失败时默认降级为 "complex"。
         """
         self.reset()
         prompt = (
-            'Classify as "simple" or "complex":\n'
+            'Classify as "simple", "complex", or "emergent":\n'
             "- simple: single clear action, 1-2 steps, no parallel/conditional needs\n"
-            "- complex: multi-phase, 3+ steps, parallel work, conditional logic, or research+analysis\n\n"
+            "- complex: multi-phase, 3+ steps, parallel work, conditional logic, or research+analysis\n"
+            "- emergent: open-ended exploration, iterative discovery, uncertain outcomes, or iterative research\n\n"
             f"Task: {task}\n\n"
-            'JSON: {{"complexity": "simple"|"complex", "reason": "..."}}'
+            'JSON: {{"complexity": "simple"|"complex"|"emergent", "reason": "..."}}'
         )
 
         try:
             data = await self.think_json(prompt, temperature=0.0)
             result = data.get("complexity", "complex").lower()
             reason = data.get("reason", "")
-            if result not in ("simple", "complex"):
+            if result not in ("simple", "complex", "emergent"):
                 result = "complex"
             logger.info("[Planner] LLM classifier: %s (%s)", result, reason[:80])
             return result
@@ -719,6 +745,7 @@ class PlannerAgent(BaseAgent):
 
             # --- Action nodes under this subgoal ---
             # --- 创建该 SubGoal 下的 Action 节点 ---
+            subgoal_action_ids: list[str] = []  # 追踪该 SubGoal 下的所有 Action ID
             for act in sg.get("actions", []):
                 act_id = str(act.get("id", f"act_{sg_id}_{len(nodes)}"))
                 act_node = TaskNode(
@@ -734,10 +761,11 @@ class PlannerAgent(BaseAgent):
                         risk_level=act.get("risk_level", "low"),
                         fallback_strategy=act.get("fallback_strategy", ""),
                     ),
-                    parent_id=sg_id,           # Action 的父节点是所属 SubGoal
-                    rollback_action=act.get("rollback"),  # 可选的回滚操作描述
+                    parent_id=sg_id,
+                    rollback_action=act.get("rollback"),
                 )
                 nodes[act_id] = act_node
+                subgoal_action_ids.append(act_id)
 
                 # SubGoal -> Action 依赖边（Action 需在所属 SubGoal 之后执行）
                 edges.append(TaskEdge(source=sg_id, target=act_id, edge_type=EdgeType.DEPENDENCY))
@@ -748,13 +776,33 @@ class PlannerAgent(BaseAgent):
                         source=str(dep_id), target=act_id, edge_type=EdgeType.DEPENDENCY,
                     ))
 
-                # 条件边（若 action 有条件限制，添加 CONDITIONAL 边）
+                # 修复 High #6: conditional 边应指向产生结果的 ACTION 节点，而不是 SubGoal
+                # 因为 SubGoal 不执行也不写入 node_results，条件判断会失败
                 condition = act.get("condition")
                 if condition:
+                    # 条件边的 source 指向该 Action 的前一个 Action（如果有的话）
+                    # 否则指向该 action 自己（自己评估自己的条件）
+                    cond_source = subgoal_action_ids[-2] if len(subgoal_action_ids) >= 2 else act_id
                     edges.append(TaskEdge(
-                        source=sg_id, target=act_id,
+                        source=cond_source, target=act_id,
                         edge_type=EdgeType.CONDITIONAL,
                         condition=condition,
+                    ))
+
+                # 修复 High #6: 当 action 有 rollback_action 时，生成 ROLLBACK 边
+                rollback_desc = act.get("rollback")
+                if rollback_desc:
+                    rollback_id = f"rb_{act_id}"
+                    rollback_node = TaskNode(
+                        id=rollback_id,
+                        node_type=NodeType.ACTION,
+                        description=rollback_desc,
+                        parent_id=sg_id,
+                    )
+                    nodes[rollback_id] = rollback_node
+                    edges.append(TaskEdge(
+                        source=act_id, target=rollback_id,
+                        edge_type=EdgeType.ROLLBACK,
                     ))
 
         # Deduplicate edges（去重，避免重复边导致计算错误）
@@ -810,7 +858,13 @@ class PlannerAgent(BaseAgent):
             edges=merged_edges,
             context=old_dag.state.context,
         )
-        # 携带已完成节点的结果（避免重新执行）
-        result_dag.state.node_results = dict(old_dag.state.node_results)
+
+        # 修复 Medium #9: 清理被移除节点的 node_results，防止历史输出污染反思评估
+        # 只保留仍在 merged_nodes 中的节点的旧结果
+        valid_node_ids = set(merged_nodes.keys())
+        result_dag.state.node_results = {
+            k: v for k, v in old_dag.state.node_results.items()
+            if k in valid_node_ids
+        }
 
         return result_dag

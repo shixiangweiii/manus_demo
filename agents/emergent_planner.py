@@ -177,8 +177,9 @@ class EmergentPlannerAgent(BaseAgent):
                 self._todo_list.mark_completed(current_todo.id, result.output)
                 self._emit("todo_complete", {"todo": current_todo, "result": result})
             else:
-                # 执行失败，标记为 PENDING 以便重试
+                # 修复 Critical #3: 失败时将 TODO 状态回退为 PENDING 以便重试
                 logger.warning("[EmergentPlanner] TODO %d failed: %s", current_todo.id, result.output[:200])
+                self._todo_list.mark_pending(current_todo.id)
                 self._emit("todo_failed", {"todo": current_todo, "result": result})
 
             # 检查是否需要添加新 TODO（基于执行结果）

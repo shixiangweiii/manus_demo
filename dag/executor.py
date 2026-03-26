@@ -123,9 +123,20 @@ class DAGExecutor:
             step += 1
             ready = dag.get_ready_nodes()
             if not ready:
-                # No ready nodes but DAG not complete -> stuck (failed nodes blocking)
-                # 没有就绪节点但 DAG 未完成 -> 被阻塞（通常是有失败节点阻断了下游）
+                # 修复 High #5: 检测阻塞并尝试恢复
+                # 没有就绪节点但 DAG 未完成 -> 被阻塞（可能由失败/跳过节点阻断下游）
                 logger.warning("[DAGExecutor] No ready nodes at super-step %d. %s", step, dag.summary())
+
+                # 尝试恢复：强制推进所有 PENDING 节点变为 READY（解除假性阻塞）
+                # 这处理了条件边被错误跳过导致的"假性阻塞"
+                recovered = dag.try_recover_blocked_nodes()
+                if recovered:
+                    logger.info("[DAGExecutor] Recovered %d blocked nodes, retrying...", recovered)
+                    dag.refresh_ready_states()
+                    continue
+
+                # 仍然没有就绪节点，确认是真正阻塞
+                logger.error("[DAGExecutor] DAG is truly stuck. Breaking with partial results.")
                 break
 
             # Filter to only ACTION nodes (GOAL/SUBGOAL are structural)
@@ -218,23 +229,49 @@ class DAGExecutor:
 
     async def _run_node(self, node: TaskNode, dag: TaskDAG) -> StepResult:
         """
-        Execute a single ACTION node via the ReAct executor agent.
-        通过 ReAct 执行智能体执行单个 ACTION 节点。
+        Execute a single ACTION node via a dedicated ReAct executor agent.
+        通过专用的 ReAct 执行智能体执行单个 ACTION 节点。
+
+        修复 Critical #1：并发串话问题
+        为每个并行节点创建独立的 ExecutorAgent 实例，避免多个并发节点
+        共享同一实例的消息历史和 tool_router 统计导致的状态污染。
 
         从 DAGState 中构建节点的输入上下文（汇集依赖节点结果），
         然后委托给 ExecutorAgent 运行 ReAct 循环。
+
+        特殊处理：对于 mock 测试场景（tools 不是 dict），回退到使用原始 executor。
         """
-        # 从集中式 DAGState 中提取该节点所需的上下文（依赖节点的结果）
+        from agents.executor import ExecutorAgent
+        from tools.router import ToolRouter
+        import config
+
         context = dag.state.get_node_context(
             node.id, dag.get_dependency_ids(node.id)
         )
-        # 状态转移：PENDING -> READY -> RUNNING
         if node.status == NodeStatus.PENDING:
             self._sm.transition(node, NodeStatus.READY)
         self._sm.transition(node, NodeStatus.RUNNING)
         self._emit("node_running", {"node": node})
 
-        return await self._executor_agent.execute_node(node, context)
+        tools = self._executor_agent.tools
+        if isinstance(tools, dict) and tools and all(hasattr(v, 'execute') for v in tools.values()):
+            tool_list = list(tools.values())
+            tool_keys = list(tools.keys())
+
+            max_iter = self._executor_agent.max_iterations
+            if not isinstance(max_iter, int):
+                max_iter = getattr(config, 'MAX_REACT_ITERATIONS', 20)
+
+            node_executor = ExecutorAgent(
+                llm_client=self._executor_agent.llm_client,
+                tools=tool_list,
+                context_manager=self._executor_agent.context_manager,
+                max_iterations=max_iter,
+                tool_router=ToolRouter(available_tools=tool_keys),
+            )
+            return await node_executor.execute_node(node, context)
+        else:
+            return await self._executor_agent.execute_node(node, context)
 
     # ------------------------------------------------------------------
     # Exit criteria validation

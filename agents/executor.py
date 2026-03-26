@@ -225,6 +225,7 @@ class ExecutorAgent(BaseAgent):
                 )
 
             # LLM 发起了工具调用，依次执行并记录结果（Observe 步骤）
+            has_error = False
             for tool_call in response_msg.tool_calls:
                 func_name = tool_call.function.name
                 try:
@@ -237,23 +238,35 @@ class ExecutorAgent(BaseAgent):
                 tool = self.tools.get(func_name)
                 if tool is None:
                     result = f"Error: Unknown tool '{func_name}'"
-                    self.tool_router.record_failure(node_id, func_name)  # v3
+                    self.tool_router.record_failure(node_id, func_name)
+                    has_error = True
                 else:
                     try:
                         result = await tool.execute(**func_args)
-                        self.tool_router.record_success(node_id, func_name)  # v3
+                        self.tool_router.record_success(node_id, func_name)
                     except Exception as exc:
-                        result = f"Tool execution error: {exc}"
-                        self.tool_router.record_failure(node_id, func_name)  # v3
+                        result = f"Error: Tool execution error: {exc}"
+                        self.tool_router.record_failure(node_id, func_name)
+                        has_error = True
+
+                # 修复 Critical #2: 检测 Error 字符串
+                # 如果工具返回以 "Error:" 开头的字符串，标记为失败
+                if isinstance(result, str) and result.startswith("Error:"):
+                    has_error = True
 
                 # 记录工具调用详情（用于 UI 展示）
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
-                    result=result[:1000],  # 截断过长结果，避免占用过多 Token
+                    result=result[:1000],
                 ))
                 # 将工具结果以 tool 角色加入消息历史，供 LLM 下一轮观察
-                self.add_tool_result(tool_call.id, result)
+                # 如果检测到错误，在结果中添加明确的失败标记，引导 LLM 停止执行
+                if has_error:
+                    result_with_marker = f"[TOOL ERROR] {result}\n\nIMPORTANT: The tool returned an error. Please analyze the error and decide whether to retry with different parameters or report the failure."
+                else:
+                    result_with_marker = result
+                self.add_tool_result(tool_call.id, result_with_marker)
 
         # 超过最大迭代次数，返回失败
         logger.warning("[Executor] %s hit max iterations (%d)", step_id, self.max_iterations)

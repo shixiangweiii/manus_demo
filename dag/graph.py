@@ -365,6 +365,36 @@ class TaskDAG:
             if n.node_type == NodeType.ACTION and n.status == NodeStatus.COMPLETED
         )
 
+    def try_recover_blocked_nodes(self) -> int:
+        """
+        修复 High #5: 尝试恢复被阻塞的节点。
+
+        当 DAG 执行中出现"假性阻塞"（条件边被错误跳过导致依赖链断裂）时，
+        此方法尝试强制推进所有 PENDING 节点变为 READY，以便继续执行。
+
+        返回恢复的节点数量。如果返回 0，说明没有可恢复的节点或确实是真正阻塞。
+
+        Returns:
+            恢复的 PENDING 节点数量。
+        """
+        recovered_count = 0
+        for node in self.nodes.values():
+            if node.status == NodeStatus.PENDING:
+                deps = self.get_dependency_ids(node.id)
+                # 检查是否所有依赖节点都已到达终态（COMPLETED, SKIPPED, ROLLED_BACK）
+                terminal_statuses = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
+                all_deps_terminal = all(
+                    self.nodes.get(dep_id, None) is not None and
+                    self.nodes[dep_id].status in terminal_statuses
+                    for dep_id in deps
+                )
+                if all_deps_terminal or not deps:
+                    node.status = NodeStatus.READY
+                    recovered_count += 1
+                    logger.info("[DAG] Recovered blocked node: %s", node.id)
+
+        return recovered_count
+
     # ------------------------------------------------------------------
     # Checkpointing (LangGraph-inspired)
     # 检查点（灵感来自 LangGraph）
@@ -431,8 +461,9 @@ class TaskDAG:
 
     def _validate_dag(self) -> None:
         """
-        Basic validation: check edges reference existing nodes.
-        基础校验：检查所有边的端点都存在于 nodes 中。
+        Basic validation: check edges reference existing nodes and detect cycles.
+        基础校验：检查所有边的端点都存在于 nodes 中，并检测环。
+        修复 Medium #8: 添加无环检测，防止 DAG 中存在循环依赖导致死锁。
         """
         node_ids = set(self.nodes.keys())
         for e in self.edges:
@@ -440,6 +471,28 @@ class TaskDAG:
                 logger.warning("[DAG] Edge source '%s' not found in nodes", e.source)
             if e.target not in node_ids:
                 logger.warning("[DAG] Edge target '%s' not found in nodes", e.target)
+
+        # 修复 Medium #8: 使用 Kahn 算法检测 DEPENDENCY 边中的环
+        in_degree = {nid: 0 for nid in node_ids}
+        for e in self.edges:
+            if e.edge_type == EdgeType.DEPENDENCY:
+                in_degree[e.target] = in_degree.get(e.target, 0) + 1
+
+        queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
+        visited = 0
+        while queue:
+            nid = queue.popleft()
+            visited += 1
+            for e in self.edges:
+                if e.source == nid and e.edge_type == EdgeType.DEPENDENCY:
+                    in_degree[e.target] -= 1
+                    if in_degree[e.target] == 0:
+                        queue.append(e.target)
+
+        if visited != len(node_ids):
+            unvisited = [nid for nid in node_ids if in_degree.get(nid, 0) > 0]
+            logger.error("[DAG] Cycle detected! Unvisited nodes: %s", unvisited)
+            raise ValueError(f"Cycle detected in DAG! Nodes involved: {unvisited}")
 
     # ------------------------------------------------------------------
     # Display helpers

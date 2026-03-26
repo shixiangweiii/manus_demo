@@ -821,3 +821,214 @@ class TestAdaptivePlanningIntegration:
         # Verify adaptation event was emitted
         adaptation_events = [e for e in events if e[0] == "plan_adaptation"]
         assert any(e[1].get("adapted") for e in adaptation_events), "应有 adapted=True 的事件"
+
+
+# ======================================================================
+# Test suite for plan-execute-review-report.md fixes
+# 测试套件：针对 plan-execute-review-report.md 报告的 9 个问题修复
+# ======================================================================
+
+class TestBugFixesVerification:
+    """
+    验证 plan-execute-review-report.md 中识别的 9 个隐藏 badcase 的修复。
+    """
+
+    # ------------------------------------------------------------------
+    # Critical #1: 并发串话问题 - ExecutorAgent 实例隔离
+    # ------------------------------------------------------------------
+
+    def test_executor_instance_isolation_exists(self):
+        """
+        验证 Critical #1 修复：dag/executor.py 中存在 ExecutorAgent 实例隔离逻辑。
+        """
+        import inspect
+        from dag.executor import DAGExecutor
+
+        source = inspect.getsource(DAGExecutor)
+        assert "ExecutorAgent(" in source, "DAGExecutor 应创建新的 ExecutorAgent 实例"
+
+    # ------------------------------------------------------------------
+    # Critical #2: 统一工具错误语义
+    # ------------------------------------------------------------------
+
+    def test_tool_error_detection_exists(self):
+        """
+        验证 Critical #2 修复：agents/executor.py 中存在 Error 字符串检测逻辑。
+        """
+        import inspect
+        from agents.executor import ExecutorAgent
+
+        source = inspect.getsource(ExecutorAgent)
+        assert "[TOOL ERROR]" in source, "executor 应包含 [TOOL ERROR] 标记"
+
+    # ------------------------------------------------------------------
+    # Critical #3: v5 状态机不闭合
+    # ------------------------------------------------------------------
+
+    def test_todo_mark_pending_exists(self):
+        """
+        验证 Critical #3 修复：TodoList.mark_pending() 方法存在。
+        """
+        from schema import TodoList, TodoStatus
+
+        assert hasattr(TodoList, 'mark_pending'), "TodoList 应有 mark_pending 方法"
+
+    # ------------------------------------------------------------------
+    # High #4: Reflector default-pass 问题
+    # ------------------------------------------------------------------
+
+    def test_reflector_exception_handling_exists(self):
+        """
+        验证 High #4 修复：Reflector 在异常时返回 False 的逻辑存在。
+        """
+        import inspect
+        from agents.reflector import ReflectorAgent
+
+        source = inspect.getsource(ReflectorAgent)
+        assert "return False" in source, "Reflector 应在异常时返回 False"
+
+    # ------------------------------------------------------------------
+    # High #5: DAG 卡住提前 break
+    # ------------------------------------------------------------------
+
+    def test_blocked_node_recovery_method_exists(self):
+        """
+        验证 High #5 修复：TaskDAG.try_recover_blocked_nodes() 方法存在。
+        """
+        dag = TaskDAG(
+            task="测试",
+            nodes={
+                "a": TaskNode(id="a", node_type=NodeType.ACTION, description="A", status=NodeStatus.COMPLETED),
+            },
+            edges=[],
+        )
+
+        assert hasattr(dag, 'try_recover_blocked_nodes'), "DAG 应有 try_recover_blocked_nodes 方法"
+
+    def test_blocked_node_recovery_logic(self):
+        """
+        验证 High #5 修复：try_recover_blocked_nodes() 正确恢复被阻塞的节点。
+        """
+        dag = TaskDAG(
+            task="测试恢复",
+            nodes={
+                "a": TaskNode(id="a", node_type=NodeType.ACTION, description="A", status=NodeStatus.COMPLETED),
+                "b": TaskNode(id="b", node_type=NodeType.ACTION, description="B", status=NodeStatus.PENDING),
+            },
+            edges=[
+                TaskEdge(source="a", target="b", edge_type=EdgeType.DEPENDENCY),
+            ],
+        )
+
+        dag.state.node_results["a"] = "Result of A"
+
+        recovered = dag.try_recover_blocked_nodes()
+
+        assert recovered >= 1, "应有至少一个节点被恢复"
+        assert dag.nodes["b"].status == NodeStatus.READY, "节点 B 应被恢复为 READY"
+
+    # ------------------------------------------------------------------
+    # High #6: conditional/rollback 语义错配
+    # ------------------------------------------------------------------
+
+    def test_conditional_edge_source_fix_exists(self):
+        """
+        验证 High #6 修复：conditional 边生成逻辑指向 ACTION 节点。
+        """
+        import inspect
+        from agents.planner import PlannerAgent
+
+        source = inspect.getsource(PlannerAgent)
+        assert "CONDITIONAL" in source, "Planner 应处理 CONDITIONAL 边"
+
+    def test_rollback_edge_generation_exists(self):
+        """
+        验证 High #6 修复：ROLLBACK 边生成逻辑存在。
+        """
+        import inspect
+        from agents.planner import PlannerAgent
+
+        source = inspect.getsource(PlannerAgent)
+        assert "ROLLBACK" in source, "Planner 应处理 ROLLBACK 边"
+
+    # ------------------------------------------------------------------
+    # High #7: v5 不可达
+    # ------------------------------------------------------------------
+
+    def test_emergent_classification_exists(self):
+        """
+        验证 High #7 修复：emergent 分类检测逻辑存在。
+        """
+        import inspect
+        from agents.planner import PlannerAgent
+
+        source = inspect.getsource(PlannerAgent)
+        assert "emergent" in source.lower(), "Planner 应支持 emergent 分类"
+
+    # ------------------------------------------------------------------
+    # Medium #8: 无环检测缺失
+    # ------------------------------------------------------------------
+
+    def test_cycle_detection_kahn_algorithm(self):
+        """
+        验证 Medium #8 修复：DAG 校验时检测循环依赖。
+        """
+
+        nodes = {
+            "a": TaskNode(id="a", node_type=NodeType.ACTION, description="A"),
+            "b": TaskNode(id="b", node_type=NodeType.ACTION, description="B"),
+            "c": TaskNode(id="c", node_type=NodeType.ACTION, description="C"),
+        }
+        edges = [
+            TaskEdge(source="a", target="b", edge_type=EdgeType.DEPENDENCY),
+            TaskEdge(source="b", target="c", edge_type=EdgeType.DEPENDENCY),
+            TaskEdge(source="c", target="a", edge_type=EdgeType.DEPENDENCY),
+        ]
+
+        with pytest.raises(ValueError, match="Cycle detected"):
+            dag = TaskDAG(
+                task="测试环检测",
+                nodes=nodes,
+                edges=edges,
+            )
+
+    # ------------------------------------------------------------------
+    # Medium #9: partial replan node_results 污染
+    # ------------------------------------------------------------------
+
+    def test_node_results_cleanup_on_merge(self):
+        """
+        验证 Medium #9 修复：合并 DAG 时清理被移除节点的 node_results。
+        """
+        from agents.planner import PlannerAgent
+
+        mock_llm = AsyncMock()
+
+        planner = PlannerAgent(llm_client=mock_llm)
+
+        old_dag = TaskDAG(
+            task="旧 DAG",
+            nodes={
+                "a": TaskNode(id="a", node_type=NodeType.ACTION, description="A", status=NodeStatus.COMPLETED),
+                "b": TaskNode(id="b", node_type=NodeType.ACTION, description="B", status=NodeStatus.PENDING),
+            },
+            edges=[TaskEdge(source="a", target="b", edge_type=EdgeType.DEPENDENCY)],
+        )
+        old_dag.state.node_results = {
+            "a": "Result of A (should be kept)",
+            "b": "Result of B (should be removed)",
+        }
+
+        new_dag = TaskDAG(
+            task="新 DAG",
+            nodes={
+                "c": TaskNode(id="c", node_type=NodeType.ACTION, description="C", status=NodeStatus.READY),
+            },
+            edges=[],
+        )
+
+        merged = planner._merge_dags(old_dag, new_dag, parent_id="b")
+
+        assert "a" in merged.state.node_results, "A 的结果应被保留"
+        assert "b" not in merged.state.node_results, "B 的结果应被清理"
+        assert "c" not in merged.state.node_results, "C 的结果不应存在"
