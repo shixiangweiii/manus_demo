@@ -6,19 +6,26 @@ Supports any provider that exposes an OpenAI-compatible chat completions endpoin
 (e.g., DeepSeek, Qwen/DashScope, Ollama, vLLM, etc.).
 支持任何暴露 OpenAI 兼容 chat completions 接口的服务商
 （如 DeepSeek、通义千问/DashScope、Ollama、vLLM 等）。
+
+v6.0: Optional retry mechanism with exponential backoff.
+      Set LLM_RETRY_ENABLED=true to enable retries on transient errors.
+      Default: false (backward compatible).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError, APIError, APITimeoutError
 
 import config
 
 logger = logging.getLogger(__name__)
+
+RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIError)
 
 
 class LLMClient:
@@ -26,6 +33,8 @@ class LLMClient:
     Thin async wrapper around an OpenAI-compatible chat completions API.
     OpenAI 兼容 chat completions API 的轻量异步封装。
     所有智能体共享同一个 LLMClient 实例，统一管理 API 凭证和模型配置。
+
+    v6.0: Optional retry mechanism with exponential backoff.
     """
 
     def __init__(
@@ -33,12 +42,24 @@ class LLMClient:
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        retry_enabled: bool | None = None,
+        max_retries: int | None = None,
+        backoff_factor: float | None = None,
     ):
-        self.model = model or config.LLM_MODEL  # 使用的模型名称
+        self.model = model or config.LLM_MODEL
         self._client = AsyncOpenAI(
-            base_url=base_url or config.LLM_BASE_URL,  # API 端点地址
-            api_key=api_key or config.LLM_API_KEY,      # API 密钥
+            base_url=base_url or config.LLM_BASE_URL,
+            api_key=api_key or config.LLM_API_KEY,
         )
+
+        self.retry_enabled = retry_enabled if retry_enabled is not None else config.LLM_RETRY_ENABLED
+        self.max_retries = max_retries if max_retries is not None else config.LLM_RETRY_MAX_ATTEMPTS
+        self.backoff_factor = backoff_factor if backoff_factor is not None else config.LLM_RETRY_BACKOFF_FACTOR
+
+        if self.retry_enabled:
+            logger.info("[LLMClient] Retry enabled (max_attempts=%d, backoff=%.1f)", self.max_retries, self.backoff_factor)
+        else:
+            logger.info("[LLMClient] Retry disabled (backward compatible mode)")
 
     # ------------------------------------------------------------------
     # Core chat completion
@@ -56,15 +77,29 @@ class LLMClient:
         Simple chat completion that returns the assistant's text.
         简单文本对话，返回 assistant 的文本响应。
         用于需要自由文本输出的场景（如 Reflector 的反馈、ContextManager 的摘要）。
+
+        v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
         """
-        resp = await self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,  # 温度控制随机性：0=确定性，1=高随机性
-            max_tokens=max_tokens,
-            **kwargs,
-        )
-        return resp.choices[0].message.content or ""
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
+            try:
+                resp = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+                return resp.choices[0].message.content or ""
+            except RETRYABLE_ERRORS as exc:
+                last_error = exc
+                if self.retry_enabled and attempt < self.max_retries:
+                    wait_time = self.backoff_factor ** attempt
+                    logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+        raise last_error or RuntimeError("LLM call failed")
 
     # ------------------------------------------------------------------
     # Chat with function-calling / tools
@@ -88,17 +123,31 @@ class LLMClient:
         返回原始响应消息对象，调用方可检查 tool_calls 和 content。
         这是 ReAct 循环的核心：让 LLM 自主决策调用哪个工具。
         tool_choice="auto" 让 LLM 自行决定是否调用工具（也可能直接给出文本答案）。
+
+        v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
         """
-        resp = await self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",  # LLM 自主决定是否调用工具
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **kwargs,
-        )
-        return resp.choices[0].message  # 返回原始消息对象（含 tool_calls 字段）
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
+            try:
+                resp = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+                return resp.choices[0].message
+            except RETRYABLE_ERRORS as exc:
+                last_error = exc
+                if self.retry_enabled and attempt < self.max_retries:
+                    wait_time = self.backoff_factor ** attempt
+                    logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+        raise last_error or RuntimeError("LLM call failed")
 
     # ------------------------------------------------------------------
     # Convenience: structured JSON output
