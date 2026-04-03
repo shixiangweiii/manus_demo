@@ -286,7 +286,7 @@ class EmergentPlannerAgent(BaseAgent):
         prompt = (
             f"Review the execution progress and determine if the TODO list needs updates.\n\n"
             f"Current task: {self._todo_list.task}\n\n"
-            f"Last execution result:\n{last_result.output[:500]}\n\n"
+            f"Last execution result:\n{last_result.output[:2000]}\n\n"
             f"Current TODO list:\n{self._get_todo_summary()}\n\n"
             f"Do you need to:\n"
             f"- Add new TODOs (discovered additional work)?\n"
@@ -322,9 +322,21 @@ class EmergentPlannerAgent(BaseAgent):
                             )
                             break
 
+                        # 修复 H3: 验证依赖ID存在
+                        raw_deps = todo_data.get("dependencies", [])
+                        valid_deps = [dep_id for dep_id in raw_deps if dep_id in self._todo_list.todos]
+                        if raw_deps and not valid_deps:
+                            logger.warning(
+                                "[EmergentPlanner] Skipping TODO '%s' - all dependencies %s are invalid",
+                                todo_data.get("description", "")[:50], raw_deps
+                            )
+                            continue
+                        if not todo_data.get("description"):
+                            continue  # 跳过空描述的TODO
+
                         self._todo_list.add_todo(
                             description=todo_data.get("description", ""),
-                            dependencies=todo_data.get("dependencies", []),
+                            dependencies=valid_deps,
                         )
                         current_count += 1
                         logger.info(
@@ -467,7 +479,11 @@ class EmergentPlannerAgent(BaseAgent):
             if "```" in text:
                 text = text.rsplit("```", 1)[0]
             text = text.strip()
-        return json.loads(text)
+        # 修复 M5: 使用处理后的text而不是原始text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {}
 
     def _get_todo_summary(self) -> str:
         """

@@ -301,42 +301,80 @@ class DAGExecutor:
 
     async def _handle_failure(self, node: TaskNode, dag: TaskDAG) -> None:
         """
-        Handle a failed node:
-          1. Execute rollback nodes if any ROLLBACK edges exist
-          2. Skip the failed node's downstream subtree
+        Handle a failed node with enhanced rollback chain management.
 
-        处理失败节点：
-          1. 若存在 ROLLBACK 边，则执行对应的回滚节点
-          2. 将失败节点的下游子树全部标记为 SKIPPED
+        处理失败节点，包含完整的回滚链管理：
+          1. 检测有无 ROLLBACK 边
+          2. 执行回滚节点链，并处理回滚失败情况
+          3. 根据回滚链的整体结果决定原始节点状态
+          4. 级联跳过下游子树
+
+        增强点（P0 优化）：
+          - 回滚节点的异常处理
+          - 回滚链的完整性检查
+          - 部分回滚失败时的状态决策
+          - 详细的日志记录
         """
-        # 三层动态决策：
-        # 1、检测有无 ROLLBACK 边 → 有则执行回滚节点（如清理临时文件），无则直接跳过
-        # 2、将失败节点标记为 ROLLED_BACK 或 SKIPPED → 依据回滚结果动态决定
-        # 3、级联跳过整个下游子树 → 不再执行任何依赖失败节点的后续操作
         rollback_targets = dag.get_rollback_targets(node.id)
+
         if rollback_targets:
-            logger.info("[DAGExecutor] Executing rollback for node %s", node.id)
+            logger.info("[DAGExecutor] Executing rollback chain for node %s (targets: %s)", node.id, rollback_targets)
+
+            rollback_success = True
+            rollback_results = {}
+
             for rb_id in rollback_targets:
                 rb_node = dag.nodes.get(rb_id)
-                if rb_node and rb_node.status == NodeStatus.PENDING:
-                    # 执行回滚节点（通常是清理/撤销操作）
+                if not rb_node:
+                    logger.warning("[DAGExecutor] Rollback target node %s not found in DAG", rb_id)
+                    continue
+
+                if rb_node.status != NodeStatus.PENDING:
+                    logger.info("[DAGExecutor] Rollback node %s already processed: %s", rb_id, rb_node.status.value)
+                    continue
+
+                try:
                     rb_result = await self._run_node(rb_node, dag)
                     dag.state.merge_result(rb_id, rb_result.output)
+                    rollback_results[rb_id] = rb_result
+
                     if rb_result.success:
                         self._sm.transition(rb_node, NodeStatus.COMPLETED)
+                        logger.info("[DAGExecutor] Rollback node %s completed successfully", rb_id)
                     else:
                         self._sm.transition(rb_node, NodeStatus.FAILED)
+                        rollback_success = False
+                        logger.error("[DAGExecutor] Rollback node %s failed: %s", rb_id, rb_result.output[:200])
 
-            # 回滚执行后将原节点标记为 ROLLED_BACK
-            self._sm.transition(node, NodeStatus.ROLLED_BACK)
-            self._emit("node_rollback", {"node": node})
+                except Exception as e:
+                    logger.error("[DAGExecutor] Rollback node %s threw exception: %s", rb_id, str(e))
+                    self._sm.transition(rb_node, NodeStatus.FAILED)
+                    rollback_results[rb_id] = None
+                    rollback_success = False
+
+            # 根据回滚链的整体结果决定原始节点状态
+            if rollback_success:
+                self._sm.transition(node, NodeStatus.ROLLED_BACK)
+                self._emit("node_rollback", {
+                    "node": node,
+                    "success": True,
+                    "rollback_results": {k: v.output if v else "exception" for k, v in rollback_results.items()}
+                })
+                logger.info("[DAGExecutor] Rollback chain completed successfully for node %s", node.id)
+            else:
+                self._sm.transition(node, NodeStatus.SKIPPED)
+                self._emit("node_rollback", {
+                    "node": node,
+                    "success": False,
+                    "rollback_results": {k: v.output if v else "exception" for k, v in rollback_results.items()}
+                })
+                logger.warning("[DAGExecutor] Rollback chain partially failed for node %s, marking as SKIPPED", node.id)
         else:
-            # 没有回滚节点，直接跳过
             self._sm.transition(node, NodeStatus.SKIPPED)
+            self._emit("node_skipped", {"node": node, "reason": "no_rollback_targets"})
+            logger.info("[DAGExecutor] No rollback targets for node %s, marking as SKIPPED", node.id)
 
-        # 无论是否回滚，都要跳过下游子树（避免在不完整状态上继续执行）
-        # 子树跳过的具体实现——通过 BFS 找出所有下游节点
-        dag.mark_subtree_skipped(node.id)
+        dag.mark_subtree_skipped(node.id, self._sm)
 
     # ------------------------------------------------------------------
     # Conditional edge processing
@@ -369,8 +407,8 @@ class DAGExecutor:
                 })
                 if not condition_met:
                     # 条件不满足：跳过目标节点及其整个下游子树
-                    target.status = NodeStatus.SKIPPED
-                    dag.mark_subtree_skipped(target.id)
+                    self._sm.transition(target, NodeStatus.SKIPPED)
+                    dag.mark_subtree_skipped(target.id, self._sm)
                     logger.info(
                         "[DAGExecutor] Condition '%s' not met -> skipping %s",
                         edge.condition, target.id,
@@ -418,6 +456,13 @@ class DAGExecutor:
                 if n.parent_id == node.id
             ]
             if not children:
+                # 空结构节点：没有子节点需要执行，视为完成
+                if node.status in (NodeStatus.PENDING, NodeStatus.READY):
+                    self._sm.transition(node, NodeStatus.READY)
+                if node.status == NodeStatus.READY:
+                    self._sm.transition(node, NodeStatus.RUNNING)
+                if node.status == NodeStatus.RUNNING:
+                    self._sm.transition(node, NodeStatus.COMPLETED)
                 continue
 
             terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
@@ -434,7 +479,7 @@ class DAGExecutor:
                 else:
                     # 所有子节点均被跳过或回滚：结构节点也跳过
                     if node.status in (NodeStatus.PENDING, NodeStatus.READY):
-                        node.status = NodeStatus.SKIPPED
+                        self._sm.transition(node, NodeStatus.SKIPPED)
 
     # ------------------------------------------------------------------
     # Output compilation

@@ -299,9 +299,12 @@ class PlannerAgent(BaseAgent):
 
         logger.debug("[Planner] Rule score for '%s...': %d", task[:40], score)
 
-        if score <= -2:
+        # 修复 M1: 使用更合理的阈值区间
+        # score <= -1: simple (原 -2 过于严格，单点差异导致类别突变)
+        # score >= 2: complex (原 3)
+        if score <= -1:
             return "simple"
-        elif score >= 3:
+        elif score >= 2:
             return "complex"
         return "ambiguous"
 
@@ -850,7 +853,14 @@ class PlannerAgent(BaseAgent):
         for nid, node in new_dag.nodes.items():
             if nid not in merged_nodes:
                 merged_nodes[nid] = node
-        merged_edges.extend(new_dag.edges)
+
+        # 修复 M3: 合并边时去重，避免重复边
+        seen_edges = {(e.source, e.target, e.edge_type.value) for e in merged_edges}
+        for edge in new_dag.edges:
+            edge_key = (edge.source, edge.target, edge.edge_type.value)
+            if edge_key not in seen_edges:
+                merged_edges.append(edge)
+                seen_edges.add(edge_key)
 
         result_dag = TaskDAG(
             task=old_dag.state.task,

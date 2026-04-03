@@ -58,10 +58,34 @@ class TaskDAG:
         nodes: dict[str, TaskNode],
         edges: list[TaskEdge],
         context: str = "",
+        max_checkpoints: int = 20,
+        checkpoint_interval: int = 5,
     ):
+        """
+        初始化 TaskDAG。
+
+        Args:
+            task: 任务描述
+            nodes: 初始节点字典
+            edges: 初始边列表
+            context: 额外的上下文信息
+            max_checkpoints: 最大 checkpoint 数量（P2 优化），超过后删除最旧的
+            checkpoint_interval: checkpoint 保存间隔（P2 优化），每 N 次调用保存一次
+        """
         self.nodes = nodes    # 所有节点，key 为节点 ID
         self.edges = edges    # 所有边
         self.state = DAGState(task=task, context=context)  # 集中式共享状态
+
+        # 简化的 Checkpoint 配置（P2 优化）
+        self._max_checkpoints = max_checkpoints
+        self._checkpoint_interval = checkpoint_interval
+        self._checkpoint_counter = 0
+
+        # 懒加载索引缓存（P3 优化）
+        self._dep_cache: dict[str, list[str]] = {}  # 依赖关系缓存
+        self._children_cache: dict[str, list[str]] = {}  # 子节点缓存
+        self._conditional_edges_cache: dict[str, list[TaskEdge]] = {}  # 条件边缓存
+        self._cache_valid: bool = False
 
         # LangGraph snapshots state at every super-step for time-travel debugging.
         # We keep a simple list of serialized snapshots for the same purpose.
@@ -70,6 +94,51 @@ class TaskDAG:
         self._checkpoints: list[dict[str, Any]] = []
 
         self._validate_dag()  # 构造时做基础校验
+
+    # ------------------------------------------------------------------
+    # Cache management (P3 optimization)
+    # 缓存管理（P3 优化）
+    # ------------------------------------------------------------------
+
+    def _ensure_cache_valid(self) -> None:
+        """
+        确保索引缓存有效（P3 优化）。
+
+        使用懒加载模式：只有在缓存失效时才重建。
+        这样可以避免在 DAG 结构不变时重复构建索引。
+        """
+        if self._cache_valid:
+            return
+
+        self._dep_cache.clear()
+        self._children_cache.clear()
+        self._conditional_edges_cache.clear()
+
+        for e in self.edges:
+            if e.edge_type == EdgeType.DEPENDENCY:
+                # 依赖关系缓存：target -> [sources]
+                self._dep_cache.setdefault(e.target, []).append(e.source)
+                # 子节点缓存：source -> [targets]
+                self._children_cache.setdefault(e.source, []).append(e.target)
+            elif e.edge_type == EdgeType.CONDITIONAL:
+                # 条件边缓存：source -> [edges]
+                self._conditional_edges_cache.setdefault(e.source, []).append(e)
+
+        self._cache_valid = True
+        logger.debug(
+            "[DAG] Cache rebuilt: %d deps, %d children, %d conditional edges",
+            len(self._dep_cache),
+            len(self._children_cache),
+            len(self._conditional_edges_cache)
+        )
+
+    def _invalidate_cache(self) -> None:
+        """
+        使缓存失效（P3 优化）。
+
+        在 DAG 结构变更后调用，标记缓存需要重建。
+        """
+        self._cache_valid = False
 
     # ------------------------------------------------------------------
     # Node queries
@@ -104,21 +173,29 @@ class TaskDAG:
         """
         Return IDs of nodes that `node_id` depends on (DEPENDENCY edges only).
         返回 `node_id` 所依赖的所有节点 ID（仅考虑 DEPENDENCY 类型的边）。
+
+        优化：使用缓存避免重复遍历边列表（P3 优化）。
+
+        时间复杂度：
+          - 缓存有效时：O(k)，k = 依赖数量
+          - 缓存失效时：O(n+m)，n = 节点数，m = 边数（首次构建）
         """
-        return [
-            e.source for e in self.edges
-            if e.target == node_id and e.edge_type == EdgeType.DEPENDENCY
-        ]
+        self._ensure_cache_valid()
+        return self._dep_cache.get(node_id, [])
 
     def get_conditional_edges(self, source_id: str) -> list[TaskEdge]:
         """
         Return CONDITIONAL edges originating from `source_id`.
         返回从 `source_id` 出发的所有 CONDITIONAL 条件边。
+
+        优化：使用缓存避免重复遍历边列表（P3 优化）。
+
+        时间复杂度：
+          - 缓存有效时：O(k)，k = 该节点的条件边数量
+          - 缓存失效时：O(m)，m = 边数（首次构建）
         """
-        return [
-            e for e in self.edges
-            if e.source == source_id and e.edge_type == EdgeType.CONDITIONAL
-        ]
+        self._ensure_cache_valid()
+        return self._conditional_edges_cache.get(source_id, [])
 
     def get_rollback_targets(self, node_id: str) -> list[str]:
         """
@@ -140,6 +217,10 @@ class TaskDAG:
         queue: deque[str] = deque()
 
         # 先找直接子节点
+        # 注意: 仅遍历DEPENDENCY边,这是设计决策
+        # - CONDITIONAL边代表动态分支,不构成执行先后顺序
+        # - ROLLBACK边仅在失败时触发,不参与正常执行路径
+        # - mark_subtree_skipped用于级联跳过,只应影响依赖路径上的节点
         children = [
             e.target for e in self.edges
             if e.source == node_id and e.edge_type == EdgeType.DEPENDENCY
@@ -162,16 +243,28 @@ class TaskDAG:
     # 状态变更方法
     # ------------------------------------------------------------------
 
-    def mark_subtree_skipped(self, node_id: str) -> None:
+    def mark_subtree_skipped(
+        self,
+        node_id: str,
+        state_machine=None,
+    ) -> None:
         """
         Mark all downstream nodes as SKIPPED (e.g., when a condition fails).
         将所有下游节点标记为 SKIPPED（例如条件分支未满足，或上游节点失败时）。
+
+        Args:
+            node_id: The node ID that triggered the cascade skip
+            state_machine: Optional NodeStateMachine instance for valid state transitions.
+                          If provided, uses transition(); otherwise uses direct assignment.
         """
         downstream = self.get_downstream(node_id)
         for nid in downstream:
             node = self.nodes[nid]
             if node.status in (NodeStatus.PENDING, NodeStatus.READY):
-                node.status = NodeStatus.SKIPPED
+                if state_machine is not None:
+                    state_machine.transition(node, NodeStatus.SKIPPED)
+                else:
+                    node.status = NodeStatus.SKIPPED
                 logger.info("[DAG] Node %s SKIPPED (downstream of %s)", nid, node_id)
 
     def refresh_ready_states(self) -> None:
@@ -274,6 +367,11 @@ class TaskDAG:
 
         Validates that both source and target exist.
         校验源节点和目标节点是否存在。
+
+        For DEPENDENCY edges, also validates that adding the edge won't create a cycle.
+        对于DEPENDENCY类型的边，还会验证添加该边不会引入环。
+
+        P3 优化：使缓存失效以确保索引一致性。
         """
         if edge.source not in self.nodes:
             logger.warning("[DAG] Cannot add edge: source '%s' not found", edge.source)
@@ -288,7 +386,34 @@ class TaskDAG:
                 logger.debug("[DAG] Edge %s->%s (%s) already exists, skipping", edge.source, edge.target, edge.edge_type.value)
                 return False
 
-        self.edges.append(edge)
+        # 修复 H4: 对于DEPENDENCY边，检查是否引入环
+        if edge.edge_type == EdgeType.DEPENDENCY:
+            # 临时添加边并检查拓扑排序
+            self.edges.append(edge)
+            try:
+                sorted_nodes = self.topological_sort()
+                if len(sorted_nodes) != len(self.nodes):
+                    # 环检测失败：回滚
+                    self.edges.pop()
+                    logger.warning(
+                        "[DAG] Adding edge %s -> %s would create a cycle",
+                        edge.source, edge.target
+                    )
+                    return False
+            except Exception:
+                # 拓扑排序异常，回滚
+                self.edges.pop()
+                logger.warning(
+                    "[DAG] Adding edge %s -> %s caused topological sort error",
+                    edge.source, edge.target
+                )
+                return False
+            # 无环：临时添加的边保留，不需要再次append
+        else:
+            # 非DEPENDENCY边直接添加
+            self.edges.append(edge)
+
+        self._invalidate_cache()  # P3 优化：使缓存失效
         logger.info("[DAG] Dynamic edge added: %s -> %s (%s)", edge.source, edge.target, edge.edge_type.value)
         return True
 
@@ -301,6 +426,8 @@ class TaskDAG:
         Returns True on success.
 
         只有 PENDING 状态的节点可以被移除（运行中/已完成的不行）。
+
+        P3 优化：使缓存失效以确保索引一致性。
         """
         node = self.nodes.get(node_id)
         if node is None:
@@ -315,6 +442,7 @@ class TaskDAG:
         if node_id in self.state.node_results:
             del self.state.node_results[node_id]
 
+        self._invalidate_cache()  # P3 优化：使缓存失效
         logger.info("[DAG] Node removed: %s", node_id)
         return True
 
@@ -365,33 +493,147 @@ class TaskDAG:
             if n.node_type == NodeType.ACTION and n.status == NodeStatus.COMPLETED
         )
 
+    def get_blockage_report(self) -> dict[str, Any]:
+        """
+        生成阻塞报告，帮助诊断 DAG 执行中的问题（P1 优化）。
+
+        报告内容包括：
+          - 各状态节点数量统计
+          - 处于运行状态的节点列表
+          - 可能被阻塞的节点及其阻塞原因
+
+        Returns:
+            包含阻塞诊断信息的字典。
+
+        Example:
+            >>> dag.get_blockage_report()
+            {
+                "total_nodes": 10,
+                "status_counts": {"PENDING": 3, "COMPLETED": 5, "RUNNING": 2},
+                "stuck_nodes": [
+                    {"node_id": "node_3", "blocked_by": ["node_1"]}
+                ],
+                "has_blockage": True
+            }
+        """
+        report: dict[str, Any] = {
+            "total_nodes": len(self.nodes),
+            "status_counts": {},
+            "stuck_nodes": [],
+            "has_blockage": False,
+        }
+
+        # 统计各状态数量
+        for node in self.nodes.values():
+            status = node.status.value
+            report["status_counts"][status] = report["status_counts"].get(status, 0) + 1
+
+        # 找出可能被阻塞的节点
+        terminal_statuses = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
+        running_statuses = {NodeStatus.PENDING, NodeStatus.READY, NodeStatus.RUNNING}
+
+        for node in self.nodes.values():
+            if node.status in running_statuses:
+                deps = self.get_dependency_ids(node.id)
+
+                # 找出所有非终态的依赖
+                non_terminal_deps = []
+                for dep_id in deps:
+                    dep_node = self.nodes.get(dep_id)
+                    if dep_node is None:
+                        # 依赖节点不存在，可能是 dangling 引用
+                        continue
+                    if dep_node.status not in terminal_statuses:
+                        non_terminal_deps.append(dep_id)
+
+                if non_terminal_deps:
+                    report["stuck_nodes"].append({
+                        "node_id": node.id,
+                        "blocked_by": non_terminal_deps,
+                        "current_status": node.status.value,
+                    })
+                    report["has_blockage"] = True
+
+        return report
+
+    def has_failed_nodes(self) -> bool:
+        """
+        检查是否存在未处理的失败节点（P1 优化）。
+
+        Returns:
+            如果存在 FAILED 状态的节点返回 True。
+        """
+        return any(n.status == NodeStatus.FAILED for n in self.nodes.values())
+
     def try_recover_blocked_nodes(self) -> int:
         """
-        修复 High #5: 尝试恢复被阻塞的节点。
+        尝试恢复被阻塞的节点（P0 优化）。
 
         当 DAG 执行中出现"假性阻塞"（条件边被错误跳过导致依赖链断裂）时，
         此方法尝试强制推进所有 PENDING 节点变为 READY，以便继续执行。
 
-        返回恢复的节点数量。如果返回 0，说明没有可恢复的节点或确实是真正阻塞。
+        区分"假性阻塞"和"真性阻塞"：
+          - 假性阻塞：所有依赖节点都已到达终态（COMPLETED/SKIPPED/ROLLED_BACK）
+          - 真性阻塞：至少有一个依赖节点仍在运行中（RUNNING/PENDING/READY）
+
+        增强点（P0 优化）：
+          - 区分真性阻塞和假性阻塞
+          - 添加详细的恢复报告
+          - 更严格的恢复条件检查
 
         Returns:
             恢复的 PENDING 节点数量。
         """
         recovered_count = 0
+        blocked_report = self.get_blockage_report()
+
         for node in self.nodes.values():
-            if node.status == NodeStatus.PENDING:
-                deps = self.get_dependency_ids(node.id)
-                # 检查是否所有依赖节点都已到达终态（COMPLETED, SKIPPED, ROLLED_BACK）
-                terminal_statuses = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
-                all_deps_terminal = all(
-                    self.nodes.get(dep_id, None) is not None and
-                    self.nodes[dep_id].status in terminal_statuses
-                    for dep_id in deps
+            if node.status != NodeStatus.PENDING:
+                continue
+
+            deps = self.get_dependency_ids(node.id)
+
+            # 无依赖的节点可以直接恢复
+            if not deps:
+                node.status = NodeStatus.READY
+                recovered_count += 1
+                logger.info("[DAG] Recovered unblocked node (no deps): %s", node.id)
+                continue
+
+            # 检查是否所有依赖节点都已到达终态（COMPLETED/SKIPPED/ROLLED_BACK）
+            terminal_statuses = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
+            dep_statuses = {dep_id: self.nodes[dep_id].status for dep_id in deps if dep_id in self.nodes}
+
+            all_deps_terminal = all(
+                status in terminal_statuses for status in dep_statuses.values()
+            )
+
+            # 只有所有依赖都到达终态时才恢复（避免在依赖未完成时强制推进）
+            if all_deps_terminal:
+                node.status = NodeStatus.READY
+                recovered_count += 1
+                logger.info(
+                    "[DAG] Recovered blocked node: %s (deps: %s -> %s)",
+                    node.id,
+                    deps,
+                    [s.value for s in dep_statuses.values()]
                 )
-                if all_deps_terminal or not deps:
-                    node.status = NodeStatus.READY
-                    recovered_count += 1
-                    logger.info("[DAG] Recovered blocked node: %s", node.id)
+            else:
+                # 真性阻塞 - 有依赖仍在运行中
+                non_terminal_deps = [
+                    dep_id for dep_id, status in dep_statuses.items()
+                    if status not in terminal_statuses
+                ]
+                logger.debug(
+                    "[DAG] Node %s is truly blocked by non-terminal deps: %s",
+                    node.id,
+                    non_terminal_deps
+                )
+
+        if recovered_count > 0:
+            logger.info("[DAG] Recovered %d blocked nodes out of %d stuck", recovered_count, len(blocked_report["stuck_nodes"]))
+        else:
+            logger.warning("[DAG] No nodes recovered. Stuck nodes: %s", blocked_report["stuck_nodes"])
 
         return recovered_count
 
@@ -400,19 +642,102 @@ class TaskDAG:
     # 检查点（灵感来自 LangGraph）
     # ------------------------------------------------------------------
 
-    def save_checkpoint(self) -> None:
+    def save_checkpoint(self, force: bool = False) -> bool:
         """
-        Snapshot the current DAG state.
-        快照当前 DAG 完整状态。
+        简化的 Checkpoint 保存（P2 优化）。
 
-        LangGraph does this automatically at each super-step to enable
-        time-travel debugging and fault recovery. We store snapshots
-        in-memory as simple dicts.
+        实现策略：
+          1. 定期保存：每 N 次调用才实际保存一次（_checkpoint_interval）
+          2. 限制总数：最多保留 N 个 checkpoint（_max_checkpoints），超出时删除最旧的
+          3. 支持强制保存：用于关键操作后的强制 checkpoint
 
-        LangGraph 在每个 Super-step 自动执行此操作，以支持时间旅行调试和故障恢复。
-        我们将快照以简单 dict 形式存储在内存中。
+        这两个优化显著减少了：
+          - 内存占用（从无限增长到有限空间）
+          - checkpoint 保存时间（从每次都保存变为定期保存）
+
+        Args:
+            force: 是否强制保存（忽略间隔限制）
+
+        Returns:
+            是否实际保存了 checkpoint。
         """
-        self._checkpoints.append(self.to_dict())
+        self._checkpoint_counter += 1
+
+        # 定期保存：只有达到间隔才保存
+        if not force and self._checkpoint_counter % self._checkpoint_interval != 0:
+            return False
+
+        # 限制总数：删除最旧的 checkpoint
+        if len(self._checkpoints) >= self._max_checkpoints:
+            discarded = self._checkpoints.pop(0)
+            logger.debug(
+                "[DAG] Checkpoint limit reached (%d), discarding oldest (step %s)",
+                self._max_checkpoints,
+                str(discarded.get("step", "unknown"))[:50]
+            )
+
+        # 创建 snapshot
+        snapshot = {
+            "step": self._checkpoint_counter,
+            "timestamp": __import__("time").time(),
+            "data": self.to_dict(),
+        }
+        self._checkpoints.append(snapshot)
+
+        logger.debug(
+            "[DAG] Checkpoint saved (step %d, total %d checkpoints)",
+            self._checkpoint_counter,
+            len(self._checkpoints)
+        )
+        return True
+
+    def restore_checkpoint(self, index: int = -1) -> bool:
+        """
+        从 checkpoint 恢复 DAG 状态（P2 优化）。
+
+        支持恢复到任意 checkpoint，但实际使用中建议使用 index=-1 恢复到最近的一个。
+
+        Args:
+            index: checkpoint 索引，-1 表示最近一个，0 表示最旧的一个
+
+        Returns:
+            是否成功恢复。
+
+        Raises:
+            IndexError: 如果索引超出范围
+        """
+        if not self._checkpoints:
+            logger.warning("[DAG] No checkpoints to restore")
+            return False
+
+        try:
+            checkpoint = self._checkpoints[index]
+        except IndexError:
+            logger.error("[DAG] Checkpoint index %d out of range (0-%d)", index, len(self._checkpoints) - 1)
+            return False
+
+        data = checkpoint["data"]
+
+        # 重建 DAG 状态
+        restored = TaskDAG.from_dict(data)
+
+        # 替换当前状态
+        self.nodes = restored.nodes
+        self.edges = restored.edges
+        self.state = restored.state
+
+        # 修复 C3: 恢复检查点计数器
+        self._checkpoint_counter = checkpoint["step"]
+
+        # 修复 C4: 使缓存失效以确保索引一致性
+        self._invalidate_cache()
+
+        logger.info(
+            "[DAG] Checkpoint restored (step %d, recovered %d nodes)",
+            checkpoint["step"],
+            len(self.nodes)
+        )
+        return True
 
     @property
     def checkpoints(self) -> list[dict[str, Any]]:

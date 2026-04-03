@@ -202,6 +202,7 @@ class LLMClient:
         2. Markdown 代码块（```json ... ``` 或 ``` ... ```）
         3. 无法解析时抛出 ValueError
         """
+        import re
         text = text.strip()
         # Try direct parse first（先尝试直接解析）
         try:
@@ -209,9 +210,16 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
         # Try to find JSON block in markdown fences（尝试从 Markdown 代码块中提取）
-        for fence in ("```json", "```"):
-            if fence in text:
-                start = text.index(fence) + len(fence)
-                end = text.index("```", start)
-                return json.loads(text[start:end].strip())
+        # 修复 H1: 使用正则匹配带可选语言标签的围栏，支持前导空白
+        patterns = [
+            r'```json\s*\n(.*?)\n```',  # ```json ... ```
+            r'```\s*\n(.*?)\n```',      # ``` ... ```
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1).strip())
+                except json.JSONDecodeError:
+                    continue
         raise ValueError(f"Could not parse JSON from LLM output:\n{text[:300]}")
