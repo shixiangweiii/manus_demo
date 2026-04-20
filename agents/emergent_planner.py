@@ -25,6 +25,10 @@ Core loop:
      - Update TODO list (mark complete, add new discoveries)
      - Check if all TODOs done
   3. Compile final answer from completed TODO results
+
+v6.0: Optional ReActEngine integration via Feature Flag.
+      Set ENABLE_REACT_ENGINE_V2=true to use the unified engine.
+      Default: false (backward compatible).
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import config
+import config as config_module
 from agents.base import BaseAgent
 from context.manager import ContextManager
 from llm.client import LLMClient
@@ -90,6 +94,7 @@ class EmergentPlannerAgent(BaseAgent):
         max_iterations: int | None = None,
         context_manager: ContextManager | None = None,
         tool_router: ToolRouter | None = None,
+        use_react_engine: bool | None = None,
     ):
         super().__init__(
             name="EmergentPlanner",
@@ -97,11 +102,25 @@ class EmergentPlannerAgent(BaseAgent):
             llm_client=llm_client,
             context_manager=context_manager,
         )
-        self.tools = {t.name: t for t in tools}              # 工具名 -> 工具实例
-        self.tool_schemas = [t.to_openai_tool() for t in tools]  # OpenAI function calling 格式
-        self.max_iterations = max_iterations or __import__("config").MAX_REACT_ITERATIONS
+        self.tools = {t.name: t for t in tools}
+        self.tool_schemas = [t.to_openai_tool() for t in tools]
+        self.max_iterations = max_iterations or config_module.MAX_REACT_ITERATIONS
         self.tool_router = tool_router or ToolRouter(available_tools=list(self.tools.keys()))
-        self._todo_list: TodoList | None = None              # 当前任务的 TODO 列表
+        self._todo_list: TodoList | None = None
+
+        use_engine = use_react_engine if use_react_engine is not None else config_module.ENABLE_REACT_ENGINE_V2
+        self._react_engine = None
+        if use_engine:
+            from react.engine import ReActEngine
+            self._react_engine = ReActEngine(
+                llm_client=llm_client,
+                tools=self.tools,
+                max_iterations=self.max_iterations,
+                tool_router=self.tool_router,
+            )
+            logger.info("[EmergentPlanner] Using unified ReActEngine (v6.0)")
+        else:
+            logger.info("[EmergentPlanner] Using legacy _execute_todo implementation")
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -177,8 +196,9 @@ class EmergentPlannerAgent(BaseAgent):
                 self._todo_list.mark_completed(current_todo.id, result.output)
                 self._emit("todo_complete", {"todo": current_todo, "result": result})
             else:
-                # 执行失败，标记为 PENDING 以便重试
+                # 修复 Critical #3: 失败时将 TODO 状态回退为 PENDING 以便重试
                 logger.warning("[EmergentPlanner] TODO %d failed: %s", current_todo.id, result.output[:200])
+                self._todo_list.mark_pending(current_todo.id)
                 self._emit("todo_failed", {"todo": current_todo, "result": result})
 
             # 检查是否需要添加新 TODO（基于执行结果）
@@ -266,7 +286,7 @@ class EmergentPlannerAgent(BaseAgent):
         prompt = (
             f"Review the execution progress and determine if the TODO list needs updates.\n\n"
             f"Current task: {self._todo_list.task}\n\n"
-            f"Last execution result:\n{last_result.output[:500]}\n\n"
+            f"Last execution result:\n{last_result.output[:2000]}\n\n"
             f"Current TODO list:\n{self._get_todo_summary()}\n\n"
             f"Do you need to:\n"
             f"- Add new TODOs (discovered additional work)?\n"
@@ -292,7 +312,7 @@ class EmergentPlannerAgent(BaseAgent):
                 if new_todos:
                     # 检查 TODO 数量限制
                     current_count = len(self._todo_list.todos)
-                    max_todos = config.MAX_TODO_ITEMS if hasattr(config, 'MAX_TODO_ITEMS') else 20
+                    max_todos = getattr(config_module, 'MAX_TODO_ITEMS', 20)
 
                     for todo_data in new_todos:
                         if current_count >= max_todos:
@@ -302,9 +322,21 @@ class EmergentPlannerAgent(BaseAgent):
                             )
                             break
 
+                        # 修复 H3: 验证依赖ID存在
+                        raw_deps = todo_data.get("dependencies", [])
+                        valid_deps = [dep_id for dep_id in raw_deps if dep_id in self._todo_list.todos]
+                        if raw_deps and not valid_deps:
+                            logger.warning(
+                                "[EmergentPlanner] Skipping TODO '%s' - all dependencies %s are invalid",
+                                todo_data.get("description", "")[:50], raw_deps
+                            )
+                            continue
+                        if not todo_data.get("description"):
+                            continue  # 跳过空描述的TODO
+
                         self._todo_list.add_todo(
                             description=todo_data.get("description", ""),
-                            dependencies=todo_data.get("dependencies", []),
+                            dependencies=valid_deps,
                         )
                         current_count += 1
                         logger.info(
@@ -328,13 +360,13 @@ class EmergentPlannerAgent(BaseAgent):
         This is similar to ExecutorAgent's execute_node(), but integrated
         into the emergent planning flow.
         这类似于 ExecutorAgent 的 execute_node()，但集成在隐式规划流程中。
+
+        v6.0: If ENABLE_REACT_ENGINE_V2=true, delegates to unified ReActEngine.
         """
         self.tool_router.reset_node(str(todo.id))
 
-        # 构建 TODO 的执行 prompt
         prompt = f"Execute the following TODO:\n\nTODO {todo.id}: {todo.description}"
 
-        # 添加依赖结果作为上下文
         if todo.dependencies:
             dep_results = []
             for dep_id in todo.dependencies:
@@ -344,23 +376,29 @@ class EmergentPlannerAgent(BaseAgent):
             if dep_results:
                 prompt += f"\n\nResults from dependencies:\n" + "\n".join(dep_results)
 
-        tool_calls_log: list[ToolCallRecord] = []
-        iteration = 0
-
         logger.info("[EmergentPlanner] Executing TODO %d: %s", todo.id, todo.description[:100])
         self._todo_list.mark_in_progress(todo.id)
+
+        if self._react_engine:
+            return await self._react_engine.execute(
+                prompt=prompt,
+                context="",
+                node_id=str(todo.id),
+                system_hint=EMERGENT_PLANNER_SYSTEM_PROMPT,
+            )
+
+        tool_calls_log: list[ToolCallRecord] = []
+        iteration = 0
 
         while iteration < self.max_iterations:
             iteration += 1
 
             try:
-                # 检查工具路由器是否有切换建议
                 continue_msg = "Continue executing the TODO based on the tool results above."
                 router_hint = self.tool_router.get_hint(str(todo.id))
                 if router_hint and iteration > 1:
                     continue_msg += f"\n\nIMPORTANT: {router_hint}"
 
-                # 第一轮发送完整 prompt，后续轮次告知继续
                 response_msg = await self.think_with_tools(
                     prompt if iteration == 1 else continue_msg,
                     tools=self.tool_schemas,
@@ -376,7 +414,6 @@ class EmergentPlannerAgent(BaseAgent):
                 )
 
             if not response_msg.tool_calls:
-                # LLM 认为 TODO 已完成，返回最终文本
                 final_output = response_msg.content or "TODO completed (no output)."
                 logger.info("[EmergentPlanner] TODO %d completed in %d iterations", todo.id, iteration)
                 return StepResult(
@@ -386,7 +423,6 @@ class EmergentPlannerAgent(BaseAgent):
                     tool_calls_log=tool_calls_log,
                 )
 
-            # 执行工具调用
             for tool_call in response_msg.tool_calls:
                 func_name = tool_call.function.name
                 try:
@@ -408,7 +444,6 @@ class EmergentPlannerAgent(BaseAgent):
                         result = f"Tool execution error: {exc}"
                         self.tool_router.record_failure(str(todo.id), func_name)
 
-                # 记录工具调用
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
@@ -416,7 +451,6 @@ class EmergentPlannerAgent(BaseAgent):
                 ))
                 self.add_tool_result(tool_call.id, result)
 
-        # 超过最大迭代次数
         logger.warning("[EmergentPlanner] TODO %d hit max iterations (%d)", todo.id, self.max_iterations)
         return StepResult(
             step_id=todo.id,
@@ -445,7 +479,11 @@ class EmergentPlannerAgent(BaseAgent):
             if "```" in text:
                 text = text.rsplit("```", 1)[0]
             text = text.strip()
-        return json.loads(text)
+        # 修复 M5: 使用处理后的text而不是原始text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {}
 
     def _get_todo_summary(self) -> str:
         """

@@ -407,8 +407,11 @@ class TodoList(BaseModel):
             if todo.status != TodoStatus.PENDING:
                 continue
             # 检查所有依赖是否已完成
+            # 修复: 先验证依赖ID存在，避免创建内存占位符
+            if not all(dep_id in self.todos for dep_id in todo.dependencies):
+                continue  # 依赖不存在，跳过此TODO
             deps_completed = all(
-                self.todos.get(dep_id, TodoItem(id=dep_id, description="")).status == TodoStatus.COMPLETED
+                self.todos[dep_id].status == TodoStatus.COMPLETED
                 for dep_id in todo.dependencies
             )
             if deps_completed:
@@ -432,6 +435,16 @@ class TodoList(BaseModel):
         """
         if todo_id in self.todos:
             self.todos[todo_id].status = TodoStatus.IN_PROGRESS
+            self.todos[todo_id].updated_at = time.time()
+
+    def mark_pending(self, todo_id: int) -> None:
+        """
+        Mark a TODO as pending (for retry after failure).
+        将 TODO 标记为等待执行（用于失败后重试）。
+        修复 Critical #3: 状态机不闭合问题。
+        """
+        if todo_id in self.todos:
+            self.todos[todo_id].status = TodoStatus.PENDING
             self.todos[todo_id].updated_at = time.time()
 
     def is_complete(self) -> bool:

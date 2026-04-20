@@ -68,3 +68,12 @@ TODO_COMPRESSION_THRESHOLD = float(os.getenv("TODO_COMPRESSION_THRESHOLD", "0.8"
 # --- 工具参数 ---
 SANDBOX_DIR = os.path.expanduser(os.getenv("SANDBOX_DIR", "~/.manus_demo/sandbox"))  # 文件操作沙箱目录（防止越权访问）
 CODE_EXEC_TIMEOUT = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))                        # Python 代码执行超时时间（秒）
+
+# --- v6.0 Feature Flags (向后兼容，默认关闭) ---
+# --- ReAct Engine ---
+ENABLE_REACT_ENGINE_V2 = os.getenv("ENABLE_REACT_ENGINE_V2", "false").lower() == "true"  # 使用抽取后的统一 ReActEngine
+
+# --- LLM Client Retry ---
+LLM_RETRY_ENABLED = os.getenv("LLM_RETRY_ENABLED", "false").lower() == "true"  # LLM 调用重试机制
+LLM_RETRY_MAX_ATTEMPTS = int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", "3"))  # 最大重试次数
+LLM_RETRY_BACKOFF_FACTOR = float(os.getenv("LLM_RETRY_BACKOFF_FACTOR", "2.0"))  # 退避因子
