@@ -322,7 +322,7 @@ class DAGExecutor:
             all_rollbacks_succeeded = all(
                 dag.nodes[rb_id].status == NodeStatus.COMPLETED
                 for rb_id in rollback_targets
-                if rb_id in dag.nodes
+                if rb_id in dag.nodes and dag.nodes[rb_id].status != NodeStatus.PENDING
             )
             if all_rollbacks_succeeded:
                 self._sm.transition(node, NodeStatus.ROLLED_BACK)
@@ -438,8 +438,8 @@ class DAGExecutor:
                     elif node.status == NodeStatus.READY:
                         self._sm.transition(node, NodeStatus.SKIPPED)
                     elif node.status == NodeStatus.RUNNING:
-                        # 结构节点意外处于 RUNNING 状态时，先标记 FAILED 再 SKIPPED
-                        self._sm.transition(node, NodeStatus.FAILED)
+                        # 结构节点处于 RUNNING 状态时，直接标记为 SKIPPED
+                        # （结构节点的 RUNNING 只是状态占位符，不代表真正的执行）
                         self._sm.transition(node, NodeStatus.SKIPPED)
 
     # ------------------------------------------------------------------

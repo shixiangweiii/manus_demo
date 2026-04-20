@@ -877,4 +877,7 @@ class PlannerAgent(BaseAgent):
             if k in valid_node_ids
         }
 
+        # 继承旧 DAG 的 checkpoints，保留时间旅行调试能力
+        result_dag._checkpoints = list(old_dag._checkpoints)
+
         return result_dag
