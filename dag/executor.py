@@ -115,6 +115,10 @@ class DAGExecutor:
         循环以离散 Super-step 方式运行，直到所有节点到达终态
         （COMPLETED / SKIPPED / ROLLED_BACK）。
         """
+        # 统一状态机：将 Executor 的带回调状态机注入 DAG，
+        # 确保 DAG 内部的状态转移（refresh_ready_states、mark_subtree_skipped 等）
+        # 也能触发 UI 事件回调，避免双状态机不一致问题。
+        dag._sm = self._sm
         dag.refresh_ready_states()  # 初始化：将满足条件的 PENDING 节点提升为 READY
         step = 0
         # 动态性体现：哪些节点在哪一轮执行，完全取决于当时的运行时状态——前序节点的完成情况、失败情况、跳过情况，每一轮都不一样。
@@ -174,7 +178,11 @@ class DAGExecutor:
 
                 if result.success:
                     # 验证 exit criteria（由 Reflector 进行 LLM 校验）
-                    passed = await self._check_exit_criteria(node, result)
+                    try:
+                        passed = await self._check_exit_criteria(node, result)
+                    except Exception as exc:
+                        logger.error("[DAGExecutor] Exit criteria check failed for %s: %s", node.id, exc)
+                        passed = False
                     if passed:
                         self._sm.transition(node, NodeStatus.COMPLETED)
                         self._emit("node_completed", {"node": node, "result": result})
@@ -252,7 +260,7 @@ class DAGExecutor:
             )
         except asyncio.TimeoutError:
             logger.error("[DAGExecutor] Node %s timed out after %ds", node.id, timeout)
-            return StepResult(success=False, output=f"Node execution timed out after {timeout}s")
+            return StepResult(step_id=node.id, success=False, output=f"Node execution timed out after {timeout}s")
 
     # ------------------------------------------------------------------
     # Exit criteria validation
@@ -401,7 +409,7 @@ class DAGExecutor:
         for node in dag.nodes.values():
             if node.node_type == NodeType.ACTION:
                 continue  # 只处理结构性节点
-            if node.status in (NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK):
+            if node.status in (NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK, NodeStatus.FAILED):
                 continue  # 已处于终态，跳过
 
             # 找出该节点的所有直接子节点
@@ -446,8 +454,13 @@ class DAGExecutor:
         """
         parts = []
         topo_order = dag.topological_sort()
+        if len(topo_order) != len(dag.nodes):
+            logger.warning("[DAGExecutor] Topological sort incomplete, falling back to dict order")
+            topo_order = list(dag.nodes.keys())
         for node_id in topo_order:
-            node = dag.nodes[node_id]
+            node = dag.nodes.get(node_id)
+            if node is None:
+                continue
             if node.node_type == NodeType.ACTION and node.status == NodeStatus.COMPLETED:
                 if node.result:
                     parts.append(f"[{node.id}] {node.description}:\n{node.result}")

@@ -12,12 +12,14 @@ v2: 新增 DAG 规划模型（TaskNode、TaskEdge、DAGState 等），
 
 from __future__ import annotations
 
+import logging
 import time
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+logger = logging.getLogger(__name__)
 
 # ======================================================================
 # Legacy models (kept for backward compatibility / reference)
@@ -113,6 +115,16 @@ class ExitCriteria(BaseModel):
     """
     Defines what 'done' means for a node. Validated after execution.
     定义节点的「完成标准」，在节点执行完毕后由 Reflector 验证。
+
+    Behavior note:
+    - When `required=True` and `validation_prompt` is non-empty: LLM-based validation via Reflector.
+    - When `required=True` but `validation_prompt` is empty: falls back to `result.success` directly.
+    - When `required=False`: validation is skipped entirely, always returns True.
+
+    行为说明：
+    - `required=True` 且 `validation_prompt` 非空：通过 Reflector 进行 LLM 验证。
+    - `required=True` 但 `validation_prompt` 为空：直接以 `result.success` 为准，不做 LLM 验证。
+    - `required=False`：完全跳过验证，始终返回 True。
     """
     description: str = Field(description="Human-readable success condition")         # 人类可读的成功条件描述
     validation_prompt: str = Field(
@@ -216,6 +228,9 @@ class DAGState(BaseModel):
         Write a node's result into shared state.
         将节点的执行结果写入共享状态。
 
+        WARNING: This overwrites any previous result for the same node_id.
+        注意：对同一 node_id 的重复写入会覆盖旧结果。
+
         LangGraph uses configurable Reducers (append / merge / overwrite) here.
         We use simple dict assignment — each node has a unique key, so parallel
         nodes naturally write to different keys without conflict.
@@ -224,6 +239,9 @@ class DAGState(BaseModel):
         我们直接用 dict 赋值——每个节点有唯一 key，
         并行节点写入不同 key，天然无冲突。
         """
+        if node_id in self.node_results:
+            logger.debug("[DAGState] Overwriting result for node %s (previous length: %d)",
+                         node_id, len(self.node_results[node_id]))
         self.node_results[node_id] = output
 
 

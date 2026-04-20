@@ -12,6 +12,7 @@ Transition graph:
 转移图：
     PENDING ──> READY ──> RUNNING ──> COMPLETED   (happy path / 正常路径)
                                   ──> FAILED ──> ROLLED_BACK
+                                            ──> PENDING (retry / 重试)
     Any non-terminal ──────────────> SKIPPED       (conditional branch not taken / 条件分支未满足)
 """
 
@@ -41,7 +42,7 @@ VALID_TRANSITIONS: dict[NodeStatus, set[NodeStatus]] = {
     NodeStatus.PENDING:     {NodeStatus.READY, NodeStatus.SKIPPED},
     NodeStatus.READY:       {NodeStatus.RUNNING, NodeStatus.SKIPPED},
     NodeStatus.RUNNING:     {NodeStatus.COMPLETED, NodeStatus.FAILED},
-    NodeStatus.FAILED:      {NodeStatus.ROLLED_BACK, NodeStatus.SKIPPED},
+    NodeStatus.FAILED:      {NodeStatus.ROLLED_BACK, NodeStatus.SKIPPED, NodeStatus.PENDING},
     # Terminal states — no further transitions allowed
     # 终态——不允许任何进一步转移
     NodeStatus.COMPLETED:   set(),

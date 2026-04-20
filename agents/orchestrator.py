@@ -47,7 +47,7 @@ from knowledge.retriever import KnowledgeRetriever
 from llm.client import LLMClient
 from memory.long_term import LongTermMemory
 from memory.short_term import ShortTermMemory
-from schema import MemoryEntry, NodeStatus, Plan, StepResult, StepStatus
+from schema import MemoryEntry, NodeStatus, NodeType, Plan, StepResult, StepStatus
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -340,11 +340,12 @@ class OrchestratorAgent:
             # 通过 Super-step 模型运行整个 DAG
             final_output = await dag_executor.execute(dag)
 
-            # 收集所有节点结果，用于反思评估
+            # 收集所有 ACTION 节点结果，用于反思评估（过滤回滚节点等非执行结果）
             results = [
                 r for r in [
                     self._node_to_result(nid, dag)
                     for nid in dag.state.node_results
+                    if dag.nodes.get(nid) and dag.nodes[nid].node_type == NodeType.ACTION
                 ]
                 if r is not None
             ]
@@ -379,6 +380,8 @@ class OrchestratorAgent:
                     failed_node_id=failed_node.id,
                     feedback=reflection.feedback,  # 将反思反馈传给 Planner 指导改进方向
                 )
+                # 将 Executor 的状态机注入新 DAG，确保 UI 事件不丢失
+                dag._sm = dag_executor._sm
                 self._emit("dag_created", dag)
             else:
                 logger.warning("Max re-plan attempts reached. Returning best effort.")
@@ -425,4 +428,4 @@ class OrchestratorAgent:
         try:
             self._on_event(event, data)
         except Exception:
-            pass  # UI errors should never crash the pipeline / UI 异常不能影响主流程
+            logger.debug("[Orchestrator] UI callback error for event '%s'", event, exc_info=True)

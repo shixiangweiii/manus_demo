@@ -33,6 +33,7 @@ import logging
 from collections import deque
 from typing import Any
 
+import config
 from dag.state_machine import NodeStateMachine
 from schema import DAGState, EdgeType, NodeStatus, NodeType, TaskEdge, TaskNode
 
@@ -84,10 +85,13 @@ class TaskDAG:
         构建 DEPENDENCY 边的邻接表，用于加速 BFS 和拓扑排序。
         """
         self._dep_adjacency = {nid: [] for nid in self.nodes}
+        self._reverse_dep_adjacency: dict[str, list[str]] = {nid: [] for nid in self.nodes}
         for e in self.edges:
             if e.edge_type == EdgeType.DEPENDENCY:
                 if e.source in self._dep_adjacency:
                     self._dep_adjacency[e.source].append(e.target)
+                if e.target in self._reverse_dep_adjacency:
+                    self._reverse_dep_adjacency[e.target].append(e.source)
 
     # ------------------------------------------------------------------
     # Node queries
@@ -114,7 +118,10 @@ class TaskDAG:
             # 检查所有依赖是否都已完成
             # 核心逻辑是：不查看任何预定义的执行顺序表，而是在运行时扫描当前所有节点状态，发现谁的依赖已经全部满足。
             deps = self.get_dependency_ids(node.id)
-            if all(self.nodes[d].status == NodeStatus.COMPLETED for d in deps):
+            if all(
+                d in self.nodes and self.nodes[d].status == NodeStatus.COMPLETED
+                for d in deps
+            ):
                 ready.append(node)
         return ready
 
@@ -122,11 +129,9 @@ class TaskDAG:
         """
         Return IDs of nodes that `node_id` depends on (DEPENDENCY edges only).
         返回 `node_id` 所依赖的所有节点 ID（仅考虑 DEPENDENCY 类型的边）。
+        使用预构建的反向邻接表，时间复杂度 O(1)。
         """
-        return [
-            e.source for e in self.edges
-            if e.target == node_id and e.edge_type == EdgeType.DEPENDENCY
-        ]
+        return list(self._reverse_dep_adjacency.get(node_id, []))
 
     def get_conditional_edges(self, source_id: str) -> list[TaskEdge]:
         """
@@ -278,7 +283,8 @@ class TaskDAG:
             return False
 
         self.nodes[node.id] = node
-        self._dep_adjacency[node.id] = []  # 维护邻接表
+        self._dep_adjacency[node.id] = []  # 维护正向邻接表
+        self._reverse_dep_adjacency[node.id] = []  # 维护反向邻接表
         logger.info("[DAG] Dynamic node added: %s (%s) - %s", node.id, node.node_type.value, node.description[:60])
         return True
 
@@ -308,12 +314,14 @@ class TaskDAG:
         # 维护邻接表并检测环
         if edge.edge_type == EdgeType.DEPENDENCY:
             self._dep_adjacency.setdefault(edge.source, []).append(edge.target)
+            self._reverse_dep_adjacency.setdefault(edge.target, []).append(edge.source)
             # 环检测：添加后执行拓扑排序，若不完整则说明引入了环
             topo_result = self.topological_sort()
             if len(topo_result) != len(self.nodes):
                 # 回滚：移除刚添加的边和邻接表条目
                 self.edges.pop()
                 self._dep_adjacency[edge.source].remove(edge.target)
+                self._reverse_dep_adjacency[edge.target].remove(edge.source)
                 logger.warning("[DAG] Edge %s->%s would create a cycle, rejected", edge.source, edge.target)
                 return False
 
@@ -342,11 +350,14 @@ class TaskDAG:
         self.edges = [e for e in self.edges if e.source != node_id and e.target != node_id]
         if node_id in self.state.node_results:
             del self.state.node_results[node_id]
-        # 维护邻接表：移除该节点的出边和所有指向它的入边
+        # 维护正向邻接表：移除该节点的出边和所有指向它的入边
         self._dep_adjacency.pop(node_id, None)
-        for source_targets in self._dep_adjacency.values():
-            while node_id in source_targets:
-                source_targets.remove(node_id)
+        for source in self._dep_adjacency:
+            self._dep_adjacency[source] = [t for t in self._dep_adjacency[source] if t != node_id]
+        # 维护反向邻接表：移除该节点的入边和所有从它出发的反向引用
+        self._reverse_dep_adjacency.pop(node_id, None)
+        for target in self._reverse_dep_adjacency:
+            self._reverse_dep_adjacency[target] = [s for s in self._reverse_dep_adjacency[target] if s != node_id]
 
         logger.info("[DAG] Node removed: %s", node_id)
         return True
@@ -415,10 +426,9 @@ class TaskDAG:
         LangGraph 在每个 Super-step 自动执行此操作，以支持时间旅行调试和故障恢复。
         我们将快照以简单 dict 形式存储在内存中。
         """
-        import config as _config
         self._checkpoints.append(self.to_dict())
         # 限制内存中保留的 checkpoint 数量，防止长时间运行时内存泄漏
-        max_checkpoints = getattr(_config, 'MAX_CHECKPOINTS', 10)
+        max_checkpoints = getattr(config, 'MAX_CHECKPOINTS', 10)
         if len(self._checkpoints) > max_checkpoints:
             self._checkpoints = self._checkpoints[-max_checkpoints:]
 
@@ -446,7 +456,7 @@ class TaskDAG:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TaskDAG:
+    def from_dict(cls, data: dict[str, Any], state_machine: NodeStateMachine | None = None) -> TaskDAG:
         """
         Reconstruct a TaskDAG from a serialized dict.
         从序列化 dict 重建 TaskDAG，用于从 checkpoint 恢复。
@@ -458,6 +468,7 @@ class TaskDAG:
             nodes=nodes,
             edges=edges,
             context=data.get("context", ""),
+            state_machine=state_machine,
         )
         dag.state.node_results = data.get("node_results", {})
         return dag
