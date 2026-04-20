@@ -108,4 +108,4 @@ class NodeStateMachine:
             try:
                 self._on_transition(node.id, old_status, new_status)
             except Exception:
-                pass  # UI errors should never crash the pipeline / UI 异常不能影响主流程
+                logger.debug("[SM] UI callback error for node %s", node.id, exc_info=True)

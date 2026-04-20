@@ -123,9 +123,12 @@ class DAGExecutor:
             step += 1
             ready = dag.get_ready_nodes()
             if not ready:
-                # No ready nodes but DAG not complete -> stuck (failed nodes blocking)
-                # 没有就绪节点但 DAG 未完成 -> 被阻塞（通常是有失败节点阻断了下游）
-                logger.warning("[DAGExecutor] No ready nodes at super-step %d. %s", step, dag.summary())
+                # No ready nodes but DAG not complete -> stuck
+                # 没有就绪节点但 DAG 未完成 -> 被阻塞
+                if dag.has_failed_nodes():
+                    logger.error("[DAGExecutor] DAG stuck at super-step %d: failed nodes blocking progress. %s", step, dag.summary())
+                else:
+                    logger.warning("[DAGExecutor] No ready nodes at super-step %d (possible cycle). %s", step, dag.summary())
                 break
 
             # Filter to only ACTION nodes (GOAL/SUBGOAL are structural)
@@ -152,13 +155,13 @@ class DAGExecutor:
                 "total_ready": len(actionable),
             })
 
-            # --- Super-step: parallel execution ---
-            # --- Super-step：并行执行当前批次节点 ---
+            # --- Super-step: parallel execution with timeout ---
+            # --- Super-step：带超时控制的并行执行当前批次节点 ---
             # 动态性 2：并行执行（同一 Super-step 内多节点并发）
             # v1 是严格串行：Step 1 → Step 2 → Step 3。v2 中发现多个就绪节点后，直接并行执行：
             results = await asyncio.gather(*[
-                # asyncio.gather 同时发起多个 _run_node 协程
-                self._run_node(node, dag) for node in batch
+                # asyncio.gather 同时发起多个 _run_node_with_timeout 协程
+                self._run_node_with_timeout(node, dag) for node in batch
             ])
 
             # --- Merge results + validate + handle failures ---
@@ -236,6 +239,21 @@ class DAGExecutor:
 
         return await self._executor_agent.execute_node(node, context)
 
+    async def _run_node_with_timeout(self, node: TaskNode, dag: TaskDAG) -> StepResult:
+        """
+        Execute a node with timeout protection.
+        带超时保护地执行节点，防止单个节点卡死阻塞整个批次。
+        """
+        timeout = config.NODE_EXECUTION_TIMEOUT
+        try:
+            return await asyncio.wait_for(
+                self._run_node(node, dag),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error("[DAGExecutor] Node %s timed out after %ds", node.id, timeout)
+            return StepResult(success=False, output=f"Node execution timed out after {timeout}s")
+
     # ------------------------------------------------------------------
     # Exit criteria validation
     # 完成判据验证
@@ -289,10 +307,21 @@ class DAGExecutor:
                         self._sm.transition(rb_node, NodeStatus.COMPLETED)
                     else:
                         self._sm.transition(rb_node, NodeStatus.FAILED)
+                        self._sm.transition(rb_node, NodeStatus.SKIPPED)
+                        logger.warning("[DAGExecutor] Rollback node %s failed", rb_id)
 
-            # 回滚执行后将原节点标记为 ROLLED_BACK
-            self._sm.transition(node, NodeStatus.ROLLED_BACK)
-            self._emit("node_rollback", {"node": node})
+            # 根据回滚结果决定原节点的最终状态
+            all_rollbacks_succeeded = all(
+                dag.nodes[rb_id].status == NodeStatus.COMPLETED
+                for rb_id in rollback_targets
+                if rb_id in dag.nodes
+            )
+            if all_rollbacks_succeeded:
+                self._sm.transition(node, NodeStatus.ROLLED_BACK)
+                self._emit("node_rollback", {"node": node})
+            else:
+                self._sm.transition(node, NodeStatus.SKIPPED)
+                logger.warning("[DAGExecutor] Rollback partially failed for node %s, marking as SKIPPED", node.id)
         else:
             # 没有回滚节点，直接跳过
             self._sm.transition(node, NodeStatus.SKIPPED)
@@ -331,8 +360,8 @@ class DAGExecutor:
                     "met": condition_met,
                 })
                 if not condition_met:
-                    # 条件不满足：跳过目标节点及其整个下游子树
-                    target.status = NodeStatus.SKIPPED
+                    # 条件不满足：通过状态机跳过目标节点及其整个下游子树
+                    self._sm.transition(target, NodeStatus.SKIPPED)
                     dag.mark_subtree_skipped(target.id)
                     logger.info(
                         "[DAGExecutor] Condition '%s' not met -> skipping %s",
@@ -395,9 +424,11 @@ class DAGExecutor:
                     if node.status == NodeStatus.RUNNING:
                         self._sm.transition(node, NodeStatus.COMPLETED)
                 else:
-                    # 所有子节点均被跳过或回滚：结构节点也跳过
-                    if node.status in (NodeStatus.PENDING, NodeStatus.READY):
-                        node.status = NodeStatus.SKIPPED
+                    # 所有子节点均被跳过或回滚：通过状态机将结构节点也跳过
+                    if node.status == NodeStatus.PENDING:
+                        self._sm.transition(node, NodeStatus.SKIPPED)
+                    elif node.status == NodeStatus.READY:
+                        self._sm.transition(node, NodeStatus.SKIPPED)
 
     # ------------------------------------------------------------------
     # Output compilation
@@ -407,14 +438,19 @@ class DAGExecutor:
     @staticmethod
     def _compile_output(dag: TaskDAG) -> str:
         """
-        Compile results from all completed ACTION nodes into final output.
-        将所有成功完成的 ACTION 节点的结果汇总为最终输出字符串。
+        Compile results from all completed ACTION nodes into final output,
+        ordered by topological sort for consistent and logical presentation.
+
+        将所有成功完成的 ACTION 节点的结果按拓扑序汇总为最终输出字符串，
+        确保输出顺序一致且符合逻辑依赖关系。
         """
         parts = []
-        for node in dag.nodes.values():
+        topo_order = dag.topological_sort()
+        for node_id in topo_order:
+            node = dag.nodes[node_id]
             if node.node_type == NodeType.ACTION and node.status == NodeStatus.COMPLETED:
                 if node.result:
-                    parts.append(node.result)
+                    parts.append(f"[{node.id}] {node.description}:\n{node.result}")
 
         if not parts:
             return "No action nodes completed successfully."

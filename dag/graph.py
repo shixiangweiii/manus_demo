@@ -33,6 +33,7 @@ import logging
 from collections import deque
 from typing import Any
 
+from dag.state_machine import NodeStateMachine
 from schema import DAGState, EdgeType, NodeStatus, NodeType, TaskEdge, TaskNode
 
 logger = logging.getLogger(__name__)
@@ -58,10 +59,16 @@ class TaskDAG:
         nodes: dict[str, TaskNode],
         edges: list[TaskEdge],
         context: str = "",
+        state_machine: NodeStateMachine | None = None,
     ):
         self.nodes = nodes    # 所有节点，key 为节点 ID
         self.edges = edges    # 所有边
         self.state = DAGState(task=task, context=context)  # 集中式共享状态
+        self._sm = state_machine or NodeStateMachine()     # 节点状态机，统一管理所有状态转移
+
+        # 预构建 DEPENDENCY 边的邻接表，将 BFS/拓扑排序从 O(V*E) 优化到 O(V+E)
+        self._dep_adjacency: dict[str, list[str]] = {}  # source -> [targets]
+        self._rebuild_adjacency()
 
         # LangGraph snapshots state at every super-step for time-travel debugging.
         # We keep a simple list of serialized snapshots for the same purpose.
@@ -70,6 +77,17 @@ class TaskDAG:
         self._checkpoints: list[dict[str, Any]] = []
 
         self._validate_dag()  # 构造时做基础校验
+
+    def _rebuild_adjacency(self) -> None:
+        """
+        Build adjacency list for DEPENDENCY edges.
+        构建 DEPENDENCY 边的邻接表，用于加速 BFS 和拓扑排序。
+        """
+        self._dep_adjacency = {nid: [] for nid in self.nodes}
+        for e in self.edges:
+            if e.edge_type == EdgeType.DEPENDENCY:
+                if e.source in self._dep_adjacency:
+                    self._dep_adjacency[e.source].append(e.target)
 
     # ------------------------------------------------------------------
     # Node queries
@@ -135,25 +153,21 @@ class TaskDAG:
         Return all node IDs downstream of `node_id` via BFS on DEPENDENCY edges.
         通过 BFS 遍历 DEPENDENCY 边，返回 `node_id` 所有下游节点 ID。
         用于失败时级联跳过整个子树。
+        使用预构建的邻接表，时间复杂度 O(V+E)。
         """
         visited: set[str] = set()
         queue: deque[str] = deque()
 
-        # 先找直接子节点
-        children = [
-            e.target for e in self.edges
-            if e.source == node_id and e.edge_type == EdgeType.DEPENDENCY
-        ]
-        queue.extend(children)
+        # 通过邻接表找直接子节点
+        queue.extend(self._dep_adjacency.get(node_id, []))
 
         while queue:
             nid = queue.popleft()
             if nid in visited:
                 continue
             visited.add(nid)
-            for e in self.edges:
-                if e.source == nid and e.edge_type == EdgeType.DEPENDENCY:
-                    queue.append(e.target)
+            for target in self._dep_adjacency.get(nid, []):
+                queue.append(target)
 
         return list(visited)
 
@@ -166,12 +180,13 @@ class TaskDAG:
         """
         Mark all downstream nodes as SKIPPED (e.g., when a condition fails).
         将所有下游节点标记为 SKIPPED（例如条件分支未满足，或上游节点失败时）。
+        通过状态机统一管理状态转移，确保合法性。
         """
         downstream = self.get_downstream(node_id)
         for nid in downstream:
             node = self.nodes[nid]
             if node.status in (NodeStatus.PENDING, NodeStatus.READY):
-                node.status = NodeStatus.SKIPPED
+                self._sm.transition(node, NodeStatus.SKIPPED)
                 logger.info("[DAG] Node %s SKIPPED (downstream of %s)", nid, node_id)
 
     def refresh_ready_states(self) -> None:
@@ -187,7 +202,7 @@ class TaskDAG:
                 continue
             deps = self.get_dependency_ids(node.id)
             if all(self.nodes[d].status == NodeStatus.COMPLETED for d in deps):
-                node.status = NodeStatus.READY
+                self._sm.transition(node, NodeStatus.READY)
 
     # ------------------------------------------------------------------
     # Graph algorithms
@@ -197,17 +212,17 @@ class TaskDAG:
     def topological_sort(self) -> list[str]:
         """
         Kahn's algorithm — returns node IDs in a valid execution order.
-        Only considers DEPENDENCY edges.
+        Only considers DEPENDENCY edges. Uses pre-built adjacency list for O(V+E).
 
         Kahn 算法 —— 返回节点 ID 的合法拓扑执行顺序。
-        仅考虑 DEPENDENCY 类型的边。
+        仅考虑 DEPENDENCY 类型的边，使用预构建邻接表实现 O(V+E) 复杂度。
         保证每个节点在其所有前置依赖之后出现。
         """
         # 统计每个节点的入度（有多少 DEPENDENCY 边指向它）
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
-        for e in self.edges:
-            if e.edge_type == EdgeType.DEPENDENCY:
-                in_degree[e.target] = in_degree.get(e.target, 0) + 1
+        for source, targets in self._dep_adjacency.items():
+            for target in targets:
+                in_degree[target] += 1
 
         # 将入度为 0 的节点（无前置依赖）加入队列
         queue = deque(nid for nid, deg in in_degree.items() if deg == 0)
@@ -216,12 +231,11 @@ class TaskDAG:
         while queue:
             nid = queue.popleft()
             result.append(nid)
-            # 将以该节点为源点的 DEPENDENCY 边目标节点的入度减 1
-            for e in self.edges:
-                if e.source == nid and e.edge_type == EdgeType.DEPENDENCY:
-                    in_degree[e.target] -= 1
-                    if in_degree[e.target] == 0:
-                        queue.append(e.target)
+            # 通过邻接表找出下游节点，将其入度减 1
+            for target in self._dep_adjacency.get(nid, []):
+                in_degree[target] -= 1
+                if in_degree[target] == 0:
+                    queue.append(target)
 
         if len(result) != len(self.nodes):
             logger.warning("[DAG] Cycle detected! Topological sort incomplete.")
@@ -264,6 +278,7 @@ class TaskDAG:
             return False
 
         self.nodes[node.id] = node
+        self._dep_adjacency[node.id] = []  # 维护邻接表
         logger.info("[DAG] Dynamic node added: %s (%s) - %s", node.id, node.node_type.value, node.description[:60])
         return True
 
@@ -289,6 +304,19 @@ class TaskDAG:
                 return False
 
         self.edges.append(edge)
+
+        # 维护邻接表并检测环
+        if edge.edge_type == EdgeType.DEPENDENCY:
+            self._dep_adjacency.setdefault(edge.source, []).append(edge.target)
+            # 环检测：添加后执行拓扑排序，若不完整则说明引入了环
+            topo_result = self.topological_sort()
+            if len(topo_result) != len(self.nodes):
+                # 回滚：移除刚添加的边和邻接表条目
+                self.edges.pop()
+                self._dep_adjacency[edge.source].remove(edge.target)
+                logger.warning("[DAG] Edge %s->%s would create a cycle, rejected", edge.source, edge.target)
+                return False
+
         logger.info("[DAG] Dynamic edge added: %s -> %s (%s)", edge.source, edge.target, edge.edge_type.value)
         return True
 
@@ -314,6 +342,11 @@ class TaskDAG:
         self.edges = [e for e in self.edges if e.source != node_id and e.target != node_id]
         if node_id in self.state.node_results:
             del self.state.node_results[node_id]
+        # 维护邻接表：移除该节点的出边和所有指向它的入边
+        self._dep_adjacency.pop(node_id, None)
+        for source_targets in self._dep_adjacency.values():
+            while node_id in source_targets:
+                source_targets.remove(node_id)
 
         logger.info("[DAG] Node removed: %s", node_id)
         return True
@@ -382,7 +415,12 @@ class TaskDAG:
         LangGraph 在每个 Super-step 自动执行此操作，以支持时间旅行调试和故障恢复。
         我们将快照以简单 dict 形式存储在内存中。
         """
+        import config as _config
         self._checkpoints.append(self.to_dict())
+        # 限制内存中保留的 checkpoint 数量，防止长时间运行时内存泄漏
+        max_checkpoints = getattr(_config, 'MAX_CHECKPOINTS', 10)
+        if len(self._checkpoints) > max_checkpoints:
+            self._checkpoints = self._checkpoints[-max_checkpoints:]
 
     @property
     def checkpoints(self) -> list[dict[str, Any]]:
@@ -433,13 +471,14 @@ class TaskDAG:
         """
         Basic validation: check edges reference existing nodes.
         基础校验：检查所有边的端点都存在于 nodes 中。
+        校验失败时抛出 ValueError，在 DAG 构造阶段就暴露问题。
         """
         node_ids = set(self.nodes.keys())
         for e in self.edges:
             if e.source not in node_ids:
-                logger.warning("[DAG] Edge source '%s' not found in nodes", e.source)
+                raise ValueError(f"[DAG] Edge source '{e.source}' not found in nodes")
             if e.target not in node_ids:
-                logger.warning("[DAG] Edge target '%s' not found in nodes", e.target)
+                raise ValueError(f"[DAG] Edge target '{e.target}' not found in nodes")
 
     # ------------------------------------------------------------------
     # Display helpers
@@ -448,13 +487,13 @@ class TaskDAG:
 
     def summary(self) -> str:
         """
-        One-line summary for logging.
-        生成单行状态摘要，用于日志输出，如：DAG[5 nodes: 2 completed, 1 running, 2 pending]
+        One-line summary for logging, ordered by NodeStatus enum.
+        生成单行状态摘要（按 NodeStatus 枚举顺序），用于日志输出，
+        如：DAG[5 nodes: 2 completed, 1 running, 2 pending]
         """
-        status_counts: dict[str, int] = {}
-        for n in self.nodes.values():
-            status_counts[n.status.value] = status_counts.get(n.status.value, 0) + 1
-        parts = [f"{v} {k}" for k, v in status_counts.items()]
+        from collections import Counter
+        counts = Counter(n.status.value for n in self.nodes.values())
+        parts = [f"{counts[s.value]} {s.value}" for s in NodeStatus if counts.get(s.value, 0) > 0]
         return f"DAG[{len(self.nodes)} nodes: {', '.join(parts)}]"
 
     def get_action_nodes(self) -> list[TaskNode]:
