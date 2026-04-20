@@ -189,7 +189,9 @@ class TaskDAG:
         """
         downstream = self.get_downstream(node_id)
         for nid in downstream:
-            node = self.nodes[nid]
+            node = self.nodes.get(nid)
+            if node is None:
+                continue
             if node.status in (NodeStatus.PENDING, NodeStatus.READY):
                 self._sm.transition(node, NodeStatus.SKIPPED)
                 logger.info("[DAG] Node %s SKIPPED (downstream of %s)", nid, node_id)
@@ -206,7 +208,7 @@ class TaskDAG:
             if node.status != NodeStatus.PENDING:
                 continue
             deps = self.get_dependency_ids(node.id)
-            if all(self.nodes[d].status == NodeStatus.COMPLETED for d in deps):
+            if all(d in self.nodes and self.nodes[d].status == NodeStatus.COMPLETED for d in deps):
                 self._sm.transition(node, NodeStatus.READY)
 
     # ------------------------------------------------------------------
@@ -253,6 +255,15 @@ class TaskDAG:
 
         当所有节点都到达终态（COMPLETED、SKIPPED 或 ROLLED_BACK）时返回 True。
         DAGExecutor 的主循环以此为退出条件。
+
+        Design note: FAILED is intentionally NOT included in the terminal set.
+        FAILED nodes must go through `_handle_failure()` to be converted to
+        ROLLED_BACK or SKIPPED before the DAG is considered complete. This
+        ensures the failure handling pipeline always runs.
+
+        设计说明：FAILED 有意不包含在终态集合中。
+        FAILED 节点必须经过 `_handle_failure()` 转为 ROLLED_BACK 或 SKIPPED
+        后，DAG 才被视为完成。这确保了故障处理流程始终被执行。
         """
         terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
         return all(n.status in terminal for n in self.nodes.values())
@@ -320,8 +331,8 @@ class TaskDAG:
             if len(topo_result) != len(self.nodes):
                 # 回滚：移除刚添加的边和邻接表条目
                 self.edges.pop()
-                self._dep_adjacency[edge.source].remove(edge.target)
-                self._reverse_dep_adjacency[edge.target].remove(edge.source)
+                self._dep_adjacency[edge.source] = [t for t in self._dep_adjacency[edge.source] if t != edge.target]
+                self._reverse_dep_adjacency[edge.target] = [s for s in self._reverse_dep_adjacency[edge.target] if s != edge.source]
                 logger.warning("[DAG] Edge %s->%s would create a cycle, rejected", edge.source, edge.target)
                 return False
 

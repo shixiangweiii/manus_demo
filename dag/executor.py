@@ -420,7 +420,7 @@ class DAGExecutor:
             if not children:
                 continue
 
-            terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
+            terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK, NodeStatus.FAILED}
             if all(c.status in terminal for c in children):
                 any_completed = any(c.status == NodeStatus.COMPLETED for c in children)
                 if any_completed:
@@ -432,10 +432,14 @@ class DAGExecutor:
                     if node.status == NodeStatus.RUNNING:
                         self._sm.transition(node, NodeStatus.COMPLETED)
                 else:
-                    # 所有子节点均被跳过或回滚：通过状态机将结构节点也跳过
+                    # 所有子节点均被跳过/回滚/失败：通过状态机将结构节点也跳过
                     if node.status == NodeStatus.PENDING:
                         self._sm.transition(node, NodeStatus.SKIPPED)
                     elif node.status == NodeStatus.READY:
+                        self._sm.transition(node, NodeStatus.SKIPPED)
+                    elif node.status == NodeStatus.RUNNING:
+                        # 结构节点意外处于 RUNNING 状态时，先标记 FAILED 再 SKIPPED
+                        self._sm.transition(node, NodeStatus.FAILED)
                         self._sm.transition(node, NodeStatus.SKIPPED)
 
     # ------------------------------------------------------------------
