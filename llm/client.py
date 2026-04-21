@@ -197,10 +197,10 @@ class LLMClient:
     def _parse_json(text: str) -> Any:
         """
         Best-effort JSON extraction from LLM output.
-        从 LLM 输出中尽力提取 JSON，处理三种常见格式：
+        从 LLM 输出中尽力提取 JSON，处理两种常见格式：
         1. 纯 JSON 字符串
         2. Markdown 代码块（```json ... ``` 或 ``` ... ```）
-        3. 无法解析时抛出 ValueError
+        无法解析时抛出 ValueError。
         """
         import re
         text = text.strip()

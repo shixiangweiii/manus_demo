@@ -559,7 +559,7 @@ if response.tool_calls:
 
 ### _parse_json() 静态方法
 
-LLMClient._parse_json() 使用三种策略的降级处理，确保从各种 LLM 输出格式中成功提取 JSON。
+LLMClient._parse_json() 使用两种策略的降级处理（Two-strategy fallback），确保从各种 LLM 输出格式中成功提取 JSON。
 
 **策略 1：直接解析**
 ```python
@@ -585,18 +585,11 @@ for pattern in patterns:
 
 **适用场景**：LLM 输出 Markdown 格式，JSON 包裹在代码块中
 
-**策略 3：花括号提取**
-```python
-# 当前实现中未包含，但可作为扩展
-match = re.search(r'\{.*\}', text, re.DOTALL)
-if match:
-    return json.loads(match.group(0))
-```
-
-**适用场景**：JSON 嵌入在文本中，需要提取花括号部分
-
 **降级处理**：
-如果所有策略都失败，抛出 `ValueError` 异常，包含原始输出片段（前 300 字符）便于调试。
+如果以上两种策略都失败，抛出 `ValueError` 异常，包含原始输出片段（前 300 字符）便于调试。
+
+> [!TIP]
+> **未来扩展**：可考虑增加第三种策略——花括号提取（brace extraction），用于处理 JSON 嵌入在文本中的场景（如 `re.search(r'\{.*\}', text, re.DOTALL)`）。当前版本未实现此策略。
 
 **完整示例**：
 ```python

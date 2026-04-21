@@ -326,8 +326,10 @@ async def run_interactive() -> None:
     每轮对话共享同一个 Orchestrator 实例，因此长期记忆会在多轮之间积累。
     """
     console.print(Panel(
-        "[bold]Manus Demo v5[/bold] - Hybrid Multi-Agent System with Intelligent Plan Routing\n\n"
+        "[bold]Manus Demo v6[/bold] - Hybrid Multi-Agent System with Intelligent Plan Routing\n\n"
         "This demo implements:\n"
+        "  [green]NEW[/green] [bold]ReActEngine v2[/bold] — unified ReAct loop engine, extracted from Executor & EmergentPlanner (v6)\n"
+        "  [green]NEW[/green] [bold]LLM retry[/bold] — exponential backoff retry for LLM calls (v6)\n"
         "  [green]NEW[/green] [bold]Hybrid plan routing[/bold] — auto-selects simple (v1), complex (v2), or emergent (v5) path (v5)\n"
         "  [green]NEW[/green] [bold]Two-stage classifier[/bold] — rules fast-filter + LLM fallback (v4)\n"
         "  [green]NEW[/green] [bold]Emergent planning[/bold] — Claude Code style, plan emerges via TODO list (v5)\n"
@@ -343,7 +345,7 @@ async def run_interactive() -> None:
         "  [cyan]10.[/cyan] Adaptive planning — plan evolves during execution (v3)\n"
         "  [cyan]11.[/cyan] Tool router — failure-based tool switching hints (v3)\n"
         "  [cyan]12.[/cyan] Dynamic DAG mutation — add/remove/modify nodes at runtime (v3)\n"
-        "  [green]NEW[/green] [bold]13.[/bold] Emergent planning — Claude Code style, while(tool_use) loop with TODO list (v5)\n\n"
+        "  [cyan]13.[/cyan] Emergent planning — Claude Code style, while(tool_use) loop with TODO list (v5)\n\n"
         "Type your task and press Enter. Type [bold]quit[/bold] to exit.\n"
         "Set PLAN_MODE=simple|complex to force a specific path (default: auto).",
         title="[bold blue]Welcome[/bold blue]",

@@ -47,13 +47,25 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 - 处理网络超时等瞬态错误
 - 提高系统整体稳定性
 
-#### 2. ReActEngine v2 Feature Flag
+#### 2. ReActEngine v2 统一引擎
+
+**文件**: `react/engine.py`（219 行）
+
+**架构改进**:
+从 `ExecutorAgent._react_loop()` 和 `EmergentPlannerAgent._execute_todo()` 中抽取出公共的 ReAct（Reasoning + Acting）循环逻辑，形成统一的 `ReActEngine` 类，消除两处实现之间的代码重复。
 
 **配置项**: `ENABLE_REACT_ENGINE_V2` (默认 `false`)
 
 **支持范围**:
 - `ExecutorAgent`: 启用后使用统一的 ReActEngine 替代 `_react_loop`
 - `EmergentPlannerAgent`: 启用后使用统一的 ReActEngine 替代 `_execute_todo`
+
+**核心能力**:
+- 标准化的 ReAct 循环实现（Thought → Action → Observe）
+- 集成 ToolRouter 实现基于失败的工具切换
+- 可配置的迭代次数限制
+- 工具调用结果记录（ToolCallRecord）
+- 详细的错误处理和日志
 
 **设计目标**:
 - 统一两种 Agent 的 ReAct 循环实现

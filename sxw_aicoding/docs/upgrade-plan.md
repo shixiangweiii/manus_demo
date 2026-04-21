@@ -31,7 +31,7 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 
 ### 当前架构短板
 
-- **工具生态薄弱**：仅 3 个工具（CodeExecutor、FileOps、WebSearch），搜索是 mock 实现
+- **工具生态薄弱**：仅 3 个工具（1 个 mock: WebSearch + 2 个 real: CodeExecutor、FileOps），搜索是 mock 实现
 - **无真实环境交互能力**：缺少 Shell 命令执行、真实 Web 抓取等能力
 - **上下文管理粗糙**：粗略 token 估算，无精确计数和分级压缩
 - **无持久化外部记忆**：仅短期/长期内存，无文件持久化
