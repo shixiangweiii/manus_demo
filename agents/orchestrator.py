@@ -108,6 +108,7 @@ class OrchestratorAgent:
             self.llm_client,
             tools=tools or [],
             context_manager=self.context_manager,
+            on_event=self._emit,
         )
 
         # Memory & knowledge（记忆和知识检索）

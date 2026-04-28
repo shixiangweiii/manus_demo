@@ -138,14 +138,16 @@ class DAGExecutor:
             # Filter to only ACTION nodes (GOAL/SUBGOAL are structural)
             # 只执行 ACTION 节点（GOAL/SUBGOAL 是结构性分组，不直接执行）
             actionable = [n for n in ready if n.node_type == NodeType.ACTION]
+            structural = [n for n in ready if n.node_type != NodeType.ACTION]
+
+            # 立即自动完成同轮就绪的结构性节点（避免浪费额外 super-step）
+            for n in structural:
+                if n.status == NodeStatus.PENDING:
+                    self._sm.transition(n, NodeStatus.READY)
+                self._sm.transition(n, NodeStatus.RUNNING)
+                self._sm.transition(n, NodeStatus.COMPLETED)
+
             if not actionable:
-                # Structural nodes with all children done: mark them completed
-                # 所有就绪节点都是结构节点且其子节点已完成：直接标记为完成
-                for n in ready:
-                    if n.status == NodeStatus.PENDING:
-                        self._sm.transition(n, NodeStatus.READY)
-                    self._sm.transition(n, NodeStatus.RUNNING)
-                    self._sm.transition(n, NodeStatus.COMPLETED)
                 dag.refresh_ready_states()
                 continue
 
@@ -379,18 +381,27 @@ class DAGExecutor:
     @staticmethod
     def _evaluate_condition(edge, dag: TaskDAG) -> bool:
         """
-        Simple condition evaluation: check if the condition keyword
-        appears in the source node's result text.
-        Production systems would use LLM-based evaluation here.
+        Condition evaluation with smart matching strategy:
+        - CJK text: substring matching (word boundaries don't work without spaces)
+        - Latin text: word-boundary regex matching (avoids false positives)
 
-        简单条件评估：检查条件关键词是否出现在源节点的结果文本中。
-        生产系统通常会在此处使用 LLM 进行语义级条件评估。
+        条件评估使用智能匹配策略：
+        - 中日韩文本：子串匹配（CJK 无空格分词，\b 不可靠）
+        - 拉丁文本：词边界正则匹配（避免 "error" 匹配 "terror" 等误判）
         """
+        import re
         if not edge.condition:
-            return True  # 无条件限制，默认激活
+            return True
         source_result = dag.state.node_results.get(edge.source, "")
-        # 大小写不敏感的关键词匹配
-        return edge.condition.lower() in source_result.lower()
+        if not source_result:
+            return False
+        # CJK 字符 (U+4E00-U+9FFF, U+3040-U+30FF, U+AC00-U+D7AF) 无空格分词，用子串匹配
+        cjk_pattern = re.compile(r'[一-鿿぀-ヿ가-힯]')
+        if cjk_pattern.search(edge.condition):
+            return edge.condition.lower() in source_result.lower()
+        # Latin text: word-boundary matching
+        pattern = r'\b' + re.escape(edge.condition) + r'\b'
+        return bool(re.search(pattern, source_result, re.IGNORECASE))
 
     # ------------------------------------------------------------------
     # Structural node completion
@@ -420,7 +431,16 @@ class DAGExecutor:
             if not children:
                 continue
 
-            terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK, NodeStatus.FAILED}
+            # 检测未处理的 FAILED 子节点
+            failed_children = [c for c in children if c.status == NodeStatus.FAILED]
+            if failed_children:
+                logger.warning(
+                    "[DAGExecutor] Structural node %s has %d FAILED children not yet handled: %s",
+                    node.id, len(failed_children), [c.id for c in failed_children]
+                )
+                continue
+
+            terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
             if all(c.status in terminal for c in children):
                 any_completed = any(c.status == NodeStatus.COMPLETED for c in children)
                 if any_completed:

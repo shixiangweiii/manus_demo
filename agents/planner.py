@@ -212,21 +212,21 @@ class PlannerAgent(BaseAgent):
 
     async def classify_task(self, task: str) -> str:
         """
-        Determine whether a task is 'simple' or 'complex'.
-        判断任务是"简单"还是"复杂"。
+        Determine whether a task is 'simple', 'complex', or 'emergent'.
+        判断任务是"简单"、"复杂"还是"涌现型"。
 
         Routing logic:
           0. config.PLAN_MODE override (for testing/debugging)
-          1. Stage 1: rule-based fast filter -> simple / complex / ambiguous
+          1. Stage 1: rule-based fast filter -> simple / complex / emergent / ambiguous
           2. Stage 2: lightweight LLM call (only if Stage 1 returns ambiguous)
 
         路由逻辑：
           0. config.PLAN_MODE 强制覆盖（用于测试/调试）
-          1. Stage 1：规则快筛 -> simple / complex / ambiguous
+          1. Stage 1：规则快筛 -> simple / complex / emergent / ambiguous
           2. Stage 2：轻量 LLM 调用（仅当 Stage 1 返回 ambiguous 时触发）
 
         Returns:
-            "simple" or "complex"
+            "simple", "complex", or "emergent"
         """
         if config.PLAN_MODE in ("simple", "complex"):
             logger.info("[Planner] PLAN_MODE override: %s", config.PLAN_MODE)
@@ -246,14 +246,14 @@ class PlannerAgent(BaseAgent):
         Stage 1：基于规则启发式的快速分类器。
 
         Scores the task text on multiple dimensions. Returns:
-          - "simple"    if score <= -2  (strongly simple signals)
-          - "complex"   if score >= 3   (strongly complex signals)
+          - "simple"    if score <= -1  (strongly simple signals)
+          - "complex"   if score >= 2   (strongly complex signals)
           - "emergent"  if exploratory/uncertainty patterns detected (v5 routing)
           - "ambiguous" otherwise       (needs LLM to decide)
 
         按多个维度对任务文本打分。返回：
-          - "simple"    分数 <= -2（强简单信号）
-          - "complex"   分数 >= 3 （强复杂信号）
+          - "simple"    分数 <= -1（强简单信号）
+          - "complex"   分数 >= 2 （强复杂信号）
           - "emergent"  探索性/不确定性模式检测到时（v5 路由）
           - "ambiguous" 其他（需要 LLM 裁决）
         """
@@ -720,6 +720,8 @@ class PlannerAgent(BaseAgent):
                 {"id": "act_1_1", "description": task}
             ]}]
 
+        all_action_ids: list[str] = []  # 跟踪跨子目标的全局 Action ID 列表（必须在 subgoals 循环外，否则跨子目标回退失效）
+
         for sg in raw_subgoals:
             sg_id = str(sg.get("id", f"sub_{len(nodes)}"))
             sg_node = TaskNode(
@@ -769,6 +771,7 @@ class PlannerAgent(BaseAgent):
                 )
                 nodes[act_id] = act_node
                 subgoal_action_ids.append(act_id)
+                all_action_ids.append(act_id)
 
                 # SubGoal -> Action 依赖边（Action 需在所属 SubGoal 之后执行）
                 edges.append(TaskEdge(source=sg_id, target=act_id, edge_type=EdgeType.DEPENDENCY))
@@ -783,9 +786,13 @@ class PlannerAgent(BaseAgent):
                 # 因为 SubGoal 不执行也不写入 node_results，条件判断会失败
                 condition = act.get("condition")
                 if condition:
-                    # 条件边的 source 指向该 Action 的前一个 Action（如果有的话）
-                    # 否则指向该 action 自己（自己评估自己的条件）
-                    cond_source = subgoal_action_ids[-2] if len(subgoal_action_ids) >= 2 else act_id
+                    # 条件边的 source 优先指向同子目标前一个 ACTION，
+                    # 其次指向跨子目标的上一个 ACTION，最后回退到 subgoal 自身
+                    cond_source = (
+                        subgoal_action_ids[-2] if len(subgoal_action_ids) >= 2
+                        else all_action_ids[-1] if all_action_ids and all_action_ids[-1] != act_id
+                        else sg_id
+                    )
                     edges.append(TaskEdge(
                         source=cond_source, target=act_id,
                         edge_type=EdgeType.CONDITIONAL,

@@ -368,6 +368,7 @@ class TodoItem(BaseModel):
     status: TodoStatus = TodoStatus.PENDING                                         # 当前状态
     dependencies: list[int] = Field(default_factory=list, description="IDs of prerequisite TODOs")  # 前置 TODO ID 列表
     result: str | None = None                                                       # 执行结果文本
+    retry_count: int = Field(default=0, description="Number of retries after failure")  # 失败后重试次数
     created_at: float = Field(default_factory=time.time, description="Creation timestamp")  # 创建时间戳
     updated_at: float = Field(default_factory=time.time, description="Last update timestamp")  # 最后更新时间戳
 
@@ -463,6 +464,15 @@ class TodoList(BaseModel):
         """
         if todo_id in self.todos:
             self.todos[todo_id].status = TodoStatus.PENDING
+            self.todos[todo_id].updated_at = time.time()
+
+    def mark_blocked(self, todo_id: int) -> None:
+        """
+        Mark a TODO as blocked (permanently failed after max retries).
+        将 TODO 标记为阻塞（超过最大重试次数后永久失败）。
+        """
+        if todo_id in self.todos:
+            self.todos[todo_id].status = TodoStatus.BLOCKED
             self.todos[todo_id].updated_at = time.time()
 
     def is_complete(self) -> bool:

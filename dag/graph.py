@@ -341,20 +341,20 @@ class TaskDAG:
 
     def remove_pending_node(self, node_id: str) -> bool:
         """
-        Remove a PENDING node and all its connected edges.
-        移除一个 PENDING 状态的节点及其所有关联边。
+        Remove a PENDING or READY node and all its connected edges.
+        移除一个 PENDING 或 READY 状态的节点及其所有关联边。
 
-        Only PENDING nodes can be removed (running/completed nodes cannot).
+        Only PENDING/READY nodes can be removed (running/completed nodes cannot).
         Returns True on success.
 
-        只有 PENDING 状态的节点可以被移除（运行中/已完成的不行）。
+        只有 PENDING 或 READY 状态的节点可以被移除（运行中/已完成的不行）。
         """
         node = self.nodes.get(node_id)
         if node is None:
             logger.warning("[DAG] Cannot remove node '%s': not found", node_id)
             return False
-        if node.status != NodeStatus.PENDING:
-            logger.warning("[DAG] Cannot remove node '%s': status is %s (must be PENDING)", node_id, node.status.value)
+        if node.status not in (NodeStatus.PENDING, NodeStatus.READY):
+            logger.warning("[DAG] Cannot remove node '%s': status is %s (must be PENDING or READY)", node_id, node.status.value)
             return False
 
         del self.nodes[node_id]
@@ -491,8 +491,8 @@ class TaskDAG:
 
     def _validate_dag(self) -> None:
         """
-        Basic validation: check edges reference existing nodes.
-        基础校验：检查所有边的端点都存在于 nodes 中。
+        Basic validation: check edges reference existing nodes and DAG is acyclic.
+        基础校验：检查所有边的端点都存在于 nodes 中，且 DAG 无环。
         校验失败时抛出 ValueError，在 DAG 构造阶段就暴露问题。
         """
         node_ids = set(self.nodes.keys())
@@ -501,6 +501,14 @@ class TaskDAG:
                 raise ValueError(f"[DAG] Edge source '{e.source}' not found in nodes")
             if e.target not in node_ids:
                 raise ValueError(f"[DAG] Edge target '{e.target}' not found in nodes")
+
+        # Cycle detection via topological sort
+        topo_result = self.topological_sort()
+        if len(topo_result) != len(self.nodes):
+            raise ValueError(
+                f"[DAG] Cycle detected! Topological sort incomplete "
+                f"({len(topo_result)}/{len(self.nodes)} nodes sorted)."
+            )
 
     # ------------------------------------------------------------------
     # Display helpers

@@ -34,7 +34,8 @@ v6.0: Optional ReActEngine integration via Feature Flag.
 from __future__ import annotations
 
 import logging
-from typing import Any
+import time
+from typing import Any, Callable
 
 import config as config_module
 from agents.base import BaseAgent
@@ -95,6 +96,7 @@ class EmergentPlannerAgent(BaseAgent):
         context_manager: ContextManager | None = None,
         tool_router: ToolRouter | None = None,
         use_react_engine: bool | None = None,
+        on_event: Callable[[str, Any], None] | None = None,
     ):
         super().__init__(
             name="EmergentPlanner",
@@ -106,6 +108,7 @@ class EmergentPlannerAgent(BaseAgent):
         self.tool_schemas = [t.to_openai_tool() for t in tools]
         self.max_iterations = max_iterations or config_module.MAX_REACT_ITERATIONS
         self.tool_router = tool_router or ToolRouter(available_tools=list(self.tools.keys()))
+        self._on_event = on_event or (lambda *_: None)
         self._todo_list: TodoList | None = None
 
         use_engine = use_react_engine if use_react_engine is not None else config_module.ENABLE_REACT_ENGINE_V2
@@ -196,10 +199,22 @@ class EmergentPlannerAgent(BaseAgent):
                 self._todo_list.mark_completed(current_todo.id, result.output)
                 self._emit("todo_complete", {"todo": current_todo, "result": result})
             else:
-                # 修复 Critical #3: 失败时将 TODO 状态回退为 PENDING 以便重试
-                logger.warning("[EmergentPlanner] TODO %d failed: %s", current_todo.id, result.output[:200])
-                self._todo_list.mark_pending(current_todo.id)
-                self._emit("todo_failed", {"todo": current_todo, "result": result})
+                current_todo.retry_count += 1
+                max_retries = config_module.MAX_TODO_RETRIES
+                if current_todo.retry_count >= max_retries:
+                    logger.warning(
+                        "[EmergentPlanner] TODO %d failed %d times, marking as BLOCKED: %s",
+                        current_todo.id, current_todo.retry_count, result.output[:200]
+                    )
+                    self._todo_list.mark_blocked(current_todo.id)
+                    self._emit("todo_blocked", {"todo": current_todo, "result": result})
+                else:
+                    logger.warning(
+                        "[EmergentPlanner] TODO %d failed (retry %d/%d): %s",
+                        current_todo.id, current_todo.retry_count, max_retries, result.output[:200]
+                    )
+                    self._todo_list.mark_pending(current_todo.id)
+                    self._emit("todo_failed", {"todo": current_todo, "result": result})
 
             # 检查是否需要添加新 TODO（基于执行结果）
             await self._update_todo_list(result)
@@ -301,13 +316,21 @@ class EmergentPlannerAgent(BaseAgent):
             f'      "description": "New TODO description",\n'
             f'      "dependencies": [1, 2]  // IDs of prerequisite TODOs\n'
             f"    }}\n"
-            f"  ]\n"
+            f"  ],\n"
+            f'  "modify_todos": [\n'
+            f"    {{\n"
+            f'      "id": 2,\n'
+            f'      "description": "Updated description"\n'
+            f"    }}\n"
+            f"  ],\n"
+            f'  "blocked_todos": [3, 4]\n'
             f"}}"
         )
 
         try:
             data = await self.think_json(prompt, temperature=0.3)
             if data.get("needs_update", False):
+                # 处理新增 TODO
                 new_todos = data.get("new_todos", [])
                 if new_todos:
                     # 检查 TODO 数量限制
@@ -343,6 +366,25 @@ class EmergentPlannerAgent(BaseAgent):
                             "[EmergentPlanner] Added new TODO: %s",
                             todo_data.get("description", "")[:100]
                         )
+
+                # 处理 modify_todos（与 new_todos 并列，纯 modify 场景也能生效）
+                for mod in data.get("modify_todos", []):
+                    todo_id = mod.get("id")
+                    if todo_id and todo_id in self._todo_list.todos:
+                        new_desc = mod.get("description")
+                        if new_desc:
+                            self._todo_list.todos[todo_id].description = new_desc
+                            self._todo_list.todos[todo_id].updated_at = time.time()
+                            logger.info(
+                                "[EmergentPlanner] Modified TODO %d: %s",
+                                todo_id, new_desc[:100]
+                            )
+
+                # 处理 blocked_todos（与 new_todos 并列，纯 blocked 场景也能生效）
+                for todo_id in data.get("blocked_todos", []):
+                    if todo_id in self._todo_list.todos:
+                        self._todo_list.mark_blocked(todo_id)
+                        logger.info("[EmergentPlanner] Blocked TODO %d", todo_id)
 
         except Exception as exc:
             logger.warning("[EmergentPlanner] Failed to update TODO list: %s", exc)
@@ -466,23 +508,12 @@ class EmergentPlannerAgent(BaseAgent):
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
-        """Parse JSON string, handling common issues."""
-        import json
-        # 尝试直接解析
+        """Parse JSON string, handling markdown code blocks."""
+        from llm.client import LLMClient
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        # 尝试去除首尾的 markdown 代码块标记
-        if text.startswith("```"):
-            text = text.split("```", 1)[1]
-            if "```" in text:
-                text = text.rsplit("```", 1)[0]
-            text = text.strip()
-        # 修复 M5: 使用处理后的text而不是原始text
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
+            result = LLMClient._parse_json(text)
+            return result if isinstance(result, dict) else {}
+        except (ValueError, Exception):
             return {}
 
     def _get_todo_summary(self) -> str:
@@ -528,7 +559,7 @@ class EmergentPlannerAgent(BaseAgent):
         Emit an event to the UI callback (if configured).
         向 UI 回调函数发送事件（如果已配置）。
         """
-        # Note: EmergentPlanner doesn't have direct access to on_event callback
-        # It's typically handled by the caller (Orchestrator)
-        # TODO: Consider passing callback through constructor if needed
-        pass
+        try:
+            self._on_event(event, data)
+        except Exception:
+            logger.debug("[EmergentPlanner] UI callback error for event '%s'", event, exc_info=True)

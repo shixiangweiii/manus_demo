@@ -62,6 +62,7 @@ MAX_CHECKPOINTS = int(os.getenv("MAX_CHECKPOINTS", "10"))                 # 内�
 # --- 隐式规划（v5 新增）---
 EMERGENT_PLANNING_ENABLED = os.getenv("EMERGENT_PLANNING_ENABLED", "true").lower() == "true"  # 是否启用隐式规划模式
 MAX_TODO_ITEMS = int(os.getenv("MAX_TODO_ITEMS", "20"))  # TODO 列表最大项数
+MAX_TODO_RETRIES = int(os.getenv("MAX_TODO_RETRIES", "3"))  # 单个 TODO 最大重试次数
 TODO_COMPRESSION_THRESHOLD = float(os.getenv("TODO_COMPRESSION_THRESHOLD", "0.8"))  # 上下文窗口使用率达到 80% 时压缩 TODO
 
 # --- Tools ---
