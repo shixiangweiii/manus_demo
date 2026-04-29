@@ -30,7 +30,7 @@ Key operations:
 from __future__ import annotations
 
 import logging
-from collections import deque
+from collections import Counter, deque
 from typing import Any
 
 import config
@@ -274,6 +274,65 @@ class TaskDAG:
         """
         return any(n.status == NodeStatus.FAILED for n in self.nodes.values())
 
+    def get_blockage_report(self) -> dict[str, Any]:
+        """
+        Generate a diagnostic report about blocked/stuck nodes in the DAG.
+        生成 DAG 中阻塞/卡住节点的诊断报告。
+
+        Returns a dict with:
+          - total_nodes: total node count / 节点总数
+          - status_counts: {status_value: count} / 各状态节点数
+          - stuck_nodes: list of blocked node info / 阻塞节点列表
+          - has_blockage: True if any node is blocked / 是否存在阻塞
+        """
+        status_counts = Counter(n.status.value for n in self.nodes.values())
+        stuck_nodes = []
+        terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
+
+        for node in self.nodes.values():
+            if node.status in terminal:
+                continue
+            deps = self.get_dependency_ids(node.id)
+            blocking = [
+                d for d in deps
+                if d in self.nodes and self.nodes[d].status not in terminal
+            ]
+            if blocking:
+                stuck_nodes.append({
+                    "node_id": node.id,
+                    "status": node.status.value,
+                    "blocked_by": blocking,
+                })
+
+        return {
+            "total_nodes": len(self.nodes),
+            "status_counts": dict(status_counts),
+            "stuck_nodes": stuck_nodes,
+            "has_blockage": len(stuck_nodes) > 0,
+        }
+
+    def try_recover_blocked_nodes(self) -> int:
+        """
+        Attempt to recover nodes blocked because all deps are terminal but
+        the node is still PENDING. Promotes them to READY.
+        尝试恢复被阻塞的节点：所有依赖已到达终态但节点自身仍为 PENDING 的情况。
+        Returns the number of nodes recovered. / 返回被恢复的节点数量。
+        """
+        terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
+        recovered = 0
+        for node in self.nodes.values():
+            if node.status != NodeStatus.PENDING:
+                continue
+            deps = self.get_dependency_ids(node.id)
+            if not deps:
+                self._sm.transition(node, NodeStatus.READY)
+                recovered += 1
+                continue
+            if all(d in self.nodes and self.nodes[d].status in terminal for d in deps):
+                self._sm.transition(node, NodeStatus.READY)
+                recovered += 1
+        return recovered
+
     # ------------------------------------------------------------------
     # Dynamic graph mutation (v3 - Adaptive Planning)
     # 动态图变更（v3 - 自适应规划新增）
@@ -345,9 +404,11 @@ class TaskDAG:
         移除一个 PENDING 或 READY 状态的节点及其所有关联边。
 
         Only PENDING/READY nodes can be removed (running/completed nodes cannot).
+        Downstream nodes that depended on the removed node are cascade-skipped.
         Returns True on success.
 
         只有 PENDING 或 READY 状态的节点可以被移除（运行中/已完成的不行）。
+        依赖被移除节点的下游节点将被级联跳过。
         """
         node = self.nodes.get(node_id)
         if node is None:
@@ -356,6 +417,10 @@ class TaskDAG:
         if node.status not in (NodeStatus.PENDING, NodeStatus.READY):
             logger.warning("[DAG] Cannot remove node '%s': status is %s (must be PENDING or READY)", node_id, node.status.value)
             return False
+
+        # Capture downstream IDs BEFORE removal for orphan detection
+        # 在移除前捕获下游节点 ID，用于孤儿节点检测
+        former_downstream = self.get_downstream(node_id)
 
         del self.nodes[node_id]
         self.edges = [e for e in self.edges if e.source != node_id and e.target != node_id]
@@ -370,8 +435,33 @@ class TaskDAG:
         for target in self._reverse_dep_adjacency:
             self._reverse_dep_adjacency[target] = [s for s in self._reverse_dep_adjacency[target] if s != node_id]
 
+        # Cascade-skip downstream nodes whose dependencies now include a removed node
+        # 级联跳过依赖了被移除节点的下游节点
+        self._cascade_skip_orphans(node_id, former_downstream)
+
         logger.info("[DAG] Node removed: %s", node_id)
         return True
+
+    def _cascade_skip_orphans(self, removed_node_id: str, former_downstream_ids: list[str]) -> None:
+        """
+        After removing a node, cascade-skip downstream nodes that were connected
+        to the removed node via DEPENDENCY edges. Since the edges have already been
+        cleaned up by the caller, we skip all former downstream PENDING/READY nodes.
+
+        移除节点后，级联跳过通过 DEPENDENCY 边与被移除节点相连的下游节点。
+        由于边已被调用方清理，直接跳过所有前下游 PENDING/READY 节点。
+        """
+        for nid in former_downstream_ids:
+            node = self.nodes.get(nid)
+            if node is None:
+                continue
+            if node.status not in (NodeStatus.PENDING, NodeStatus.READY):
+                continue
+            self._sm.transition(node, NodeStatus.SKIPPED)
+            logger.info(
+                "[DAG] Node %s SKIPPED (orphaned after removing %s)",
+                nid, removed_node_id,
+            )
 
     def modify_node(self, node_id: str, description: str | None = None, exit_criteria_desc: str | None = None) -> bool:
         """
@@ -395,7 +485,10 @@ class TaskDAG:
 
         if exit_criteria_desc is not None:
             node.exit_criteria.description = exit_criteria_desc
-            node.exit_criteria.validation_prompt = f"Has this been achieved? {exit_criteria_desc}"
+            # Only auto-generate validation_prompt if it's empty or matches the default pattern
+            # 仅在 validation_prompt 为空或匹配默认模板时才自动生成
+            if not node.exit_criteria.validation_prompt or node.exit_criteria.validation_prompt.startswith("Has this been achieved?"):
+                node.exit_criteria.validation_prompt = f"Has this been achieved? {exit_criteria_desc}"
 
         return True
 
@@ -521,7 +614,6 @@ class TaskDAG:
         生成单行状态摘要（按 NodeStatus 枚举顺序），用于日志输出，
         如：DAG[5 nodes: 2 completed, 1 running, 2 pending]
         """
-        from collections import Counter
         counts = Counter(n.status.value for n in self.nodes.values())
         parts = [f"{counts[s.value]} {s.value}" for s in NodeStatus if counts.get(s.value, 0) > 0]
         return f"DAG[{len(self.nodes)} nodes: {', '.join(parts)}]"

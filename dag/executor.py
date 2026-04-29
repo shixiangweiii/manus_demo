@@ -99,6 +99,8 @@ class DAGExecutor:
         self._emit = on_event or (lambda *_: None)  # 事件回调（用于 UI 实时更新）
         self._sm = NodeStateMachine(on_transition=self._on_node_transition)  # 节点状态机
         self._adaptive_enabled = config.ADAPTIVE_PLANNING_ENABLED and planner_agent is not None  # v3
+        self._processed_conditions: set[tuple[str, str]] = set()  # 已评估条件边缓存 (source_id, target_id)
+        self._node_attempt_counts: dict[str, int] = {}  # 单节点重试计数（检测 FAILED->PENDING 循环）
 
     # ------------------------------------------------------------------
     # Main execution loop
@@ -121,9 +123,12 @@ class DAGExecutor:
         dag._sm = self._sm
         dag.refresh_ready_states()  # 初始化：将满足条件的 PENDING 节点提升为 READY
         step = 0
+        max_steps = max(len(dag.nodes) * 3, 100)  # Safety guard: prevent infinite loop
+        self._processed_conditions.clear()  # Reset condition memoization
+        self._node_attempt_counts.clear()  # Reset per-node retry counters
         # 动态性体现：哪些节点在哪一轮执行，完全取决于当时的运行时状态——前序节点的完成情况、失败情况、跳过情况，每一轮都不一样。
         # 如果 act_1_1 意外快速完成而 act_1_2 还在跑，下一轮可能只有依赖 act_1_1 的节点就绪，而依赖两者的节点还要等。
-        while not dag.is_complete():
+        while not dag.is_complete() and step < max_steps:
             step += 1
             ready = dag.get_ready_nodes()
             if not ready:
@@ -165,14 +170,34 @@ class DAGExecutor:
             # --- Super-step：带超时控制的并行执行当前批次节点 ---
             # 动态性 2：并行执行（同一 Super-step 内多节点并发）
             # v1 是严格串行：Step 1 → Step 2 → Step 3。v2 中发现多个就绪节点后，直接并行执行：
+            # --- Super-step: parallel execution with timeout ---
+            # --- Super-step：带超时控制的并行执行当前批次节点 ---
+            # 动态性 2：并行执行（同一 Super-step 内多节点并发）
+            # v1 是严格串行：Step 1 → Step 2 → Step 3。v2 中发现多个就绪节点后，直接并行执行：
+            # return_exceptions=True: prevent one node's exception from cancelling siblings
+            # return_exceptions=True：防止单节点异常取消其他并行节点
             results = await asyncio.gather(*[
                 # asyncio.gather 同时发起多个 _run_node_with_timeout 协程
                 self._run_node_with_timeout(node, dag) for node in batch
-            ])
+            ], return_exceptions=True)
 
             # --- Merge results + validate + handle failures ---
             # --- 合并结果 + 验证完成判据 + 处理失败 ---
             for node, result in zip(batch, results):
+                # Check for unexpected exceptions from asyncio.gather (not StepResult)
+                # 检查 asyncio.gather 返回的异常（非 StepResult 对象）
+                if isinstance(result, Exception):
+                    logger.error("[DAGExecutor] Unexpected exception for node %s: %s", node.id, result)
+                    if node.status == NodeStatus.PENDING:
+                        self._sm.transition(node, NodeStatus.READY)
+                    if node.status == NodeStatus.READY:
+                        self._sm.transition(node, NodeStatus.RUNNING)
+                    self._sm.transition(node, NodeStatus.FAILED)
+                    self._emit("node_failed", {"node": node, "result": None, "reason": "unexpected_exception"})
+                    self._track_node_attempt(node)
+                    await self._handle_failure(node, dag)
+                    continue
+
                 # Write result into centralized state (LangGraph reducer equivalent)
                 # 将结果写入集中式 DAGState（等价于 LangGraph 的 Reducer）
                 dag.state.merge_result(node.id, result.output)
@@ -192,11 +217,13 @@ class DAGExecutor:
                         # exit criteria 未通过，视为失败
                         self._sm.transition(node, NodeStatus.FAILED)
                         self._emit("node_failed", {"node": node, "result": result, "reason": "exit_criteria"})
+                        self._track_node_attempt(node)
                         await self._handle_failure(node, dag)
                 else:
                     # 执行本身失败
                     self._sm.transition(node, NodeStatus.FAILED)
                     self._emit("node_failed", {"node": node, "result": result, "reason": "execution"})
+                    self._track_node_attempt(node)
                     await self._handle_failure(node, dag)
 
             # --- Evaluate conditional edges ---
@@ -207,6 +234,7 @@ class DAGExecutor:
             # --- v3: 自适应规划——根据中间结果调整待执行节点 ---
             if self._adaptive_enabled and self._should_adapt(step, dag):
                 await self._adapt_plan(step, dag)
+                self._processed_conditions.clear()  # Topology may have changed
 
             # --- Promote PENDING -> READY for next super-step ---
             # --- 为下一轮 Super-step 提升就绪节点 ---
@@ -221,6 +249,17 @@ class DAGExecutor:
             dag.save_checkpoint()
 
             logger.info("[DAGExecutor] Super-step %d done. %s", step, dag.summary())
+
+        if step >= max_steps:
+            logger.error(
+                "[DAGExecutor] Exceeded max_steps (%d). Possible state machine cycle. %s",
+                max_steps, dag.summary(),
+            )
+            self._emit("execution_error", {
+                "reason": "max_steps_exceeded",
+                "max_steps": max_steps,
+                "summary": dag.summary(),
+            })
 
         return self._compile_output(dag)
 
@@ -263,6 +302,11 @@ class DAGExecutor:
         except asyncio.TimeoutError:
             logger.error("[DAGExecutor] Node %s timed out after %ds", node.id, timeout)
             return StepResult(step_id=node.id, success=False, output=f"Node execution timed out after {timeout}s")
+        except Exception as exc:
+            # Catch-all for unexpected exceptions during node execution
+            # 捕获节点执行过程中的非预期异常，防止单节点崩溃影响整个批次
+            logger.error("[DAGExecutor] Unexpected error executing node %s: %s", node.id, exc, exc_info=True)
+            return StepResult(step_id=node.id, success=False, output=f"Unexpected error: {exc}")
 
     # ------------------------------------------------------------------
     # Exit criteria validation
@@ -290,6 +334,19 @@ class DAGExecutor:
     # 失败处理，动态性 4：失败感知 + 回滚 + 子树级联跳过，v1 对失败的处理是「全盘重来」。v2 的失败处理是局部的、多层次的：
     # ------------------------------------------------------------------
 
+    def _track_node_attempt(self, node: TaskNode) -> None:
+        """
+        Track per-node failure count to detect retry loops.
+        追踪单节点失败次数，检测 FAILED->PENDING 重试循环。
+        """
+        attempts = self._node_attempt_counts.get(node.id, 0) + 1
+        self._node_attempt_counts[node.id] = attempts
+        if attempts >= 3:
+            logger.warning(
+                "[DAGExecutor] Node %s has failed %d times — potential retry loop",
+                node.id, attempts,
+            )
+
     async def _handle_failure(self, node: TaskNode, dag: TaskDAG) -> None:
         """
         Handle a failed node:
@@ -310,8 +367,8 @@ class DAGExecutor:
             for rb_id in rollback_targets:
                 rb_node = dag.nodes.get(rb_id)
                 if rb_node and rb_node.status == NodeStatus.PENDING:
-                    # 执行回滚节点（通常是清理/撤销操作）
-                    rb_result = await self._run_node(rb_node, dag)
+                    # 执行回滚节点（通常是清理/撤销操作），带超时保护
+                    rb_result = await self._run_node_with_timeout(rb_node, dag)
                     dag.state.merge_result(rb_id, rb_result.output)
                     if rb_result.success:
                         self._sm.transition(rb_node, NodeStatus.COMPLETED)
@@ -360,11 +417,22 @@ class DAGExecutor:
             if node.status != NodeStatus.COMPLETED:
                 continue
             for edge in dag.get_conditional_edges(node.id):
+                # Skip already-evaluated (source, target) pairs to avoid O(N_completed x E) per step
+                # 跳过已评估的 (source, target) 对，避免每步 O(N_completed x E) 重复计算
+                pair = (node.id, edge.target)
+                if pair in self._processed_conditions:
+                    continue
+
                 target = dag.nodes.get(edge.target)
-                if target is None or target.status != NodeStatus.PENDING:
+                # Check both PENDING and READY: READY nodes may be left over from max_parallel capping
+                # 同时检查 PENDING 和 READY 状态：READY 节点可能是 max_parallel 截断后遗留的
+                if target is None or target.status not in (NodeStatus.PENDING, NodeStatus.READY):
                     continue
 
                 condition_met = self._evaluate_condition(edge, dag)
+                # Mark this pair as evaluated regardless of outcome
+                # 无论条件是否满足，都标记为已评估
+                self._processed_conditions.add(pair)
                 self._emit("condition_evaluated", {
                     "edge": edge,
                     "met": condition_met,
@@ -443,6 +511,7 @@ class DAGExecutor:
             terminal = {NodeStatus.COMPLETED, NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK}
             if all(c.status in terminal for c in children):
                 any_completed = any(c.status == NodeStatus.COMPLETED for c in children)
+                initial_status = node.status
                 if any_completed:
                     # 至少有一个子节点成功完成：沿正常路径转移结构节点状态
                     if node.status == NodeStatus.PENDING:
@@ -451,6 +520,11 @@ class DAGExecutor:
                         self._sm.transition(node, NodeStatus.RUNNING)
                     if node.status == NodeStatus.RUNNING:
                         self._sm.transition(node, NodeStatus.COMPLETED)
+                    if node.status != NodeStatus.COMPLETED:
+                        logger.warning(
+                            "[DAGExecutor] Structural node %s stuck at %s after COMPLETED cascade (started at %s)",
+                            node.id, node.status.value, initial_status.value,
+                        )
                 else:
                     # 所有子节点均被跳过/回滚/失败：通过状态机将结构节点也跳过
                     if node.status == NodeStatus.PENDING:
@@ -458,9 +532,12 @@ class DAGExecutor:
                     elif node.status == NodeStatus.READY:
                         self._sm.transition(node, NodeStatus.SKIPPED)
                     elif node.status == NodeStatus.RUNNING:
-                        # 结构节点处于 RUNNING 状态时，直接标记为 SKIPPED
-                        # （结构节点的 RUNNING 只是状态占位符，不代表真正的执行）
                         self._sm.transition(node, NodeStatus.SKIPPED)
+                    if node.status != NodeStatus.SKIPPED:
+                        logger.warning(
+                            "[DAGExecutor] Structural node %s stuck at %s after SKIPPED cascade (started at %s)",
+                            node.id, node.status.value, initial_status.value,
+                        )
 
     # ------------------------------------------------------------------
     # Output compilation

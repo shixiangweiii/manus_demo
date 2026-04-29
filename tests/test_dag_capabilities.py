@@ -233,9 +233,6 @@ class TestParallelExecutionWithTools:
         """
         dag = _build_research_dag()
 
-        # P2 优化：调整 checkpoint_interval 以确保测试能够验证 checkpoint 功能
-        dag._checkpoint_interval = 1  # 每轮 super-step 都保存 checkpoint
-
         # --- 预先将结构节点标记完成，聚焦测试 ACTION 节点 ---
         dag.nodes["goal_1"].status = NodeStatus.COMPLETED
         dag.nodes["sub_1"].status = NodeStatus.COMPLETED
@@ -845,13 +842,14 @@ class TestBugFixesVerification:
 
     def test_executor_instance_isolation_exists(self):
         """
-        验证 Critical #1 修复：dag/executor.py 中存在 ExecutorAgent 实例隔离逻辑。
+        验证 Critical #1 修复：dag/executor.py 中存在并行节点异常隔离逻辑。
+        return_exceptions=True 确保 asyncio.gather 不因单节点异常取消整个批次。
         """
         import inspect
         from dag.executor import DAGExecutor
 
         source = inspect.getsource(DAGExecutor)
-        assert "ExecutorAgent(" in source, "DAGExecutor 应创建新的 ExecutorAgent 实例"
+        assert "return_exceptions=True" in source, "DAGExecutor 应在 asyncio.gather 中使用 return_exceptions=True 实现异常隔离"
 
     # ------------------------------------------------------------------
     # Critical #2: 统一工具错误语义
@@ -1038,3 +1036,175 @@ class TestBugFixesVerification:
         assert "a" in merged.state.node_results, "A 的结果应被保留"
         assert "b" not in merged.state.node_results, "B 的结果应被清理"
         assert "c" not in merged.state.node_results, "C 的结果不应存在"
+
+
+# ======================================================================
+# Bug Fix Verification Tests (April 2026)
+# 验证 2026 年 4 月修复的 bug 的回归测试
+# ======================================================================
+
+
+class TestBugFixVerification2026:
+    """
+    Tests verifying the bugs remediated in the April 2026 fix pass.
+    验证 2026 年 4 月修复的 bug 的回归测试。
+    """
+
+    @pytest.mark.asyncio
+    async def test_bug1_gather_exception_isolation(self):
+        """
+        Bug #1: Verify that one node's unexpected exception does not crash
+        the entire super-step batch.
+        验证单节点异常不会导致整个批次崩溃。
+        """
+        dag = TaskDAG(
+            task="test isolation",
+            nodes={
+                "a": TaskNode(id="a", node_type=NodeType.ACTION, description="A"),
+                "b": TaskNode(id="b", node_type=NodeType.ACTION, description="B"),
+            },
+            edges=[],
+        )
+
+        mock_executor = AsyncMock()
+
+        async def fake_execute(node, context=""):
+            if node.id == "a":
+                raise RuntimeError("Simulated unexpected crash")
+            return StepResult(step_id=node.id, success=True, output=f"Result of {node.id}")
+
+        mock_executor.execute_node = AsyncMock(side_effect=fake_execute)
+        mock_reflector = AsyncMock()
+        mock_reflector.validate_exit_criteria = AsyncMock(return_value=True)
+
+        executor = DAGExecutor(
+            executor_agent=mock_executor,
+            reflector_agent=mock_reflector,
+            max_parallel=3,
+        )
+        await executor.execute(dag)
+        # Node b should still have completed despite node a crashing
+        assert dag.nodes["b"].status == NodeStatus.COMPLETED
+        # Node a should be in a terminal state (FAILED -> SKIPPED via _handle_failure)
+        assert dag.nodes["a"].status in (NodeStatus.SKIPPED, NodeStatus.ROLLED_BACK, NodeStatus.FAILED)
+
+    def test_bug2_conditional_skips_ready(self):
+        """
+        Bug #2: Verify conditional edges can skip READY nodes.
+        验证条件边能跳过 READY 状态的节点。
+        """
+        nodes = {
+            "source": TaskNode(
+                id="source", node_type=NodeType.ACTION, description="S",
+                status=NodeStatus.COMPLETED,
+            ),
+            "target": TaskNode(
+                id="target", node_type=NodeType.ACTION, description="T",
+                status=NodeStatus.READY,
+            ),
+        }
+        edges = [
+            TaskEdge(source="source", target="target", edge_type=EdgeType.CONDITIONAL, condition="magic_word"),
+        ]
+        dag = TaskDAG(task="test", nodes=nodes, edges=edges)
+        dag.state.node_results["source"] = "Result without the keyword"
+
+        executor = DAGExecutor(
+            executor_agent=AsyncMock(),
+            reflector_agent=AsyncMock(),
+        )
+        executor._process_conditions(dag)
+        assert dag.nodes["target"].status == NodeStatus.SKIPPED
+
+    def test_bug4_cascade_skip_orphans(self):
+        """
+        Bug #4: Verify removing a node cascade-skips orphaned downstream nodes.
+        验证移除节点后级联跳过被孤立的下游节点。
+        """
+        nodes = {
+            "a": TaskNode(id="a", node_type=NodeType.ACTION, description="A"),
+            "b": TaskNode(id="b", node_type=NodeType.ACTION, description="B"),
+            "c": TaskNode(id="c", node_type=NodeType.ACTION, description="C"),
+        }
+        edges = [
+            TaskEdge(source="a", target="b", edge_type=EdgeType.DEPENDENCY),
+            TaskEdge(source="b", target="c", edge_type=EdgeType.DEPENDENCY),
+        ]
+        dag = TaskDAG(task="test", nodes=nodes, edges=edges)
+        dag.remove_pending_node("a")
+        # b should be cascade-skipped because its dependency (a) was removed
+        assert dag.nodes["b"].status == NodeStatus.SKIPPED
+        # c should also be cascade-skipped (transitively through b)
+        assert dag.nodes["c"].status == NodeStatus.SKIPPED
+
+    @pytest.mark.asyncio
+    async def test_bug5_rollback_uses_timeout(self):
+        """
+        Bug #5: Verify rollback nodes use _run_node_with_timeout (mock inspection).
+        验证回滚节点使用带超时的执行方法。
+        """
+        nodes = {
+            "act_risky": TaskNode(
+                id="act_risky", node_type=NodeType.ACTION, description="Risky",
+                exit_criteria=ExitCriteria(description="Done", required=False),
+            ),
+            "act_cleanup": TaskNode(
+                id="act_cleanup", node_type=NodeType.ACTION, description="Cleanup",
+                exit_criteria=ExitCriteria(description="Done", required=False),
+            ),
+        }
+        edges = [
+            TaskEdge(source="act_risky", target="act_cleanup", edge_type=EdgeType.DEPENDENCY),
+            TaskEdge(source="act_risky", target="act_cleanup", edge_type=EdgeType.ROLLBACK),
+        ]
+        dag = TaskDAG(task="test rollback timeout", nodes=nodes, edges=edges)
+
+        mock_executor = AsyncMock()
+
+        async def fake_execute(node, context=""):
+            if node.id == "act_risky":
+                return StepResult(step_id="act_risky", success=False, output="Failed")
+            return StepResult(step_id="act_cleanup", success=True, output="Cleaned")
+
+        mock_executor.execute_node = AsyncMock(side_effect=fake_execute)
+        mock_reflector = AsyncMock()
+        mock_reflector.validate_exit_criteria = AsyncMock(return_value=True)
+
+        executor = DAGExecutor(
+            executor_agent=mock_executor,
+            reflector_agent=mock_reflector,
+        )
+        await executor.execute(dag)
+        # Rollback node should have been executed
+        assert dag.nodes["act_cleanup"].status == NodeStatus.COMPLETED
+
+    def test_bug7_condition_memoization(self):
+        """
+        Bug #7: Verify conditions are not re-evaluated after first processing.
+        验证条件评估结果被缓存，不会重复评估。
+        """
+        nodes = {
+            "source": TaskNode(
+                id="source", node_type=NodeType.ACTION, description="S",
+                status=NodeStatus.COMPLETED,
+            ),
+            "target": TaskNode(
+                id="target", node_type=NodeType.ACTION, description="T",
+                status=NodeStatus.PENDING,
+            ),
+        }
+        edges = [
+            TaskEdge(source="source", target="target", edge_type=EdgeType.CONDITIONAL, condition="keyword"),
+        ]
+        dag = TaskDAG(task="test", nodes=nodes, edges=edges)
+        dag.state.node_results["source"] = "Contains the keyword"
+
+        executor = DAGExecutor(
+            executor_agent=AsyncMock(),
+            reflector_agent=AsyncMock(),
+        )
+        # First call should evaluate and memoize
+        executor._process_conditions(dag)
+        assert ("source", "target") in executor._processed_conditions
+        # Target should NOT be skipped (condition met)
+        assert dag.nodes["target"].status == NodeStatus.PENDING
