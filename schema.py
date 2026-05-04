@@ -392,10 +392,33 @@ class TodoList(BaseModel):
     todos: dict[int, TodoItem] = Field(default_factory=dict, description="TODO items indexed by ID")  # 按 ID 索引的 TODO 项
     next_id: int = Field(default=1, description="Next available TODO ID")          # 下一个可用 TODO ID
 
+    def _has_cycle(self) -> bool:
+        """Check if the dependency graph has cycles using Kahn's algorithm."""
+        if not self.todos:
+            return False
+        dependents: dict[int, list[int]] = {tid: [] for tid in self.todos}
+        in_deg: dict[int, int] = {}
+        for tid, todo in self.todos.items():
+            valid_deps = [d for d in todo.dependencies if d in self.todos]
+            in_deg[tid] = len(valid_deps)
+            for dep_id in valid_deps:
+                dependents[dep_id].append(tid)
+        queue = [tid for tid, deg in in_deg.items() if deg == 0]
+        visited = 0
+        while queue:
+            tid = queue.pop(0)
+            visited += 1
+            for dependent_id in dependents.get(tid, []):
+                in_deg[dependent_id] -= 1
+                if in_deg[dependent_id] == 0:
+                    queue.append(dependent_id)
+        return visited != len(self.todos)
+
     def add_todo(self, description: str, dependencies: list[int] | None = None) -> TodoItem:
         """
         Add a new TODO to the list. Returns the created TODO item.
         向 TODO 列表添加新项，返回创建的 TODO 项。
+        Raises ValueError if adding would create a dependency cycle.
         """
         todo = TodoItem(
             id=self.next_id,
@@ -403,6 +426,11 @@ class TodoList(BaseModel):
             dependencies=dependencies or [],
         )
         self.todos[self.next_id] = todo
+        if self._has_cycle():
+            del self.todos[self.next_id]
+            raise ValueError(
+                f"Cannot add TODO {self.next_id}: would create dependency cycle"
+            )
         self.next_id += 1
         return todo
 

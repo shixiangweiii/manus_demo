@@ -33,6 +33,7 @@ v6.0: Optional ReActEngine integration via Feature Flag.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Callable
@@ -63,10 +64,10 @@ Available tools will be provided via function calling. Use them wisely.
 When you believe the overall task is complete, respond with a clear summary
 of what was accomplished. Do NOT call any more tools once done.
 
-IMPORTANT: You can dynamically modify the TODO list during execution:
-- Add new TODOs when you discover additional work
-- Mark TODOs as completed when their objectives are met
-- Update TODO descriptions if the goal changes
+IMPORTANT: The system manages a TODO list on your behalf. After each
+execution step, the system may ask you to review and update the TODO
+list. You can suggest new TODOs, modifications, or mark items as blocked
+through your responses. Focus on executing each TODO with the tools available.
 """
 
 
@@ -93,6 +94,7 @@ class EmergentPlannerAgent(BaseAgent):
         llm_client: LLMClient,
         tools: list[BaseTool],
         max_iterations: int | None = None,
+        max_outer_iterations: int | None = None,
         context_manager: ContextManager | None = None,
         tool_router: ToolRouter | None = None,
         use_react_engine: bool | None = None,
@@ -107,6 +109,7 @@ class EmergentPlannerAgent(BaseAgent):
         self.tools = {t.name: t for t in tools}
         self.tool_schemas = [t.to_openai_tool() for t in tools]
         self.max_iterations = max_iterations or config_module.MAX_REACT_ITERATIONS
+        self.max_outer_iterations = max_outer_iterations or config_module.MAX_EMERGENT_OUTER_ITERATIONS
         self.tool_router = tool_router or ToolRouter(available_tools=list(self.tools.keys()))
         self._on_event = on_event or (lambda *_: None)
         self._todo_list: TodoList | None = None
@@ -167,8 +170,8 @@ class EmergentPlannerAgent(BaseAgent):
             self._emit("phase", f"Emergent planning iteration {iteration}...")
 
             # 检查是否超过最大迭代次数
-            if iteration > self.max_iterations:
-                logger.warning("[EmergentPlanner] Hit max iterations (%d)", self.max_iterations)
+            if iteration > self.max_outer_iterations:
+                logger.warning("[EmergentPlanner] Hit max outer iterations (%d)", self.max_outer_iterations)
                 break
 
             # 选择下一个就绪 TODO
@@ -190,8 +193,32 @@ class EmergentPlannerAgent(BaseAgent):
             current_todo = ready_todos[0]
             self._emit("todo_start", {"todo": current_todo})
 
-            # 为该 TODO 执行 ReAct 循环
-            result = await self._execute_todo(current_todo)
+            # 为该 TODO 执行 ReAct 循环（含超时和异常保护）
+            try:
+                result = await asyncio.wait_for(
+                    self._execute_todo(current_todo),
+                    timeout=config_module.NODE_EXECUTION_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[EmergentPlanner] TODO %d timed out after %ds",
+                    current_todo.id, config_module.NODE_EXECUTION_TIMEOUT,
+                )
+                result = StepResult(
+                    step_id=current_todo.id, success=False,
+                    output=f"TODO timed out after {config_module.NODE_EXECUTION_TIMEOUT}s",
+                    tool_calls_log=[],
+                )
+            except Exception as exc:
+                logger.error(
+                    "[EmergentPlanner] TODO %d crashed: %s",
+                    current_todo.id, exc, exc_info=True,
+                )
+                result = StepResult(
+                    step_id=current_todo.id, success=False,
+                    output=f"Unhandled exception: {exc}",
+                    tool_calls_log=[],
+                )
             all_results.append(result)
 
             # 更新 TODO 状态
@@ -216,14 +243,19 @@ class EmergentPlannerAgent(BaseAgent):
                     self._todo_list.mark_pending(current_todo.id)
                     self._emit("todo_failed", {"todo": current_todo, "result": result})
 
-            # 检查是否需要添加新 TODO（基于执行结果）
-            await self._update_todo_list(result)
+            # 检查是否需要添加新 TODO（仅在失败或无就绪 TODO 时触发，减少 LLM 调用）
+            should_update = (
+                not result.success
+                or not self._todo_list.get_ready_todos()
+            )
+            if should_update:
+                await self._update_todo_list(result)
 
             # 显示当前 TODO 列表状态
             self._emit("todo_list_update", self._get_todo_summary())
 
         # 汇总所有已完成 TODO 的结果
-        final_answer = self._compile_answer(task, all_results)
+        final_answer = await self._compile_answer(task, all_results)
         self._emit("phase", "Emergent planning completed.")
         return final_answer
 
@@ -276,10 +308,24 @@ class EmergentPlannerAgent(BaseAgent):
             self._emit("todo_list_initialized", self._get_todo_summary())
 
         except Exception as exc:
-            logger.warning("[EmergentPlanner] Failed to parse initial TODOs: %s. Creating default.", exc)
-            # 降级处理：创建一个默认 TODO
-            self._todo_list.add_todo(description=f"Complete task: {task}")
-            self._emit("todo_list_initialized", self._get_todo_summary())
+            logger.warning("[EmergentPlanner] Failed to parse initial TODOs: %s. Retrying...", exc)
+            try:
+                self.reset()
+                data = await self.think_json(
+                    prompt + "\n\nIMPORTANT: Respond with valid JSON only.",
+                    temperature=0.1,
+                )
+                for todo_data in data.get("todos", []):
+                    self._todo_list.add_todo(
+                        description=todo_data.get("description", ""),
+                        dependencies=todo_data.get("dependencies", []),
+                    )
+                self._emit("todo_list_initialized", self._get_todo_summary())
+                return
+            except Exception as retry_exc:
+                logger.warning("[EmergentPlanner] Retry also failed: %s. Creating default.", retry_exc)
+                self._todo_list.add_todo(description=f"Complete task: {task}")
+                self._emit("todo_list_initialized", self._get_todo_summary())
 
     async def _update_todo_list(self, last_result: StepResult) -> None:
         """
@@ -296,8 +342,6 @@ class EmergentPlannerAgent(BaseAgent):
         - 修改现有 TODO 描述
         - 在依赖未满足时将 TODO 标记为阻塞
         """
-        self.reset()
-
         prompt = (
             f"Review the execution progress and determine if the TODO list needs updates.\n\n"
             f"Current task: {self._todo_list.task}\n\n"
@@ -357,10 +401,14 @@ class EmergentPlannerAgent(BaseAgent):
                         if not todo_data.get("description"):
                             continue  # 跳过空描述的TODO
 
-                        self._todo_list.add_todo(
-                            description=todo_data.get("description", ""),
-                            dependencies=valid_deps,
-                        )
+                        try:
+                            self._todo_list.add_todo(
+                                description=todo_data.get("description", ""),
+                                dependencies=valid_deps,
+                            )
+                        except ValueError as e:
+                            logger.warning("[EmergentPlanner] Skipping: %s", e)
+                            continue
                         current_count += 1
                         logger.info(
                             "[EmergentPlanner] Added new TODO: %s",
@@ -371,6 +419,9 @@ class EmergentPlannerAgent(BaseAgent):
                 for mod in data.get("modify_todos", []):
                     todo_id = mod.get("id")
                     if todo_id and todo_id in self._todo_list.todos:
+                        todo_item = self._todo_list.todos[todo_id]
+                        if todo_item.status == TodoStatus.COMPLETED:
+                            continue
                         new_desc = mod.get("description")
                         if new_desc:
                             self._todo_list.todos[todo_id].description = new_desc
@@ -405,7 +456,8 @@ class EmergentPlannerAgent(BaseAgent):
 
         v6.0: If ENABLE_REACT_ENGINE_V2=true, delegates to unified ReActEngine.
         """
-        self.tool_router.reset_node(str(todo.id))
+        if todo.retry_count == 0:
+            self.tool_router.reset_node(str(todo.id))
 
         prompt = f"Execute the following TODO:\n\nTODO {todo.id}: {todo.description}"
 
@@ -438,7 +490,7 @@ class EmergentPlannerAgent(BaseAgent):
             try:
                 continue_msg = "Continue executing the TODO based on the tool results above."
                 router_hint = self.tool_router.get_hint(str(todo.id))
-                if router_hint and iteration > 1:
+                if router_hint:
                     continue_msg += f"\n\nIMPORTANT: {router_hint}"
 
                 response_msg = await self.think_with_tools(
@@ -467,17 +519,18 @@ class EmergentPlannerAgent(BaseAgent):
 
             for tool_call in response_msg.tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    func_args = self._parse_json(tool_call.function.arguments)
-                except Exception:
+                func_args = self._parse_json(tool_call.function.arguments)
+                if func_args is None:
                     func_args = {}
 
                 logger.info("[EmergentPlanner] Tool call: %s(%s)", func_name, func_args)
 
                 tool = self.tools.get(func_name)
+                is_error = False
                 if tool is None:
                     result = f"Error: Unknown tool '{func_name}'"
                     self.tool_router.record_failure(str(todo.id), func_name)
+                    is_error = True
                 else:
                     try:
                         result = await tool.execute(**func_args)
@@ -485,11 +538,12 @@ class EmergentPlannerAgent(BaseAgent):
                     except Exception as exc:
                         result = f"Tool execution error: {exc}"
                         self.tool_router.record_failure(str(todo.id), func_name)
+                        is_error = True
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
-                    result=result[:1000],
+                    result=result if is_error else result[:1000],
                 ))
                 self.add_tool_result(tool_call.id, result)
 
@@ -507,14 +561,14 @@ class EmergentPlannerAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_json(text: str) -> dict[str, Any]:
+    def _parse_json(text: str) -> dict[str, Any] | None:
         """Parse JSON string, handling markdown code blocks."""
         from llm.client import LLMClient
         try:
             result = LLMClient._parse_json(text)
-            return result if isinstance(result, dict) else {}
+            return result if isinstance(result, dict) else None
         except (ValueError, Exception):
-            return {}
+            return None
 
     def _get_todo_summary(self) -> str:
         """
@@ -538,21 +592,41 @@ class EmergentPlannerAgent(BaseAgent):
 
         return "\n".join(lines)
 
-    def _compile_answer(self, task: str, results: list[StepResult]) -> str:
+    async def _compile_answer(self, task: str, results: list[StepResult]) -> str:
         """
-        Compile results from all completed TODOs into final answer.
-        将所有已完成 TODO 的结果汇总为最终答案。
+        Compile results from all completed TODOs into final answer using LLM synthesis.
+        使用 LLM 综合所有已完成 TODO 的结果为最终答案。
         """
         successful = [r for r in results if r.success]
+        blocked = [r for r in results if not r.success]
+
+        if not successful and not blocked:
+            return "No TODOs were processed."
+
         if not successful:
-            return "Unfortunately, no TODOs were completed successfully."
+            blocked_summary = "\n".join(
+                f"- TODO {r.step_id}: {r.output[:200]}" for r in blocked
+            )
+            return f"Unfortunately, all TODOs failed or were blocked:\n{blocked_summary}"
 
-        # 简单汇总所有结果
-        parts = []
-        for i, result in enumerate(successful, 1):
-            parts.append(f"[Result {i}]:\n{result.output}")
+        results_summary = "\n".join(
+            f"[TODO {r.step_id}]: {r.output}" for r in successful
+        )
+        if blocked:
+            results_summary += "\n\nBlocked/failed TODOs:\n" + "\n".join(
+                f"- TODO {r.step_id}: {r.output[:200]}" for r in blocked
+            )
 
-        return "\n\n".join(parts)
+        try:
+            synthesis = await self.think(
+                f"Based on these execution results, provide a clear, concise "
+                f"summary answering the original task: '{task}'\n\n"
+                f"Results:\n{results_summary}"
+            )
+            return synthesis
+        except Exception:
+            parts = [f"[Result {i}]:\n{r.output}" for i, r in enumerate(successful, 1)]
+            return "\n\n".join(parts)
 
     def _emit(self, event: str, data: Any = None) -> None:
         """

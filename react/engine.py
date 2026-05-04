@@ -108,6 +108,8 @@ class ReActEngine:
         tool_calls_log: list[ToolCallRecord] = []
         iteration = 0
         messages: list[dict[str, Any]] = []
+        if system_hint:
+            messages.append({"role": "system", "content": system_hint})
 
         logger.info("[ReActEngine] Starting execution for %s: %s", step_id, prompt[:100])
 
@@ -119,19 +121,39 @@ class ReActEngine:
                 continue_msg = "Continue executing based on the tool results above."
                 router_hint = self.tool_router.get_hint(str(step_id))
 
-                if router_hint and iteration > 1:
+                if router_hint:
                     continue_msg += f"\n\nIMPORTANT: {router_hint}"
 
-                if system_hint and iteration == 1:
-                    user_input = f"{system_hint}\n\n{prompt}"
+                if iteration == 1:
+                    user_input = prompt
                 else:
-                    user_input = prompt if iteration == 1 else continue_msg
+                    user_input = continue_msg
+
+                messages.append({"role": "user", "content": user_input})
 
                 response_msg = await self.llm_client.chat_with_tools(
-                    [{"role": "user", "content": user_input}],
+                    messages,
                     tools=self.tool_schemas,
                     temperature=0.5,
                 )
+
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": response_msg.content or "",
+                }
+                if response_msg.tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in response_msg.tool_calls
+                    ]
+                messages.append(assistant_msg)
 
             except Exception as exc:
                 logger.error("[ReActEngine] LLM call failed: %s", exc)
@@ -156,6 +178,7 @@ class ReActEngine:
             tool_messages: list[dict[str, Any]] = []
 
             for tool_call in response_msg.tool_calls:
+                has_error = False
                 func_name = tool_call.function.name
                 try:
                     func_args = json.loads(tool_call.function.arguments)
@@ -165,10 +188,11 @@ class ReActEngine:
                 logger.info("[ReActEngine] Tool call: %s(%s)", func_name, func_args)
 
                 tool = self.tools.get(func_name)
+                is_error = False
                 if tool is None:
                     result = f"Error: Unknown tool '{func_name}'"
                     self.tool_router.record_failure(str(step_id), func_name)
-                    has_error = True
+                    is_error = True
                 else:
                     try:
                         result = await tool.execute(**func_args)
@@ -176,15 +200,16 @@ class ReActEngine:
                     except Exception as exc:
                         result = f"Error: Tool execution error: {exc}"
                         self.tool_router.record_failure(str(step_id), func_name)
-                        has_error = True
+                        is_error = True
 
                 if isinstance(result, str) and result.startswith("Error:"):
-                    has_error = True
+                    is_error = True
+                has_error = has_error or is_error
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
-                    result=result[:1000],
+                    result=result if is_error else result[:1000],
                 ))
 
                 if has_error:

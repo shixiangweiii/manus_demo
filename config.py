@@ -64,6 +64,7 @@ EMERGENT_PLANNING_ENABLED = os.getenv("EMERGENT_PLANNING_ENABLED", "true").lower
 MAX_TODO_ITEMS = int(os.getenv("MAX_TODO_ITEMS", "20"))  # TODO 列表最大项数
 MAX_TODO_RETRIES = int(os.getenv("MAX_TODO_RETRIES", "3"))  # 单个 TODO 最大重试次数
 TODO_COMPRESSION_THRESHOLD = float(os.getenv("TODO_COMPRESSION_THRESHOLD", "0.8"))  # 上下文窗口使用率达到 80% 时压缩 TODO
+MAX_EMERGENT_OUTER_ITERATIONS = int(os.getenv("MAX_EMERGENT_OUTER_ITERATIONS", str(MAX_TODO_ITEMS * MAX_TODO_RETRIES)))  # Emergent 主循环最大迭代数（TODO 调度层）
 
 # --- Tools ---
 # --- 工具参数 ---
