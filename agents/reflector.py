@@ -212,7 +212,7 @@ class ReflectorAgent(BaseAgent):
         self.reset()
 
         steps_summary = "\n".join(
-            f"  Step {s.id}: {s.description}" for s in plan.steps
+            f"  Step {s.id} [{s.status.value}]: {s.description}" for s in plan.steps
         )
         results_summary = "\n".join(
             f"  Step {r.step_id} [{'OK' if r.success else 'FAIL'}]: {r.output[:300]}"
@@ -238,12 +238,12 @@ class ReflectorAgent(BaseAgent):
                 suggestions=data.get("suggestions", []),
             )
         except Exception as exc:
-            logger.error("[Reflector] Failed to parse reflection: %s", exc)
+            logger.error("[Reflector] Failed to parse reflection: %s. Triggering replan.", exc)
             reflection = Reflection(
-                passed=True,
-                score=0.5,
-                feedback=f"Reflection parsing failed: {exc}. Defaulting to pass.",
-                suggestions=[],
+                passed=False,
+                score=0.3,
+                feedback=f"Reflection parsing failed: {exc}. Re-planning recommended.",
+                suggestions=["Check LLM output format", "Retry with simpler prompt"],
             )
 
         logger.info(

@@ -228,9 +228,27 @@ class PlannerAgent(BaseAgent):
         Returns:
             "simple", "complex", or "emergent"
         """
-        if config.PLAN_MODE in ("simple", "complex"):
+        if config.PLAN_MODE in ("simple", "complex", "emergent"):
             logger.info("[Planner] PLAN_MODE override: %s", config.PLAN_MODE)
+            # 若强制 emergent 但开关关闭，降级到 complex
+            if config.PLAN_MODE == "emergent" and not config.EMERGENT_PLANNING_ENABLED:
+                logger.warning("[Planner] PLAN_MODE=emergent but EMERGENT_PLANNING_ENABLED=false, downgrading to complex")
+                return "complex"
             return config.PLAN_MODE
+
+        # Emergent 禁用开关拦截：降级探索性分类到 complex
+        if not config.EMERGENT_PLANNING_ENABLED:
+            rule_result = self._rule_classify(task)
+            if rule_result == "emergent":
+                logger.info("[Planner] Emergent planning disabled, upgrading to complex")
+                return "complex"
+            if rule_result != "ambiguous":
+                return rule_result
+            llm_result = await self._llm_classify(task)
+            if llm_result == "emergent":
+                logger.info("[Planner] Emergent planning disabled (LLM suggested emergent), upgrading to complex")
+                return "complex"
+            return llm_result
 
         rule_result = self._rule_classify(task)
         if rule_result != "ambiguous":
@@ -374,7 +392,7 @@ class PlannerAgent(BaseAgent):
         self,
         task: str,
         completed_results: list[StepResult],
-        failed_step: Step | None = None,
+        failed_steps: list[Step] | None = None,
         feedback: str = "",
     ) -> Plan:
         """
@@ -394,8 +412,9 @@ class PlannerAgent(BaseAgent):
             f"Task: {task}\n\n"
             f"Completed steps so far:\n{completed_summary}\n"
         )
-        if failed_step:
-            prompt += f"\nFailed step: {failed_step.description}\n"
+        if failed_steps:
+            failed_summary = "\n".join(f"- Step {s.id}: {s.description}" for s in failed_steps)
+            prompt += f"\nFailed steps:\n{failed_summary}\n"
         if feedback:
             prompt += f"\nFeedback: {feedback}\n"
         prompt += (

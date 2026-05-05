@@ -625,23 +625,40 @@ class EmergentPlannerAgent(BaseAgent):
         使用 LLM 综合所有已完成 TODO 的结果为最终答案。
         """
         successful = [r for r in results if r.success]
-        blocked = [r for r in results if not r.success]
+        blocked_step_results = [r for r in results if not r.success]
 
-        if not successful and not blocked:
+        # 补充：收集无 StepResult 的 BLOCKED TodoItem
+        blocked_todo_only = []
+        if self._todo_list:
+            blocked_todo_only = [
+                t for t in self._todo_list.todos.values()
+                if t.status == TodoStatus.BLOCKED
+                and not any(r.step_id == t.id for r in blocked_step_results)
+            ]
+
+        if not successful and not blocked_step_results and not blocked_todo_only:
             return "No TODOs were processed."
 
         if not successful:
+            all_blocked = blocked_step_results + [
+                StepResult(step_id=t.id, success=False, output=t.result or f"BLOCKED: {t.description}", tool_calls_log=[])
+                for t in blocked_todo_only
+            ]
             blocked_summary = "\n".join(
-                f"- TODO {r.step_id}: {r.output[:200]}" for r in blocked
+                f"- TODO {r.step_id}: {r.output[:200]}" for r in all_blocked
             )
             return f"Unfortunately, all TODOs failed or were blocked:\n{blocked_summary}"
 
         results_summary = "\n".join(
             f"[TODO {r.step_id}]: {r.output}" for r in successful
         )
-        if blocked:
+        all_blocked = blocked_step_results + [
+            StepResult(step_id=t.id, success=False, output=t.result or f"BLOCKED: {t.description}", tool_calls_log=[])
+            for t in blocked_todo_only
+        ]
+        if all_blocked:
             results_summary += "\n\nBlocked/failed TODOs:\n" + "\n".join(
-                f"- TODO {r.step_id}: {r.output[:200]}" for r in blocked
+                f"- TODO {r.step_id}: {r.output[:200]}" for r in all_blocked
             )
 
         try:

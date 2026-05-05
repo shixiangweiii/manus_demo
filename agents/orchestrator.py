@@ -51,7 +51,7 @@ from knowledge.retriever import KnowledgeRetriever
 from llm.client import LLMClient
 from memory.long_term import LongTermMemory
 from memory.short_term import ShortTermMemory
-from schema import MemoryEntry, NodeStatus, NodeType, Plan, StepResult, StepStatus
+from schema import MemoryEntry, NodeStatus, NodeType, Plan, Reflection, StepResult, StepStatus, TodoStatus
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,9 @@ class OrchestratorAgent:
         """
         self._emit("task_start", {"task": task})
 
+        if not config.EMERGENT_PLANNING_ENABLED:
+            logger.info("[Orchestrator] Emergent planning mode is disabled via config")
+
         # --- Phase 1: Gather context ---
         # --- 阶段 1：收集上下文 ---
         self._emit("phase", "Gathering context...")
@@ -170,10 +173,17 @@ class OrchestratorAgent:
             dag = await self.planner.create_dag(task, combined_context)
             self._emit("dag_created", dag)
             final_answer = await self._execute_dag_and_reflect(dag)
-        else:
+        elif complexity == "emergent":
             # v5: Emergent planning mode (Claude Code style)
             self._emit("phase", "Planning (v5 emergent via TODO list)...")
             final_answer = await self._execute_emergent(task, combined_context)
+        else:
+            # 未知复杂度值——降级到 complex 而非静默进入 emergent
+            logger.error("[Orchestrator] Unknown complexity '%s', degrading to complex", complexity)
+            self._emit("phase", f"Planning (v2 hierarchical DAG) - degraded from '{complexity}'...")
+            dag = await self.planner.create_dag(task, combined_context)
+            self._emit("dag_created", dag)
+            final_answer = await self._execute_dag_and_reflect(dag)
 
         # --- Phase 4: Store in memory ---
         # --- 阶段 4：存入长期记忆 ---
@@ -237,8 +247,18 @@ class OrchestratorAgent:
             step_context = context
 
             for i, step in enumerate(plan.steps):
-                if step.status == StepStatus.COMPLETED:
+                if step.status in (StepStatus.COMPLETED, StepStatus.SKIPPED):
                     continue
+
+                # 依赖检查：若依赖步骤未成功完成，标记为 SKIPPED
+                if step.dependencies:
+                    completed_ids = {s.id for s in plan.steps if s.status == StepStatus.COMPLETED}
+                    unmet_deps = [d for d in step.dependencies if d not in completed_ids]
+                    if unmet_deps:
+                        step.status = StepStatus.SKIPPED
+                        self._emit("step_skipped", {"step": step, "reason": f"dependencies {unmet_deps} not completed"})
+                        logger.warning("[Orchestrator] Step %d skipped: deps %s not met", step.id, unmet_deps)
+                        continue
 
                 step.status = StepStatus.RUNNING
                 plan.current_step_index = i
@@ -246,7 +266,7 @@ class OrchestratorAgent:
 
                 if all_results:
                     prev_summary = "\n".join(
-                        f"Step {r.step_id}: {r.output[:300]}"
+                        f"Step {r.step_id}: [{'SUCCESS' if r.success else 'FAILED'}] {r.output[:300]}"
                         for r in all_results
                     )
                     step_context = f"{context}\n\nPrevious results:\n{prev_summary}"
@@ -261,6 +281,17 @@ class OrchestratorAgent:
                 else:
                     step.status = StepStatus.FAILED
                     self._emit("step_failed", {"step": step, "result": result})
+
+                    # 条件性 early-break：若无剩余独立步骤，直接进入反思
+                    failed_ids = {s.id for s in plan.steps if s.status in (StepStatus.FAILED, StepStatus.SKIPPED)}
+                    remaining = [s for s in plan.steps if s.status == StepStatus.PENDING]
+                    independent_remaining = [
+                        s for s in remaining
+                        if not any(d in failed_ids for d in s.dependencies)
+                    ]
+                    if not independent_remaining:
+                        logger.info("[Orchestrator] No independent steps remaining after failure, breaking early")
+                        break
 
             self._emit("phase", "Reflecting on results...")
             reflection = await self.reflector.reflect(task, plan, all_results)
@@ -277,11 +308,14 @@ class OrchestratorAgent:
                 plan = await self.planner.replan(
                     task,
                     completed_results=[r for r in all_results if r.success],
-                    failed_step=failed_steps[0] if failed_steps else None,
+                    failed_steps=failed_steps,
                     feedback=reflection.feedback,
                 )
                 self._emit("plan", plan)
-                all_results = [r for r in all_results if r.success]
+                # 保留所有成功 + 最近一次失败结果（供 replan 参考）
+                preserved = [r for r in all_results if r.success]
+                failed = [r for r in all_results if not r.success]
+                all_results = preserved + (failed[-1:] if failed else [])
             else:
                 logger.warning("Max re-plan attempts reached. Returning best effort.")
                 return self._compile_answer(task, all_results)
@@ -315,6 +349,26 @@ class OrchestratorAgent:
         """
         self._emit("phase", "Executing with emergent planning (TODO list)...")
         final_answer = await self.emergent_planner.execute(task, context)
+
+        # 轻量级质量门控：检查是否有 BLOCKED TODO
+        blocked_todos = []
+        if self.emergent_planner._todo_list:
+            blocked_todos = [
+                t for t in self.emergent_planner._todo_list.todos.values()
+                if t.status == TodoStatus.BLOCKED
+            ]
+        if blocked_todos:
+            logger.warning(
+                "[Orchestrator] Emergent planning completed with %d blocked TODOs",
+                len(blocked_todos),
+            )
+            self._emit("reflection", Reflection(
+                passed=False, score=0.4,
+                feedback=f"Emergent planning completed but {len(blocked_todos)} TODOs were blocked: "
+                         + "; ".join(t.description[:80] for t in blocked_todos[:3]),
+                suggestions=["Consider re-running with complex mode for structured planning"],
+            ))
+
         self._emit("phase", "Emergent planning completed.")
         return final_answer
 

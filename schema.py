@@ -39,6 +39,7 @@ class StepStatus(str, Enum):
     RUNNING = "running"     # In progress / 运行中
     COMPLETED = "completed" # Success / 已完成
     FAILED = "failed"       # Failed / 失败
+    SKIPPED = "skipped"     # Dependency failed or not met / 依赖未满足而跳过
 
 
 class Step(BaseModel):

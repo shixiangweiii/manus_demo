@@ -37,7 +37,7 @@ KNOWLEDGE_TOP_K = int(os.getenv("KNOWLEDGE_TOP_K", "3"))                        
 
 # --- Plan Routing ---
 # --- 规划路由（v4 新增：混合分类器）---
-PLAN_MODE = os.getenv("PLAN_MODE", "auto")  # "auto"=两阶段混合分类 | "simple"=强制v1扁平计划 | "complex"=强制v2 DAG
+PLAN_MODE = os.getenv("PLAN_MODE", "auto")  # "auto"=两阶段混合分类 | "simple"=强制v1 | "complex"=强制v2 | "emergent"=强制v5 DAG
 
 # --- DAG Execution ---
 # --- DAG 执行参数 ---

@@ -146,8 +146,15 @@ def on_event(event: str, data: Any) -> None:
 
     elif event == "task_complexity":
         complexity = data.get("complexity", "unknown")
-        style = "green" if complexity == "simple" else "magenta"
-        label = "Simple (v1 flat plan)" if complexity == "simple" else "Complex (v2 DAG)"
+        if complexity == "simple":
+            style = "green"
+            label = "Simple (v1 flat plan)"
+        elif complexity == "emergent":
+            style = "yellow"
+            label = "Emergent (v5 TODO list)"
+        else:
+            style = "magenta"
+            label = "Complex (v2 DAG)"
         console.print(f"  [bold {style}]Task complexity: {label}[/bold {style}]")
 
     elif event == "plan":
@@ -179,6 +186,11 @@ def on_event(event: str, data: Any) -> None:
         result: StepResult = data["result"]
         console.print(f"    [red]<< Step {step.id} FAILED.[/red]")
         console.print(Panel(result.output[:500], title=f"Step {step.id} Error", border_style="red"))
+
+    elif event == "step_skipped":
+        step: Step = data["step"]
+        reason = data.get("reason", "unknown")
+        console.print(f"    [dim strike]<< Step {step.id} SKIPPED ({reason}).[/dim strike]")
 
     # --- DAG events (v2) ---
     # --- DAG 执行事件（v2 新增）---
@@ -352,7 +364,7 @@ async def run_interactive() -> None:
         "  [cyan]12.[/cyan] Dynamic DAG mutation — add/remove/modify nodes at runtime (v3)\n"
         "  [cyan]13.[/cyan] Emergent planning — Claude Code style, while(tool_use) loop with TODO list (v5)\n\n"
         "Type your task and press Enter. Type [bold]quit[/bold] to exit.\n"
-        "Set PLAN_MODE=simple|complex to force a specific path (default: auto).",
+        "Set PLAN_MODE=simple|complex|emergent to force a specific path (default: auto).",
         title="[bold blue]Welcome[/bold blue]",
         border_style="blue",
     ))
