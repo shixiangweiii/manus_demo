@@ -1,7 +1,7 @@
 # Manus Demo - 代码地图
 
-> **生成时间**: 2026-04-20
-> **版本**: v6（含 LLM 重试机制 + ReActEngine Feature Flag）
+> **生成时间**: 2026-05-05
+> **版本**: v6（含 LLM 重试机制 + ReActEngine Feature Flag + ShellTool）
 > **目的**: 当前代码库的综合架构地图
 
 ## 目录
@@ -91,43 +91,48 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 manus_demo/
 ├── agents/                    # 智能体模块
 │   ├── __init__.py
-│   ├── base.py               # BaseAgent 基类 (183行)
-│   ├── orchestrator.py       # OrchestratorAgent 中央协调者 (432行)
-│   ├── planner.py            # PlannerAgent 混合规划器 (884行)
-│   ├── executor.py           # ExecutorAgent ReAct执行器 (316行)
-│   ├── reflector.py          # ReflectorAgent 反思验证器 (255行)
-│   └── emergent_planner.py   # EmergentPlannerAgent 隐式规划器 (539行)
+│   ├── base.py               # BaseAgent 基类 (182行)
+│   ├── orchestrator.py       # OrchestratorAgent 中央协调者 (490行)
+│   ├── planner.py            # PlannerAgent 混合规划器 (909行)
+│   ├── executor.py           # ExecutorAgent ReAct执行器 (321行)
+│   ├── reflector.py          # ReflectorAgent 反思验证器 (254行)
+│   └── emergent_planner.py   # EmergentPlannerAgent 隐式规划器 (683行)
 │
 ├── dag/                       # DAG 执行引擎
 │   ├── __init__.py
-│   ├── graph.py              # TaskDAG 有向无环图 (531行)
-│   ├── executor.py           # DAGExecutor Super-step执行器 (551行)
-│   └── state_machine.py      # NodeStateMachine 节点状态机 (114行)
+│   ├── graph.py              # TaskDAG 有向无环图 (626行)
+│   ├── executor.py           # DAGExecutor Super-step执行器 (647行)
+│   └── state_machine.py      # NodeStateMachine 节点状态机 (113行)
 │
 ├── llm/                       # LLM 客户端
 │   ├── __init__.py
-│   └── client.py             # LLMClient OpenAI兼容封装 (226行)
+│   └── client.py             # LLMClient OpenAI兼容封装 (227行)
+│
+├── react/                     # ReAct 统一引擎 (v6)
+│   ├── __init__.py
+│   └── engine.py             # ReActEngine 统一 ReAct 循环引擎 (245行)
 │
 ├── tools/                     # 工具系统
 │   ├── __init__.py
-│   ├── base.py               # BaseTool 工具基类 (87行)
-│   ├── router.py             # ToolRouter 智能路由器 (168行)
-│   ├── web_search.py         # WebSearchTool 网络搜索 (113行)
-│   ├── code_executor.py      # CodeExecutorTool 代码执行 (109行)
-│   └── file_ops.py           # FileOpsTool 文件操作 (138行)
+│   ├── base.py               # BaseTool 工具基类 (86行)
+│   ├── router.py             # ToolRouter 智能路由器 (167行)
+│   ├── web_search.py         # WebSearchTool 网络搜索 (112行)
+│   ├── code_executor.py      # CodeExecutorTool 代码执行 (108行)
+│   ├── file_ops.py           # FileOpsTool 文件操作 (137行)
+│   └── shell_tool.py         # ShellTool Shell 命令执行 (130行)
 │
 ├── memory/                    # 记忆系统
 │   ├── __init__.py
-│   ├── short_term.py         # ShortTermMemory 短期记忆 (91行)
-│   └── long_term.py          # LongTermMemory 长期记忆 (142行)
+│   ├── short_term.py         # ShortTermMemory 短期记忆 (90行)
+│   └── long_term.py          # LongTermMemory 长期记忆 (141行)
 │
 ├── context/                   # 上下文管理
 │   ├── __init__.py
-│   └── manager.py            # ContextManager 上下文压缩 (187行)
+│   └── manager.py            # ContextManager 上下文压缩 (186行)
 │
 ├── knowledge/                 # 知识检索
 │   ├── __init__.py
-│   ├── retriever.py          # KnowledgeRetriever TF-IDF检索 (229行)
+│   ├── retriever.py          # KnowledgeRetriever TF-IDF检索 (228行)
 │   └── docs/
 │       └── sample.txt        # 示例知识文档
 │
@@ -135,27 +140,28 @@ manus_demo/
 │   ├── __init__.py
 │   ├── test_dag_capabilities.py
 │   ├── test_emergent_planning.py
+│   ├── test_emergent_simple.py
 │   ├── test_llm_integration.py
 │   ├── test_optimizations.py
 │   ├── test_real_tools.py
+│   ├── test_shell_tool.py
 │   ├── test_concurrent_execution.py
 │   └── test_cycle_detection.py
 │
-├── docs/                      # 文档目录
-│   ├── codemap-v4.md         # v4 代码地图
-│   ├── data-structures-and-algorithms.md
-│   ├── dynamic-features-v1-vs-v2.md
-│   ├── emergent-planning-v5.md
-│   ├── hybrid-plan-routing-v4.md
-│   ├── llm-integration-v6.md
-│   ├── planning-gap-analysis.md
-│   ├── planning-test-scenarios-v4.md
-│   ├── related-papers-plan-routing.md
-│   └── upgrade-plan-v3.md
-│
-├── sxw_aicoding/              # 用户工作目录
+├── sxw_aicoding/              # 用户工作目录 / 文档目录
 │   ├── docs/
-│   │   └── codemap.md        # 本代码地图文档
+│   │   ├── codemap.md              # 本代码地图文档
+│   │   ├── CHANGELOG.md            # 版本更新日志
+│   │   ├── data-structures-and-algorithms.md
+│   │   ├── dynamic-features.md
+│   │   ├── emergent-planning.md
+│   │   ├── emergent-planning-test-scenarios.md
+│   │   ├── hybrid-plan-routing.md
+│   │   ├── llm-integration.md
+│   │   ├── planning-gap-analysis.md
+│   │   ├── planning-test-scenarios.md
+│   │   ├── related-papers.md
+│   │   └── upgrade-plan.md
 │   └── temp/
 │
 ├── .env                       # 环境变量配置
@@ -171,7 +177,7 @@ manus_demo/
 
 ### 1. OrchestratorAgent
 
-**文件**: `agents/orchestrator.py` (432行)
+**文件**: `agents/orchestrator.py` (490行)
 
 **目的**: 管理完整混合规划生命周期的中央协调者，负责任务分类、路由选择和执行协调。
 
@@ -218,7 +224,7 @@ graph LR
 
 ### 2. PlannerAgent
 
-**文件**: `agents/planner.py` (884行)
+**文件**: `agents/planner.py` (909行)
 
 **目的**: 两阶段混合分类器 + v5探索性模式检测，负责任务分类和计划生成。
 
@@ -267,7 +273,7 @@ graph TD
 
 ### 3. ExecutorAgent
 
-**文件**: `agents/executor.py` (316行)
+**文件**: `agents/executor.py` (321行)
 
 **目的**: ReAct循环执行器，负责逐步执行计划中的每个步骤/节点。
 
@@ -311,7 +317,7 @@ graph TD
 
 ### 4. ReflectorAgent
 
-**文件**: `agents/reflector.py` (255行)
+**文件**: `agents/reflector.py` (254行)
 
 **目的**: 质量验证与反馈，负责评估执行结果的质量。
 
@@ -331,7 +337,7 @@ class ReflectorAgent(BaseAgent):
 
 ### 5. EmergentPlannerAgent
 
-**文件**: `agents/emergent_planner.py` (539行)
+**文件**: `agents/emergent_planner.py` (683行)
 
 **目的**: Claude Code 风格隐式规划器，通过 TODO 列表管理实现动态规划。
 
@@ -375,7 +381,7 @@ graph TD
 
 ### 6. BaseAgent
 
-**文件**: `agents/base.py` (183行)
+**文件**: `agents/base.py` (182行)
 
 **目的**: 所有智能体的基类，提供统一的 LLM 交互能力。
 
@@ -406,7 +412,7 @@ class BaseAgent:
 
 ### 7. DAGExecutor
 
-**文件**: `dag/executor.py` (551行)
+**文件**: `dag/executor.py` (647行)
 
 **目的**: Super-step 并行执行引擎，替代原 Orchestrator 的顺序 for 循环。
 
@@ -455,7 +461,7 @@ graph TD
 
 ### 8. TaskDAG
 
-**文件**: `dag/graph.py` (531行)
+**文件**: `dag/graph.py` (626行)
 
 **目的**: DAG 数据结构与操作，提供分层任务规划的图结构支持。
 
@@ -508,7 +514,7 @@ graph TB
 
 ### 9. NodeStateMachine
 
-**文件**: `dag/state_machine.py` (114行)
+**文件**: `dag/state_machine.py` (113行)
 
 **目的**: 节点状态机，校验并强制执行节点生命周期的合法状态转移。
 
@@ -543,7 +549,7 @@ class NodeStateMachine:
 
 ### 10. LLMClient
 
-**文件**: `llm/client.py` (226行)
+**文件**: `llm/client.py` (227行)
 
 **目的**: OpenAI 兼容 API 的统一封装，支持多种 LLM 服务商。
 
@@ -588,7 +594,7 @@ graph TD
 ### 11. 工具系统
 
 #### BaseTool
-**文件**: `tools/base.py` (87行)
+**文件**: `tools/base.py` (86行)
 
 **目的**: 工具基类，定义统一的工具接口。
 
@@ -611,7 +617,7 @@ class BaseTool(ABC):
 ```
 
 #### ToolRouter
-**文件**: `tools/router.py` (168行)
+**文件**: `tools/router.py` (167行)
 
 **目的**: 智能工具选择与基于失败的自动切换。
 
@@ -632,7 +638,7 @@ class ToolRouter:
 ```
 
 #### WebSearchTool
-**文件**: `tools/web_search.py` (113行)
+**文件**: `tools/web_search.py` (112行)
 
 **目的**: 网络搜索工具，提供 mock 搜索功能。
 
@@ -643,7 +649,7 @@ class WebSearchTool(BaseTool):
 ```
 
 #### CodeExecutorTool
-**文件**: `tools/code_executor.py` (109行)
+**文件**: `tools/code_executor.py` (108行)
 
 **目的**: 代码执行工具，通过 subprocess 沙箱执行 Python 代码。
 
@@ -654,7 +660,7 @@ class CodeExecutorTool(BaseTool):
 ```
 
 #### FileOpsTool
-**文件**: `tools/file_ops.py` (138行)
+**文件**: `tools/file_ops.py` (137行)
 
 **目的**: 文件操作工具，提供安全的文件读写功能。
 
@@ -665,10 +671,26 @@ class FileOpsTool(BaseTool):
     # 支持的操作: read, write, list, delete
 ```
 
+#### ShellTool
+**文件**: `tools/shell_tool.py` (130行)
+
+**目的**: Shell 命令执行工具，在沙箱子进程中执行 bash 命令。
+
+**主要职责**:
+- 基于 `asyncio.create_subprocess_exec` 实现，支持超时、流式输出捕获
+- 在 sandbox 目录下执行，通过黑名单限制危险命令（`rm -rf`, `mkfs`, `dd` 等）
+- 支持工作目录切换、环境变量传递
+
+**主要方法签名**:
+```python
+class ShellTool(BaseTool):
+    async def execute(self, command: str, timeout: int = 30) -> str
+```
+
 ### 12. 记忆系统
 
 #### ShortTermMemory
-**文件**: `memory/short_term.py` (91行)
+**文件**: `memory/short_term.py` (90行)
 
 **目的**: 短期记忆，使用滑动窗口缓冲区保留最近对话消息。
 
@@ -689,7 +711,7 @@ class ShortTermMemory:
 ```
 
 #### LongTermMemory
-**文件**: `memory/long_term.py` (142行)
+**文件**: `memory/long_term.py` (141行)
 
 **目的**: 长期记忆，基于 JSON 文件的持久化存储。
 
@@ -711,7 +733,7 @@ class LongTermMemory:
 ### 13. 上下文与知识
 
 #### ContextManager
-**文件**: `context/manager.py` (187行)
+**文件**: `context/manager.py` (186行)
 
 **目的**: 上下文管理器，带 Token 感知的上下文窗口管理。
 
@@ -731,7 +753,7 @@ class ContextManager:
 ```
 
 #### KnowledgeRetriever
-**文件**: `knowledge/retriever.py` (229行)
+**文件**: `knowledge/retriever.py` (228行)
 
 **目的**: 知识检索器，使用 TF-IDF + 余弦相似度检索相关知识。
 
@@ -991,28 +1013,30 @@ def on_event(event_type: str, data: Any):
 
 | 文件路径 | 行数 | 核心职责 | 关键类/方法 |
 |---------|------|---------|-----------|
-| `agents/orchestrator.py` | 432 | 中央协调者，三路由管理 | `OrchestratorAgent.run()` |
-| `agents/planner.py` | 884 | 混合分类器 + 计划生成 | `PlannerAgent.classify_task()` |
-| `agents/executor.py` | 316 | ReAct 执行器 | `ExecutorAgent._react_loop()` |
-| `agents/reflector.py` | 255 | 质量验证与反馈 | `ReflectorAgent.reflect()` |
-| `agents/emergent_planner.py` | 539 | 隐式规划器 | `EmergentPlannerAgent.execute()` |
-| `agents/base.py` | 183 | 智能体基类 | `BaseAgent.think()` |
-| `dag/executor.py` | 551 | Super-step 并行执行 | `DAGExecutor.execute()` |
-| `dag/graph.py` | 531 | DAG 数据结构 | `TaskDAG.get_ready_nodes()` |
-| `dag/state_machine.py` | 114 | 节点状态机 | `NodeStateMachine.transition()` |
-| `llm/client.py` | 226 | LLM 客户端 | `LLMClient.chat()` |
-| `tools/base.py` | 87 | 工具基类 | `BaseTool.execute()` |
-| `tools/router.py` | 168 | 智能工具路由 | `ToolRouter.get_hint()` |
-| `tools/web_search.py` | 113 | 网络搜索工具 | `WebSearchTool.execute()` |
-| `tools/code_executor.py` | 109 | 代码执行工具 | `CodeExecutorTool.execute()` |
-| `tools/file_ops.py` | 138 | 文件操作工具 | `FileOpsTool.execute()` |
-| `memory/short_term.py` | 91 | 短期记忆 | `ShortTermMemory.add()` |
-| `memory/long_term.py` | 142 | 长期记忆 | `LongTermMemory.search()` |
-| `context/manager.py` | 187 | 上下文管理 | `ContextManager.compress_if_needed()` |
-| `knowledge/retriever.py` | 229 | 知识检索器 | `KnowledgeRetriever.retrieve()` |
-| `schema.py` | - | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
-| `config.py` | - | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
-| `main.py` | - | CLI 入口 | `main()` |
+| `agents/orchestrator.py` | 490 | 中央协调者，三路由管理 | `OrchestratorAgent.run()` |
+| `agents/planner.py` | 909 | 混合分类器 + 计划生成 | `PlannerAgent.classify_task()` |
+| `agents/executor.py` | 321 | ReAct 执行器 | `ExecutorAgent._react_loop()` |
+| `agents/reflector.py` | 254 | 质量验证与反馈 | `ReflectorAgent.reflect()` |
+| `agents/emergent_planner.py` | 683 | 隐式规划器 | `EmergentPlannerAgent.execute()` |
+| `agents/base.py` | 182 | 智能体基类 | `BaseAgent.think()` |
+| `dag/executor.py` | 647 | Super-step 并行执行 | `DAGExecutor.execute()` |
+| `dag/graph.py` | 626 | DAG 数据结构 | `TaskDAG.get_ready_nodes()` |
+| `dag/state_machine.py` | 113 | 节点状态机 | `NodeStateMachine.transition()` |
+| `llm/client.py` | 227 | LLM 客户端 | `LLMClient.chat()` |
+| `react/engine.py` | 245 | 统一 ReAct 引擎 | `ReActEngine.execute()` |
+| `tools/base.py` | 86 | 工具基类 | `BaseTool.execute()` |
+| `tools/router.py` | 167 | 智能工具路由 | `ToolRouter.get_hint()` |
+| `tools/web_search.py` | 112 | 网络搜索工具 | `WebSearchTool.execute()` |
+| `tools/code_executor.py` | 108 | 代码执行工具 | `CodeExecutorTool.execute()` |
+| `tools/file_ops.py` | 137 | 文件操作工具 | `FileOpsTool.execute()` |
+| `tools/shell_tool.py` | 130 | Shell 命令执行工具 | `ShellTool.execute()` |
+| `memory/short_term.py` | 90 | 短期记忆 | `ShortTermMemory.add()` |
+| `memory/long_term.py` | 141 | 长期记忆 | `LongTermMemory.search()` |
+| `context/manager.py` | 186 | 上下文管理 | `ContextManager.compress_if_needed()` |
+| `knowledge/retriever.py` | 228 | 知识检索器 | `KnowledgeRetriever.retrieve()` |
+| `schema.py` | 573 | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
+| `config.py` | 82 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
+| `main.py` | 439 | CLI 入口 | `main()` |
 
 ### 版本演进关键文件
 
@@ -1023,7 +1047,7 @@ def on_event(event_type: str, data: Any):
 | v3 | `tools/router.py`, `dag/graph.py` | 工具路由 + 动态 DAG 变更 |
 | v4 | `agents/planner.py` | 两阶段混合分类器 |
 | v5 | `agents/emergent_planner.py` | 隐式规划 + TODO 列表管理 |
-| v6 | `llm/client.py`, `agents/executor.py`, `agents/emergent_planner.py` | LLM 重试 + ReActEngine Feature Flag |
+| v6 | `llm/client.py`, `agents/executor.py`, `agents/emergent_planner.py`, `tools/shell_tool.py`, `react/engine.py` | LLM 重试 + ReActEngine + ShellTool + 统一 ReAct 引擎 |
 
 ### 测试文件
 
@@ -1031,9 +1055,11 @@ def on_event(event_type: str, data: Any):
 |---------|---------|
 | `tests/test_dag_capabilities.py` | DAG 功能测试 |
 | `tests/test_emergent_planning.py` | 隐式规划测试 |
+| `tests/test_emergent_simple.py` | 隐式规划简单场景测试 |
 | `tests/test_llm_integration.py` | LLM 集成测试 |
 | `tests/test_optimizations.py` | 性能优化测试 |
 | `tests/test_real_tools.py` | 真实工具测试 |
+| `tests/test_shell_tool.py` | Shell 工具测试 |
 | `tests/test_concurrent_execution.py` | 并发执行测试 |
 | `tests/test_cycle_detection.py` | 循环检测测试 |
 
@@ -1041,16 +1067,18 @@ def on_event(event_type: str, data: Any):
 
 | 文件路径 | 内容 |
 |---------|------|
-| `docs/codemap-v4.md` | v4 版本代码地图 |
+| `docs/codemap.md` | 本代码地图文档 |
+| `docs/CHANGELOG.md` | 版本更新日志 |
 | `docs/data-structures-and-algorithms.md` | 数据结构与算法说明 |
-| `docs/dynamic-features-v1-vs-v2.md` | v1 vs v2 动态特性对比 |
-| `docs/emergent-planning-v5.md` | v5 隐式规划文档 |
-| `docs/hybrid-plan-routing-v4.md` | v4 混合路由文档 |
-| `docs/llm-integration-v6.md` | v6 LLM 集成文档 |
+| `docs/dynamic-features.md` | v1~v5 动态特性对比 |
+| `docs/emergent-planning.md` | v5/v6 隐式规划文档 |
+| `docs/emergent-planning-test-scenarios.md` | 隐式规划测试场景 |
+| `docs/hybrid-plan-routing.md` | v4 混合路由文档 |
+| `docs/llm-integration.md` | v6 LLM 集成文档 |
 | `docs/planning-gap-analysis.md` | 规划缺口分析 |
-| `docs/planning-test-scenarios-v4.md` | v4 规划测试场景 |
-| `docs/related-papers-plan-routing.md` | 相关论文（DAAO, RouteLLM） |
-| `docs/upgrade-plan-v3.md` | v3 升级计划 |
+| `docs/planning-test-scenarios.md` | 规划测试场景 |
+| `docs/related-papers.md` | 相关论文（DAAO, RouteLLM） |
+| `docs/upgrade-plan.md` | v6 升级计划 |
 
 ---
 
@@ -1064,5 +1092,6 @@ Manus Demo 是一个功能完整的多智能体任务执行系统，具有以下
 4. **状态机管控**：严格节点生命周期管理，确保系统一致性
 5. **隐式规划**：Claude Code 风格的动态规划，适应不确定性任务
 6. **LLM 重试机制**：v6 新增的指数退避重试，提升系统稳定性
+7. **Shell 命令执行**：v6 新增 `ShellTool`，支持在沙箱中执行 bash 命令，增强真实环境交互能力
 
 该系统展示了如何将多种先进技术（ReAct、DAG、状态机、混合路由等）整合为一个实用的多智能体系统，为复杂任务的自动化执行提供了完整的解决方案。

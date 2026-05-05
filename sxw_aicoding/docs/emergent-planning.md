@@ -1,7 +1,7 @@
 # Manus Demo - 隐式规划系统详解
 
-> **版本**: v6（含 ReActEngine 可选集成）
-> **更新日期**: 2026-04-20
+> **版本**: v6（含 ReActEngine 可选集成 + ShellTool）
+> **更新日期**: 2026-05-05
 > **目的**: 深入解析隐式规划系统的设计理念、实现细节和使用场景
 
 ## 目录
@@ -665,6 +665,8 @@ EmergentPlannerAgent 通过 `_emit()` 方法向 UI 回调函数发送事件：
 |-------|-------|------|
 | `EMERGENT_PLANNING_ENABLED` | `True` | 是否启用隐式规划 |
 | `MAX_TODO_ITEMS` | `20` | TODO 列表最大项数 |
+| `MAX_TODO_RETRIES` | `3` | 单个 TODO 最大重试次数 |
+| `MAX_EMERGENT_OUTER_ITERATIONS` | `60` | Emergent 主循环最大迭代数 |
 | `TODO_COMPRESSION_THRESHOLD` | `0.8` | 上下文窗口使用率达到 80% 时压缩 TODO |
 | `ENABLE_REACT_ENGINE_V2` | `False` | 是否使用统一 ReActEngine |
 | `MAX_REACT_ITERATIONS` | `10` | 单个 TODO 最大迭代次数 |
@@ -725,15 +727,15 @@ EmergentPlannerAgent 通过 `_emit()` 方法向 UI 回调函数发送事件：
 
 ### 相关文档
 
-- `docs/emergent-planning-v5.md`：v5 版本设计文档
-- `docs/emergent-planning-test-scenarios-v5.md`：测试场景
-- `docs/hybrid-plan-routing-v4.md`：混合规划路由逻辑
+- `docs/emergent-planning.md`：v5/v6 隐式规划文档
+- `docs/emergent-planning-test-scenarios.md`：测试场景
+- `docs/hybrid-plan-routing.md`：混合规划路由逻辑
 
 ### 版本历史
 
-- **v6.0** (2026-04-20)：可选 ReActEngine 集成
+- **v6.0** (2026-05-05)：可选 ReActEngine 集成 + ShellTool 支持
 - **v5.0** (2026-04-15)：初始版本，基于 Claude Code 理念
 
 ---
 
-> **文档维护**：本文档基于 `agents/emergent_planner.py` (539 行) 和 `schema.py` (第 400-535 行) 的最新代码生成。
+> **文档维护**：本文档基于 `agents/emergent_planner.py` (683 行) 和 `schema.py` (第 350-573 行) 的最新代码生成。

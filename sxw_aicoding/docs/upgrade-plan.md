@@ -1,7 +1,7 @@
 # Manus Demo 升级计划
 
 > **当前版本**: v6.0
-> **更新日期**: 2026-04-20
+> **更新日期**: 2026-05-05
 > **目的**: 从当前 v6 到未来版本的升级路线图
 
 ---
@@ -31,8 +31,8 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 
 ### 当前架构短板
 
-- **工具生态薄弱**：仅 3 个工具（1 个 mock: WebSearch + 2 个 real: CodeExecutor、FileOps），搜索是 mock 实现
-- **无真实环境交互能力**：缺少 Shell 命令执行、真实 Web 抓取等能力
+- **工具生态增强**：新增 `ShellTool`，支持沙箱内 bash 命令执行，工具数从 3 个增至 4 个
+- **无真实环境交互能力**：缺少真实 Web 抓取等能力（Shell 命令执行已通过 `ShellTool` 实现）
 - **上下文管理粗糙**：粗略 token 估算，无精确计数和分级压缩
 - **无持久化外部记忆**：仅短期/长期内存，无文件持久化
 - **无验证-修复闭环**：执行后无自动验证和自愈机制
@@ -76,15 +76,15 @@ class WebSearchTool(BaseTool):
             return await self._mock_search(query, max_results)
 ```
 
-#### 2. Shell 命令执行 — 新增 ShellTool
+#### 2. Shell 命令执行 — 新增 ShellTool ✅ 已完成
 
-**当前状态**：无 Shell 执行能力
+**当前状态**：已实现 `tools/shell_tool.py`，支持执行任意 shell 命令（bash/zsh）
 
-**升级方案**：
-- 新增 `tools/shell.py`，支持执行任意 shell 命令（bash/zsh）
+**实现细节**：
 - 基于 `asyncio.create_subprocess_exec` 实现，支持超时、流式输出捕获
-- 在 sandbox 目录下执行，通过白名单/黑名单限制危险命令
+- 在 sandbox 目录下执行，通过黑名单限制危险命令（`rm -rf /`, `mkfs`, `dd`, `sudo rm -rf` 等）
 - 支持工作目录切换、环境变量传递
+- 配置项: `SHELL_EXEC_TIMEOUT` (默认 30 秒), `SANDBOX_DIR`
 
 **预估工作量**：1-2 天
 
@@ -938,10 +938,10 @@ class ToolRegistry:
 
 ## 附录：关键参考文档
 
-- [混合规划路由 v4](./hybrid-plan-routing-v4.md)
-- [动态规划 v3](./emergent-planning-v5.md)
-- [LLM 集成 v6](./llm-integration-v6.md)
-- [动态功能对比](./dynamic-features-v1-vs-v2.md)
+- [混合规划路由 v4](./hybrid-plan-routing.md)
+- [隐式规划 v5/v6](./emergent-planning.md)
+- [LLM 集成 v6](./llm-integration.md)
+- [动态功能对比](./dynamic-features.md)
 
 ---
 

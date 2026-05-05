@@ -1,7 +1,7 @@
 # Manus Demo v6 隐式规划测试用例集
 
-> **生成时间**: 2026-04-20
-> **版本**: v6（集成 LLM retry 与 mark_pending 重试机制）
+> **生成时间**: 2026-05-05
+> **版本**: v6（集成 LLM retry、mark_pending 重试机制、ShellTool、ReActEngine）
 > **目的**: 验证隐式规划系统的正确性、灵活性和容错能力
 
 ---
@@ -170,8 +170,20 @@ MAX_TODO_ITEMS=20
 # 上下文 Token 上限（默认 8000）
 MAX_CONTEXT_TOKENS=8000
 
-# 最大迭代次数（默认 10，控制 mark_pending 重试次数）
+# 最大迭代次数（默认 10，控制单个 TODO ReAct 循环次数）
 MAX_REACT_ITERATIONS=10
+
+# 单个 TODO 最大重试次数（默认 3）
+MAX_TODO_RETRIES=3
+
+# Emergent 主循环最大迭代数（默认 60）
+MAX_EMERGENT_OUTER_ITERATIONS=60
+
+# Shell 命令执行超时（默认 30 秒）
+SHELL_EXEC_TIMEOUT=30
+
+# 沙箱目录
+SANDBOX_DIR=~/.manus_demo/sandbox
 
 # LLM 重试机制（v6 新增）
 LLM_RETRY_ENABLED=false              # 默认关闭（向后兼容）
@@ -214,7 +226,7 @@ ENABLE_REACT_ENGINE_V2=false         # 默认使用 legacy 实现
    ```
 
 5. **工具调用日志**:
-   - 查看 `web_search` / `execute_python` / `file_ops` 的使用
+   - 查看 `web_search` / `execute_python` / `file_ops` / `execute_shell` 的使用
    - 观察 LLM 如何自主选择工具
 
 6. **TODO 列表更新**:
@@ -936,5 +948,5 @@ LLM_RETRY_ENABLED=true LLM_RETRY_MAX_ATTEMPTS=5 PLAN_MODE=emergent python main.p
 ---
 
 **文档版本**: v6.0
-**最后更新**: 2026-04-20
+**最后更新**: 2026-05-05
 **基于源码**: agents/emergent_planner.py, schema.py, config.py, agents/orchestrator.py, llm/client.py

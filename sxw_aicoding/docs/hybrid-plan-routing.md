@@ -2,6 +2,7 @@
 
 > 本文档说明混合规划路由机制：通过两阶段分类器（规则快筛 + LLM 兜底）自动判断任务复杂度，
 > 简单任务走 v1 扁平计划路径，复杂任务走 v2 DAG 分层路径，探索性任务走 v5 隐式规划路径。
+> **更新日期**: 2026-05-05
 
 ## 背景：为什么需要混合路由？
 
@@ -323,6 +324,8 @@ PLAN_MODE = os.getenv("PLAN_MODE", "auto")  # "auto" | "simple" | "complex"
 ```python
 EMERGENT_PLANNING_ENABLED = os.getenv("EMERGENT_PLANNING_ENABLED", "true")
 MAX_TODO_ITEMS = int(os.getenv("MAX_TODO_ITEMS", "20"))
+MAX_TODO_RETRIES = int(os.getenv("MAX_TODO_RETRIES", "3"))
+MAX_EMERGENT_OUTER_ITERATIONS = int(os.getenv("MAX_EMERGENT_OUTER_ITERATIONS", "60"))
 TODO_COMPRESSION_THRESHOLD = float(os.getenv("TODO_COMPRESSION_THRESHOLD", "0.8"))
 ```
 

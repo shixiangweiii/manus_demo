@@ -1,6 +1,6 @@
 # Manus Demo 更新日志
 
-> **更新日期**: 2026-04-20
+> **更新日期**: 2026-05-05
 > **当前版本**: v6.0
 
 ## 概述
@@ -49,7 +49,7 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 
 #### 2. ReActEngine v2 统一引擎
 
-**文件**: `react/engine.py`（219 行）
+**文件**: `react/engine.py`（245 行）
 
 **架构改进**:
 从 `ExecutorAgent._react_loop()` 和 `EmergentPlannerAgent._execute_todo()` 中抽取出公共的 ReAct（Reasoning + Acting）循环逻辑，形成统一的 `ReActEngine` 类，消除两处实现之间的代码重复。
@@ -92,7 +92,7 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 
 #### 1. EmergentPlannerAgent（隐式规划器）
 
-**文件**: `agents/emergent_planner.py` (539行)
+**文件**: `agents/emergent_planner.py` (683行)
 
 **核心思想**: 
 - 无独立规划阶段，规划在执行过程中自然涌现
@@ -267,8 +267,8 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 
 **配置项**:
 - `ADAPTIVE_PLANNING_ENABLED` (默认 `true`): 是否启用自适应规划
-- `ADAPT_PLAN_INTERVAL` (默认 3): 每执行 N 个节点检查一次
-- `ADAPT_PLAN_MIN_COMPLETED` (默认 2): 至少完成 N 个节点后才考虑重规划
+- `ADAPT_PLAN_INTERVAL` (默认 1): 每执行 N 个节点检查一次
+- `ADAPT_PLAN_MIN_COMPLETED` (默认 1): 至少完成 N 个节点后才考虑重规划
 
 #### 2. 工具选择智能路由
 
@@ -644,6 +644,8 @@ Orchestrator.classify_task()
 |--------|--------|------|------|
 | `EMERGENT_PLANNING_ENABLED` | `true` | v5.0 | 是否启用隐式规划功能 |
 | `MAX_TODO_ITEMS` | `20` | v5.0 | 最大 TODO 项数量限制 |
+| `MAX_TODO_RETRIES` | `3` | v5.0 | 单个 TODO 最大重试次数 |
+| `MAX_EMERGENT_OUTER_ITERATIONS` | `60` | v5.0 | Emergent 主循环最大迭代数 |
 | `TODO_COMPRESSION_THRESHOLD` | `0.8` | v5.0 | TODO 压缩阈值 |
 
 ### v4.0 新增配置
@@ -657,15 +659,15 @@ Orchestrator.classify_task()
 | 参数名 | 默认值 | 版本 | 说明 |
 |--------|--------|------|------|
 | `ADAPTIVE_PLANNING_ENABLED` | `true` | v3.0 | 是否启用自适应规划 |
-| `ADAPT_PLAN_INTERVAL` | `3` | v3.0 | 自适应规划检查间隔（节点数） |
-| `ADAPT_PLAN_MIN_COMPLETED` | `2` | v3.0 | 触发自适应规划的最小完成节点数 |
+| `ADAPT_PLAN_INTERVAL` | `1` | v3.0 | 自适应规划检查间隔（节点数） |
+| `ADAPT_PLAN_MIN_COMPLETED` | `1` | v3.0 | 触发自适应规划的最小完成节点数 |
 | `TOOL_FAILURE_THRESHOLD` | `2` | v3.0 | 工具失败阈值（达到后建议切换） |
 
 ### v2.0 新增配置
 
 | 参数名 | 默认值 | 版本 | 说明 |
 |--------|--------|------|------|
-| `MAX_PARALLEL_NODES` | `5` | v2.0 | 最大并行执行节点数 |
+| `MAX_PARALLEL_NODES` | `3` | v2.0 | 最大并行执行节点数 |
 
 ### v1.0 基础配置
 

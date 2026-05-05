@@ -1,7 +1,7 @@
 # Manus Demo - LLM 集成手册
 
-> **版本**: v6（含重试机制 + ReActEngine Feature Flag）
-> **更新日期**: 2026-04-20
+> **版本**: v6（含重试机制 + ReActEngine Feature Flag + ShellTool）
+> **更新日期**: 2026-05-05
 > **目的**: 详解 LLM 客户端的设计、配置和使用
 
 ## 目录
@@ -628,6 +628,8 @@ for text in examples:
 | `LLM_RETRY_MAX_ATTEMPTS` | `3` | 最大重试次数 | `5` |
 | `LLM_RETRY_BACKOFF_FACTOR` | `2.0` | 退避因子 | `1.5` |
 | `ENABLE_REACT_ENGINE_V2` | `false` | 是否使用 ReActEngine V2 | `true` |
+| `SHELL_EXEC_TIMEOUT` | `30` | Shell 命令执行超时（秒） | `60` |
+| `SANDBOX_DIR` | `~/.manus_demo/sandbox` | Shell/文件操作沙箱目录 | `./sandbox` |
 
 **配置文件示例** (.env)：
 ```bash
@@ -778,7 +780,7 @@ response = await llm_client.chat(
 ### 相关文档
 
 - [README.md](../../README.md) - 项目总览
-- [docs/llm-integration-v6.md](./llm-integration-v6.md) - v6 版本更新日志
+- [docs/llm-integration.md](./llm-integration.md) - v6 LLM 集成文档
 - [agents/base.py](../../agents/base.py) - BaseAgent 源码
 - [llm/client.py](../../llm/client.py) - LLMClient 源码
 

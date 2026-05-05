@@ -1,6 +1,7 @@
-# 规划测试场景 v5
+# 规划测试场景 v6
 
 > 本文档基于最新源码实现，测试三路由混合规划系统（Simple/Complex/Emergent）的自动路由能力和执行质量。
+> **更新日期**: 2026-05-05
 
 ## 一、如何运行这些用例
 
@@ -61,9 +62,13 @@ python main.py "任务描述" -v
 
 - **EMERGENT_PLANNING_ENABLED**：是否启用 v5 隐式规划（默认 `true`）
 
+- **MAX_TODO_RETRIES**：单个 TODO 最大重试次数（默认 `3`）
+
 - **ENABLE_REACT_ENGINE_V2**：是否使用 ReAct Engine v2（默认 `false`）
 
 - **LLM_RETRY_ENABLED**：是否启用 LLM 重试机制（默认 `false`）
+
+- **SHELL_EXEC_TIMEOUT**：Shell 命令执行超时（默认 `30` 秒）
 
 ## 二、测试维度与观测点
 
@@ -632,7 +637,7 @@ Emergent planning iteration 2...
 
 - **难度**：困难
 - **任务描述**：
-  - `针对 manus_demo 仓库下的 docs 目录，完成以下任务：1）读取主要文档（例如 hybrid-plan-routing-v4.md、data-structures-and-algorithms.md、planning-gap-analysis.md、upgrade-plan-v3.md），提取每篇文档的标题和一级小节标题；2）对比这些文档覆盖的主题差异与重叠；3）给出一个建议的 docs 目录重组方案，并将分析结果写入一个新的 Markdown 文件 docs/docs-reorg-proposal.md。要求在规划时尽量并行处理各文档的解析，然后再进行汇总分析。`
+  - `针对 manus_demo 仓库下的 docs 目录，完成以下任务：1）读取主要文档（例如 hybrid-plan-routing.md、data-structures-and-algorithms.md、planning-gap-analysis.md、upgrade-plan.md），提取每篇文档的标题和一级小节标题；2）对比这些文档覆盖的主题差异与重叠；3）给出一个建议的 docs 目录重组方案，并将分析结果写入一个新的 Markdown 文件 docs/docs-reorg-proposal.md。要求在规划时尽量并行处理各文档的解析，然后再进行汇总分析。`
 - **运行方式**：
   - 交互模式输入上述任务。
   - 单次任务模式：整段描述传给 `python main.py "..."`。
@@ -798,5 +803,5 @@ Emergent planning iteration 2...
 ---
 
 **文档版本**：v5.0  
-**最后更新**：2026-04-20  
+**最后更新**：2026-05-05  
 **对应源码版本**：三路由混合规划系统（Simple/Complex/Emergent）
