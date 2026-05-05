@@ -23,7 +23,7 @@ class BaseTool(ABC):
     """
     Abstract base class for all agent tools.
     所有 Agent 工具的抽象基类。
-    所有具体工具（web_search、execute_python、file_ops 等）都继承自此类。
+    所有具体工具（web_search、execute_python、file_ops、execute_shell 等）都继承自此类。
     """
 
     @property

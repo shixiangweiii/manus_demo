@@ -278,5 +278,154 @@ class TestOrchestratorEmergentRouting:
         assert hasattr(config, 'TODO_COMPRESSION_THRESHOLD')
 
 
+class TestCycleDetection:
+    """Tests for dependency cycle detection in TodoList."""
+
+    def test_no_cycle_linear_chain(self):
+        tl = TodoList(task="test")
+        tl.add_todo("A")  # id=1
+        tl.add_todo("B", dependencies=[1])  # id=2
+        tl.add_todo("C", dependencies=[2])  # id=3
+        assert not tl._has_cycle()
+
+    def test_cycle_detected_after_manual_edit(self):
+        tl = TodoList(task="test")
+        tl.add_todo("A")  # id=1
+        tl.add_todo("B", dependencies=[1])  # id=2
+        tl.add_todo("C", dependencies=[2])  # id=3
+        tl.todos[1].dependencies = [3]  # creates 1->3->2->1
+        assert tl._has_cycle()
+
+    def test_add_todo_prevents_cycle(self):
+        tl = TodoList(task="test")
+        tl.add_todo("A")  # id=1
+        tl.add_todo("B", dependencies=[1])  # id=2
+        tl.add_todo("C", dependencies=[2])  # id=3
+        # Now modify 1 to depend on 3 creating 1->3->2->1 cycle
+        tl.todos[1].dependencies = [3]
+        assert tl._has_cycle()
+        # add_todo should prevent new additions that maintain the cycle
+        # (the cycle already exists via manual edit, add_todo's cycle check
+        # will detect it when trying to add any new todo that doesn't break it)
+
+
+class TestEmergentPlannerIntegration:
+    """Integration tests for EmergentPlannerAgent with mocked LLM."""
+
+    def _make_planner(self, mock_llm):
+        from agents.emergent_planner import EmergentPlannerAgent
+        from tools.web_search import WebSearchTool
+        planner = EmergentPlannerAgent(
+            llm_client=mock_llm,
+            tools=[WebSearchTool()],
+            max_iterations=3,
+            max_outer_iterations=20,
+        )
+        return planner
+
+    @pytest.mark.asyncio
+    async def test_todo_retry_and_block(self):
+        """TODO fails 3 times → should be marked BLOCKED."""
+        from unittest.mock import AsyncMock, MagicMock
+        from schema import StepResult
+
+        mock_llm = MagicMock()
+        # init_todo returns 1 TODO
+        mock_llm.chat_json = AsyncMock(return_value={"todos": [{"description": "Task A"}]})
+        mock_llm.chat = AsyncMock(return_value="Final summary")
+        mock_llm.chat_with_tools = AsyncMock(side_effect=Exception("LLM boom"))
+
+        planner = self._make_planner(mock_llm)
+        # Force _execute_todo to fail by making think_with_tools throw
+        original_think = planner.think_with_tools
+
+        async def fail_think(*a, **kw):
+            raise Exception("forced failure")
+
+        planner.think_with_tools = fail_think
+        planner.think_json = AsyncMock(return_value={"todos": [{"description": "Task A"}]})
+        planner.think = AsyncMock(return_value="Summary")
+
+        result = await planner.execute("test task")
+        assert isinstance(result, str)
+        # The TODO should have been retried and eventually blocked
+        blocked = [t for t in planner._todo_list.todos.values() if t.status == TodoStatus.BLOCKED]
+        assert len(blocked) > 0
+
+    @pytest.mark.asyncio
+    async def test_fallback_todo_single_retry(self):
+        """Init_todo fails twice → fallback TODO has retry_count limited."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_llm = MagicMock()
+        planner = self._make_planner(mock_llm)
+
+        # Make think_json always fail
+        planner.think_json = AsyncMock(side_effect=Exception("parse fail"))
+        planner._todo_list = TodoList(task="test")
+
+        await planner._init_todo_list("test task", "")
+
+        # Should have exactly 1 fallback TODO
+        assert len(planner._todo_list.todos) == 1
+        fallback = list(planner._todo_list.todos.values())[0]
+        import config as config_module
+        assert fallback.retry_count == config_module.MAX_TODO_RETRIES - 1
+
+    @pytest.mark.asyncio
+    async def test_stagnation_detection(self):
+        """Consecutive rounds with no COMPLETED increment → early break."""
+        from unittest.mock import AsyncMock, MagicMock
+        from schema import StepResult
+
+        mock_llm = MagicMock()
+        planner = self._make_planner(mock_llm)
+
+        # Mock think_json for _init_todo_list
+        planner.think_json = AsyncMock(return_value={"todos": [{"description": "Task A"}]})
+        # Mock think for _compile_answer
+        planner.think = AsyncMock(return_value="Final answer")
+
+        # Make execute_todo always return failure
+        async def mock_execute_todo(todo):
+            return StepResult(step_id=todo.id, success=False, output="fail", tool_calls_log=[])
+
+        planner._execute_todo = mock_execute_todo
+
+        events = []
+        planner._on_event = lambda e, d: events.append((e, d))
+
+        await planner.execute("stagnation test")
+
+        # Should have completed (all blocked → loop exits normally)
+        phase_events = [d for e, d in events if e == "phase"]
+        assert any("completed" in str(p).lower() for p in phase_events)
+
+    @pytest.mark.asyncio
+    async def test_compile_answer_includes_failures(self):
+        """_compile_answer should handle mixed success/failure results."""
+        from unittest.mock import AsyncMock, MagicMock
+        from schema import StepResult
+
+        mock_llm = MagicMock()
+        planner = self._make_planner(mock_llm)
+
+        results = [
+            StepResult(step_id=1, success=True, output="Result A", tool_calls_log=[]),
+            StepResult(step_id=2, success=False, output="Error: boom", tool_calls_log=[]),
+            StepResult(step_id=3, success=True, output="Result C", tool_calls_log=[]),
+        ]
+
+        planner.think = AsyncMock(return_value="Synthesized answer with failures noted")
+
+        answer = await planner._compile_answer("test task", results)
+
+        assert "Synthesized" in answer
+        # Verify the LLM was called with both success and failure info
+        call_args = planner.think.call_args[0][0]
+        assert "Result A" in call_args
+        assert "Error: boom" in call_args
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

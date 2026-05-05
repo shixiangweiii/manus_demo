@@ -68,8 +68,9 @@ MAX_EMERGENT_OUTER_ITERATIONS = int(os.getenv("MAX_EMERGENT_OUTER_ITERATIONS", s
 
 # --- Tools ---
 # --- 工具参数 ---
-SANDBOX_DIR = os.path.expanduser(os.getenv("SANDBOX_DIR", "~/.manus_demo/sandbox"))  # 文件操作沙箱目录（防止越权访问）
+SANDBOX_DIR = os.path.expanduser(os.getenv("SANDBOX_DIR", "~/.manus_demo/sandbox"))  # 沙箱目录（文件操作和 Shell 命令的工作目录，防止越权访问）
 CODE_EXEC_TIMEOUT = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))                        # Python 代码执行超时时间（秒）
+SHELL_EXEC_TIMEOUT = int(os.getenv("SHELL_EXEC_TIMEOUT", "30"))                      # Shell 命令执行超时时间（秒）
 
 # --- v6.0 Feature Flags (向后兼容，默认关闭) ---
 # --- ReAct Engine ---

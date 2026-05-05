@@ -20,8 +20,9 @@ Usage:
   )
   result = await engine.execute(prompt, context)
 
-The module is backward compatible - existing Agent classes can continue
-to use their internal _react_loop methods via Feature Flag control.
+Agent classes (ExecutorAgent, EmergentPlannerAgent) can switch between
+their legacy _react_loop and this engine via the ENABLE_REACT_ENGINE_V2
+config flag.
 """
 
 from __future__ import annotations
@@ -100,7 +101,8 @@ class ReActEngine:
             StepResult: Contains success status, output text, and tool call log
         """
         step_id = node_id or "default"
-        self.tool_router.reset_node(str(step_id))
+        # Note: callers can access self.tool_router.reset_node() to clear
+        # per-node failure counts between independent executions.
 
         if context:
             prompt = f"{prompt}\n\nContext from previous steps:\n{context}"
@@ -174,7 +176,6 @@ class ReActEngine:
                     tool_calls_log=tool_calls_log,
                 )
 
-            has_error = False
             tool_messages: list[dict[str, Any]] = []
 
             for tool_call in response_msg.tool_calls:
@@ -209,6 +210,7 @@ class ReActEngine:
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
+                    # Keep full error text for debugging; truncate success results
                     result=result if is_error else result[:1000],
                 ))
 

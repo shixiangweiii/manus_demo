@@ -10,8 +10,12 @@ super-step parallel execution, per-node validation, reflection, etc.
 
 v2: DAG-based execution with Rich Tree visualization.
 v4: Hybrid routing UI — shows classification result and both v1/v2 plan views.
+v5: Emergent planning UI — shows TODO list lifecycle.
+v6.0: ReActEngine integration + LLM retry support.
 v2：基于 DAG 的 Rich Tree 可视化。
 v4：混合路由 UI——展示分类结果及 v1/v2 两种计划视图。
+v5：隐式规划 UI——展示 TODO 列表生命周期。
+v6.0：统一 ReActEngine 集成 + LLM 重试支持。
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from llm.client import LLMClient
 from schema import NodeType, Plan, Reflection, Step, StepResult, TaskEdge, TaskNode
 from tools.code_executor import CodeExecutorTool
 from tools.file_ops import FileOpsTool
+from tools.shell_tool import ShellTool
 from tools.web_search import WebSearchTool
 
 console = Console()
@@ -353,8 +358,8 @@ async def run_interactive() -> None:
     ))
 
     llm_client = LLMClient()
-    # 注册三个工具：网络搜索、Python 代码执行、文件读写
-    tools = [WebSearchTool(), CodeExecutorTool(), FileOpsTool()]
+    # 注册四个工具：网络搜索、Python 代码执行、文件读写、Shell 命令执行
+    tools = [WebSearchTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
@@ -390,7 +395,7 @@ async def run_single(task: str) -> None:
     用于 `python main.py "任务描述"` 的命令行用法。
     """
     llm_client = LLMClient()
-    tools = [WebSearchTool(), CodeExecutorTool(), FileOpsTool()]
+    tools = [WebSearchTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,

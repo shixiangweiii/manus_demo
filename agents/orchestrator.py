@@ -23,11 +23,15 @@ Orchestrator 管理任务的完整生命周期：
   5. 将学习成果存入长期记忆
 
 v2: DAG-based execution with parallel super-steps.
+v3: ToolRouter integration for failure-based tool switching; adaptive DAG planning.
 v4: Hybrid routing — automatically selects v1 or v2 based on task complexity.
 v5: Added emergent planning path — Claude Code style TODO list management.
+v6.0: Optional ReActEngine integration via ENABLE_REACT_ENGINE_V2 feature flag.
 v2：基于 DAG 的并行 Super-step 执行。
+v3：集成 ToolRouter（工具失败切换）和自适应 DAG 规划。
 v4：混合路由——根据任务复杂度自动选择 v1 或 v2 路径。
 v5：新增隐式规划路径——Claude Code 风格的 TODO 列表管理。
+v6.0：可选的统一 ReActEngine 集成（ENABLE_REACT_ENGINE_V2 特性开关）。
 """
 
 from __future__ import annotations
@@ -324,9 +328,9 @@ class OrchestratorAgent:
         Execute the DAG and reflect on results, with partial re-planning.
         执行 DAG 并反思结果，支持局部重规划。
 
-        Unlike v1 which discarded the entire plan on failure, v2 only
-        replans the failed subtree — preserving all completed work.
-        与 v1 失败时丢弃整个计划不同，v2 仅重规划失败子树，保留所有已完成工作。
+        Unlike v1 which replans failed steps individually, v2 replans
+        the failed subtree — preserving all completed work at a finer DAG granularity.
+        与 v1 逐个步骤重规划不同，v2 以子树粒度重规划，保留所有已完成工作。
         """
         dag_executor = DAGExecutor(
             executor_agent=self.executor_agent,

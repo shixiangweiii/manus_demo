@@ -19,11 +19,12 @@ this agent follows Claude Code's philosophy:
 Core loop:
 核心循环：
   1. Initialize TODO list from task (1-3 items)
-  2. while has_pending_todos:
+  2. while has_pending_todos and iteration < max_outer_iterations:
      - Select next ready TODO
      - think_with_tools() to reason + call tools
-     - Update TODO list (mark complete, add new discoveries)
-     - Check if all TODOs done
+     - On success: mark TODO complete, optionally update TODO list
+     - On failure: retry up to MAX_TODO_RETRIES, then mark BLOCKED
+     - Stagnation detection: break if no TODOs complete for 3+ rounds
   3. Compile final answer from completed TODO results
 
 v6.0: Optional ReActEngine integration via Feature Flag.
@@ -51,14 +52,11 @@ logger = logging.getLogger(__name__)
 EMERGENT_PLANNER_SYSTEM_PROMPT = """\
 You are an autonomous task execution agent that follows the ReAct paradigm.
 
-You manage a TODO list that tracks what needs to be done. Your workflow:
-1. Review the current TODO list and select the next actionable item
-2. Reason about what to do and which tool to use
-3. Call the appropriate tool with correct parameters
-4. Observe the tool's output and record the result
-5. Mark the TODO as completed or update it based on progress
-6. Add new TODOs if you discover additional work is needed
-7. Repeat until all TODOs are completed
+Your workflow for each TODO item:
+1. Read the TODO description and reason about what to do
+2. Select and call the appropriate tool with correct parameters
+3. Observe the tool's output and decide next steps
+4. Repeat until the TODO objective is met (stop calling tools when done)
 
 Available tools will be provided via function calling. Use them wisely.
 When you believe the overall task is complete, respond with a clear summary
@@ -163,6 +161,8 @@ class EmergentPlannerAgent(BaseAgent):
 
         iteration = 0
         all_results: list[StepResult] = []
+        prev_completed = 0
+        stagnation = 0
 
         # 主循环：while(has_pending_todos)
         while self._todo_list.has_pending():
@@ -173,6 +173,21 @@ class EmergentPlannerAgent(BaseAgent):
             if iteration > self.max_outer_iterations:
                 logger.warning("[EmergentPlanner] Hit max outer iterations (%d)", self.max_outer_iterations)
                 break
+
+            # 停滞检测：连续 N 轮无 COMPLETED 增量则提前退出
+            if iteration > 5:
+                cur_completed = sum(
+                    1 for t in self._todo_list.todos.values()
+                    if t.status == TodoStatus.COMPLETED
+                )
+                if cur_completed == prev_completed:
+                    stagnation += 1
+                else:
+                    stagnation = 0
+                prev_completed = cur_completed
+                if stagnation > 3:
+                    logger.warning("[EmergentPlanner] Planning stagnation detected (%d rounds), breaking", stagnation)
+                    break
 
             # 选择下一个就绪 TODO
             ready_todos = self._todo_list.get_ready_todos()
@@ -243,10 +258,11 @@ class EmergentPlannerAgent(BaseAgent):
                     self._todo_list.mark_pending(current_todo.id)
                     self._emit("todo_failed", {"todo": current_todo, "result": result})
 
-            # 检查是否需要添加新 TODO（仅在失败或无就绪 TODO 时触发，减少 LLM 调用）
+            # 检查是否需要添加新 TODO（失败时必触发，每 3 步周期性 review 以保留涌现能力）
             should_update = (
                 not result.success
                 or not self._todo_list.get_ready_todos()
+                or iteration % 3 == 0
             )
             if should_update:
                 await self._update_todo_list(result)
@@ -324,7 +340,8 @@ class EmergentPlannerAgent(BaseAgent):
                 return
             except Exception as retry_exc:
                 logger.warning("[EmergentPlanner] Retry also failed: %s. Creating default.", retry_exc)
-                self._todo_list.add_todo(description=f"Complete task: {task}")
+                fallback = self._todo_list.add_todo(description=f"Complete task: {task}")
+                fallback.retry_count = config_module.MAX_TODO_RETRIES - 1  # 限制兜底 TODO 仅重试 1 次
                 self._emit("todo_list_initialized", self._get_todo_summary())
 
     async def _update_todo_list(self, last_result: StepResult) -> None:
@@ -379,7 +396,7 @@ class EmergentPlannerAgent(BaseAgent):
                 if new_todos:
                     # 检查 TODO 数量限制
                     current_count = len(self._todo_list.todos)
-                    max_todos = getattr(config_module, 'MAX_TODO_ITEMS', 20)
+                    max_todos = config_module.MAX_TODO_ITEMS
 
                     for todo_data in new_todos:
                         if current_count >= max_todos:
@@ -450,16 +467,23 @@ class EmergentPlannerAgent(BaseAgent):
         Execute a single TODO using the ReAct loop.
         使用 ReAct 循环执行单个 TODO。
 
-        This is similar to ExecutorAgent's execute_node(), but integrated
-        into the emergent planning flow.
-        这类似于 ExecutorAgent 的 execute_node()，但集成在隐式规划流程中。
+        This is similar in structure to ExecutorAgent's ReAct loop, but differs:
+        (1) does NOT call self.reset() to preserve flat message history,
+        (2) retry logic is handled at the TODO scheduling level.
+        这与 ExecutorAgent 的 ReAct 循环结构类似，但有以下差异：
+        (1) 不调用 self.reset()，保留扁平消息历史；
+        (2) 重试逻辑在 TODO 调度层处理。
 
         v6.0: If ENABLE_REACT_ENGINE_V2=true, delegates to unified ReActEngine.
         """
         if todo.retry_count == 0:
             self.tool_router.reset_node(str(todo.id))
 
-        prompt = f"Execute the following TODO:\n\nTODO {todo.id}: {todo.description}"
+        separator = (
+            f"--- Switching to TODO {todo.id}: {todo.description} ---\n\n"
+            if todo.retry_count == 0 else ""
+        )
+        prompt = f"{separator}Execute the following TODO:\n\nTODO {todo.id}: {todo.description}"
 
         if todo.dependencies:
             dep_results = []
@@ -562,12 +586,15 @@ class EmergentPlannerAgent(BaseAgent):
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any] | None:
-        """Parse JSON string, handling markdown code blocks."""
+        """Parse JSON string, handling markdown code blocks.
+        解析 JSON 字符串，处理 Markdown 代码块。
+        Delegates to LLMClient.parse_json(); returns None if result is not a dict.
+        委托 LLMClient.parse_json() 解析；若结果非 dict 则返回 None。"""
         from llm.client import LLMClient
         try:
-            result = LLMClient._parse_json(text)
+            result = LLMClient.parse_json(text)
             return result if isinstance(result, dict) else None
-        except (ValueError, Exception):
+        except Exception:
             return None
 
     def _get_todo_summary(self) -> str:

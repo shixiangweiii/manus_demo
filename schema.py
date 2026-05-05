@@ -6,8 +6,12 @@ Manus Demo 的 Pydantic 数据模型。
 
 v2: Added DAG-based planning models (TaskNode, TaskEdge, DAGState, etc.)
     inspired by LangGraph's centralized-state pattern.
+v3: Added adaptive planning models (AdaptAction, PlanAdaptation, AdaptationResult).
+v5: Added emergent planning models (TodoStatus, TodoItem, TodoList with cycle detection).
 v2: 新增 DAG 规划模型（TaskNode、TaskEdge、DAGState 等），
     设计灵感来源于 LangGraph 的集中式状态管理模式。
+v3: 新增自适应规划模型（AdaptAction、PlanAdaptation、AdaptationResult）。
+v5: 新增隐式规划模型（TodoStatus、TodoItem、TodoList 及环检测）。
 """
 
 from __future__ import annotations
@@ -300,7 +304,7 @@ class ToolCallRecord(BaseModel):
     """
     tool_name: str                                         # Tool name / 工具名称
     parameters: dict[str, Any] = Field(default_factory=dict)  # 调用参数
-    result: str = ""                                       # 工具返回结果（截断到 1000 字符）
+    result: str = ""                                       # 工具返回结果（成功时截断到 1000 字符，错误时保留全文）
 
 
 class StepResult(BaseModel):
@@ -393,7 +397,8 @@ class TodoList(BaseModel):
     next_id: int = Field(default=1, description="Next available TODO ID")          # 下一个可用 TODO ID
 
     def _has_cycle(self) -> bool:
-        """Check if the dependency graph has cycles using Kahn's algorithm."""
+        """Check if the dependency graph has cycles using Kahn's algorithm.
+        使用 Kahn 算法检测依赖图是否存在环。"""
         if not self.todos:
             return False
         dependents: dict[int, list[int]] = {tid: [] for tid in self.todos}
@@ -488,7 +493,6 @@ class TodoList(BaseModel):
         """
         Mark a TODO as pending (for retry after failure).
         将 TODO 标记为等待执行（用于失败后重试）。
-        修复 Critical #3: 状态机不闭合问题。
         """
         if todo_id in self.todos:
             self.todos[todo_id].status = TodoStatus.PENDING

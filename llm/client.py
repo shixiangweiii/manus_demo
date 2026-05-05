@@ -186,7 +186,7 @@ class LLMClient:
             logger.warning("JSON mode not supported, falling back to plain text")
             text = await self.chat(messages, temperature=temperature, max_tokens=max_tokens)
 
-        return self._parse_json(text)
+        return self.parse_json(text)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -194,7 +194,7 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_json(text: str) -> Any:
+    def parse_json(text: str) -> Any:
         """
         Best-effort JSON extraction from LLM output.
         从 LLM 输出中尽力提取 JSON，处理两种常见格式：
@@ -210,7 +210,7 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
         # Try to find JSON block in markdown fences（尝试从 Markdown 代码块中提取）
-        # 修复 H1: 使用正则匹配带可选语言标签的围栏，支持前导空白
+        # 匹配带可选语言标签的围栏代码块（```json 或 ```）
         patterns = [
             r'```json\s*\n(.*?)\n```',  # ```json ... ```
             r'```\s*\n(.*?)\n```',      # ``` ... ```
@@ -223,3 +223,5 @@ class LLMClient:
                 except json.JSONDecodeError:
                     continue
         raise ValueError(f"Could not parse JSON from LLM output:\n{text[:300]}")
+
+    _parse_json = parse_json  # backward compat: agents may call the old private name

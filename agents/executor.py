@@ -18,9 +18,12 @@ Uses OpenAI-compatible function calling to let the LLM naturally select tools.
 使用 OpenAI 兼容的 function calling 让 LLM 自然地选择和调用工具。
 
 v2: Added execute_node() for DAG-based execution (TaskNode input).
-    The core ReAct loop is shared between legacy and DAG paths.
+    The core ReAct loop is shared between legacy and DAG paths
+    (when ENABLE_REACT_ENGINE_V2=false). When enabled, both paths
+    delegate to the unified ReActEngine.
 v2: 新增 execute_node() 方法，用于 DAG 执行（接受 TaskNode 输入）。
-    核心 ReAct 循环在旧版和 DAG 路径之间共用。
+    核心 ReAct 循环在旧版和 DAG 路径之间共用
+    （ENABLE_REACT_ENGINE_V2=false 时）。启用时两条路径均委托给统一 ReActEngine。
 
 v6.0: Optional ReActEngine integration via Feature Flag.
       Set ENABLE_REACT_ENGINE_V2=true to use the unified engine.
@@ -138,6 +141,8 @@ class ExecutorAgent(BaseAgent):
         从 DAGState 中获取上下文（以字符串传入），执行后返回 StepResult。
         调用方（DAGExecutor）负责将结果写回 DAGState。
 
+        v6.0: If ENABLE_REACT_ENGINE_V2=true, delegates to unified ReActEngine.
+
         Args:
             node:    要执行的 TaskNode（必须是 ACTION 类型）。
             context: 由 DAGState.get_node_context() 构建的上下文字符串。
@@ -173,6 +178,7 @@ class ExecutorAgent(BaseAgent):
         prompt = f"Execute the following step:\n\nStep {step.id}: {step.description}"
 
         if self._react_engine:
+            self.tool_router.reset_node(str(step.id))
             return await self._react_engine.execute(
                 prompt=prompt,
                 context=context,
@@ -182,8 +188,8 @@ class ExecutorAgent(BaseAgent):
         return await self._react_loop(step.id, prompt, context)
 
     # ------------------------------------------------------------------
-    # Shared ReAct loop
-    # 共用 ReAct 循环（v1 和 v2 共享）
+    # Legacy ReAct loop (used when ENABLE_REACT_ENGINE_V2=false)
+    # 旧版 ReAct 循环（ENABLE_REACT_ENGINE_V2=false 时使用）
     # ------------------------------------------------------------------
 
     async def _react_loop(
@@ -193,8 +199,9 @@ class ExecutorAgent(BaseAgent):
         context: str = "",
     ) -> StepResult:
         """
-        Core ReAct (Reasoning + Acting) loop shared by both v1 and v2 paths.
-        v1 和 v2 共用的核心 ReAct（推理 + 行动）循环。
+        Core ReAct (Reasoning + Acting) loop used by legacy v1 and v2 paths
+        when ENABLE_REACT_ENGINE_V2=false.
+        ENABLE_REACT_ENGINE_V2=false 时，v1 和 v2 路径使用的核心 ReAct 循环。
 
         Loop:
           1. LLM reasons about what to do (with tool schemas)
@@ -286,8 +293,7 @@ class ExecutorAgent(BaseAgent):
                         self.tool_router.record_failure(node_id, func_name)
                         has_error = True
 
-                # 修复 Critical #2: 检测 Error 字符串
-                # 如果工具返回以 "Error:" 开头的字符串，标记为失败
+                # 检测 Error 字符串：工具返回以 "Error:" 开头时标记为失败
                 if isinstance(result, str) and result.startswith("Error:"):
                     has_error = True
 
