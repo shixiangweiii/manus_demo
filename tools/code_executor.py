@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 import sys
 from typing import Any
 
 import config
 from tools.base import BaseTool
+from tools.subprocess_utils import build_safe_env, run_with_limits
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,15 @@ class CodeExecutorTool(BaseTool):
     """
     Execute Python code in a subprocess with timeout protection.
     在带超时保护的子进程中执行 Python 代码。
-    使用 subprocess 隔离执行，避免恶意代码影响主进程。
     """
+
+    _concurrency_sem: asyncio.Semaphore | None = None
+
+    @classmethod
+    def _get_sem(cls) -> asyncio.Semaphore:
+        if cls._concurrency_sem is None:
+            cls._concurrency_sem = asyncio.Semaphore(config.CODE_MAX_CONCURRENT)
+        return cls._concurrency_sem
 
     @property
     def name(self) -> str:
@@ -39,9 +46,6 @@ class CodeExecutorTool(BaseTool):
             "Execute Python code and return the output. "
             "The code runs in a subprocess with a timeout. "
             "Use print() to produce output that will be captured."
-            # 执行 Python 代码并返回输出。
-            # 代码在子进程中运行，设有超时限制。
-            # 使用 print() 产生会被捕获的输出。
         )
 
     @property
@@ -51,7 +55,7 @@ class CodeExecutorTool(BaseTool):
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python code to execute",  # 要执行的 Python 代码字符串
+                    "description": "Python code to execute",
                 },
             },
             "required": ["code"],
@@ -64,34 +68,22 @@ class CodeExecutorTool(BaseTool):
 
         logger.info("Executing Python code (%d chars)", len(code))
 
-        try:
-            # 使用 asyncio.wait_for 实现异步超时控制
-            result = await asyncio.wait_for(
-                self._run_code(code),
-                timeout=config.CODE_EXEC_TIMEOUT,
-            )
-            return result
-        except asyncio.TimeoutError:
-            return f"Error: Code execution timed out after {config.CODE_EXEC_TIMEOUT}s."
-        except Exception as exc:
-            return f"Error executing code: {exc}"
+        async with self._get_sem():
+            try:
+                return await self._run_code(code)
+            except asyncio.TimeoutError:
+                return f"Error: Code execution timed out after {config.CODE_EXEC_TIMEOUT}s."
+            except Exception as exc:
+                return f"Error executing code: {exc}"
 
     @staticmethod
     async def _run_code(code: str) -> str:
-        """
-        Run Python code in a subprocess and capture output.
-        在子进程中运行 Python 代码并捕获输出。
-        使用 run_in_executor 将同步的 subprocess.run 包装为异步，避免阻塞事件循环。
-        """
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                [sys.executable, "-c", code],  # 使用当前 Python 解释器执行代码字符串
-                capture_output=True,            # 同时捕获 stdout 和 stderr
-                text=True,
-                timeout=config.CODE_EXEC_TIMEOUT,
-            ),
+        result = await run_with_limits(
+            cmd=[sys.executable, "-c", code],
+            timeout=config.CODE_EXEC_TIMEOUT,
+            cwd=config.SANDBOX_DIR,
+            env=build_safe_env(),
+            max_output_bytes=config.SUBPROCESS_MAX_OUTPUT_BYTES,
         )
 
         output_parts = []
@@ -100,7 +92,7 @@ class CodeExecutorTool(BaseTool):
         if result.stderr:
             output_parts.append(f"Errors:\n{result.stderr.strip()}")
         if result.returncode != 0:
-            output_parts.append(f"Exit code: {result.returncode}")  # 非零退出码提示执行异常
+            output_parts.append(f"Exit code: {result.returncode}")
 
         if not output_parts:
             return "Code executed successfully (no output)."
