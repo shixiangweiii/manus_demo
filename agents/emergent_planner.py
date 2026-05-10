@@ -498,12 +498,13 @@ class EmergentPlannerAgent(BaseAgent):
         self._todo_list.mark_in_progress(todo.id)
 
         if self._react_engine:
-            return await self._react_engine.execute(
+            result = await self._react_engine.execute(
                 prompt=prompt,
                 context="",
                 node_id=str(todo.id),
                 system_hint=EMERGENT_PLANNER_SYSTEM_PROMPT,
             )
+            return result
 
         tool_calls_log: list[ToolCallRecord] = []
         iteration = 0

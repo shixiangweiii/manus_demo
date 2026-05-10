@@ -83,3 +83,6 @@ ENABLE_REACT_ENGINE_V2 = os.getenv("ENABLE_REACT_ENGINE_V2", "false").lower() ==
 LLM_RETRY_ENABLED = os.getenv("LLM_RETRY_ENABLED", "false").lower() == "true"  # LLM 调用重试机制
 LLM_RETRY_MAX_ATTEMPTS = int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", "3"))  # 最大重试次数
 LLM_RETRY_BACKOFF_FACTOR = float(os.getenv("LLM_RETRY_BACKOFF_FACTOR", "2.0"))  # 退避因子
+
+# --- Token Usage Tracking ---
+TOKEN_TRACKING_ENABLED = os.getenv("TOKEN_TRACKING_ENABLED", "true").lower() == "true"  # 是否启用 Token 消耗追踪

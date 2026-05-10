@@ -22,6 +22,7 @@ from typing import Any
 from openai import AsyncOpenAI, RateLimitError, APIError, APITimeoutError
 
 import config
+from schema import LLMCallRecord
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ class LLMClient:
         self.retry_enabled = retry_enabled if retry_enabled is not None else config.LLM_RETRY_ENABLED
         self.max_retries = max_retries if max_retries is not None else config.LLM_RETRY_MAX_ATTEMPTS
         self.backoff_factor = backoff_factor if backoff_factor is not None else config.LLM_RETRY_BACKOFF_FACTOR
+
+        # Per-call token 消耗记录列表
+        self._call_records: list[LLMCallRecord] = []
 
         if self.retry_enabled:
             logger.info("[LLMClient] Retry enabled (max_attempts=%d, backoff=%.1f)", self.max_retries, self.backoff_factor)
@@ -90,6 +94,8 @@ class LLMClient:
                     max_tokens=max_tokens,
                     **kwargs,
                 )
+                if config.TOKEN_TRACKING_ENABLED:
+                    self._record_call(resp.usage, "chat", messages)
                 return resp.choices[0].message.content or ""
             except RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -138,6 +144,8 @@ class LLMClient:
                     max_tokens=max_tokens,
                     **kwargs,
                 )
+                if config.TOKEN_TRACKING_ENABLED:
+                    self._record_call(resp.usage, "chat_with_tools", messages)
                 return resp.choices[0].message
             except RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -180,6 +188,8 @@ class LLMClient:
                 response_format={"type": "json_object"},  # OpenAI JSON mode
                 **kwargs,
             )
+            if config.TOKEN_TRACKING_ENABLED:
+                self._record_call(resp.usage, "chat_json", messages)
             text = resp.choices[0].message.content or "{}"
             logger.debug("[chat_json] Raw response: %.500s", text)
         except Exception:
@@ -227,3 +237,46 @@ class LLMClient:
         raise ValueError(f"Could not parse JSON from LLM output:\n{text[:300]}")
 
     _parse_json = parse_json  # backward compat: agents may call the old private name
+
+    # ------------------------------------------------------------------
+    # Token Usage Tracking
+    # Token 消耗追踪
+    # ------------------------------------------------------------------
+
+    def _record_call(self, usage: Any, call_type: str, messages: list[dict[str, Any]]) -> None:
+        """Record token usage for a single LLM API call."""
+        if not config.TOKEN_TRACKING_ENABLED:
+            return
+
+        prompt_summary = ""
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                prompt_summary = content[:200] if len(content) > 200 else content
+                break
+        if not prompt_summary:
+            prompt_summary = call_type
+
+        prompt_tokens = getattr(usage, 'prompt_tokens', 0) or 0
+        completion_tokens = getattr(usage, 'completion_tokens', 0) or 0
+        total_tokens = getattr(usage, 'total_tokens', 0) or 0
+
+        if usage is None:
+            logger.warning("[LLMClient] API response missing usage data (model=%s)", self.model)
+
+        self._call_records.append(LLMCallRecord(
+            call_type=call_type,
+            prompt_summary=prompt_summary,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            engine=self.model,
+        ))
+
+    def get_call_records(self) -> list[LLMCallRecord]:
+        """Return a copy of the call records list."""
+        return list(self._call_records)
+
+    def reset_usage(self) -> None:
+        """Clear call records for a new task."""
+        self._call_records.clear()

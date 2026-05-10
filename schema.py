@@ -294,6 +294,45 @@ class AdaptationResult(BaseModel):
 
 
 # ======================================================================
+# Token Usage Tracking
+# Token 消耗追踪模型
+# ======================================================================
+
+class TokenUsage(BaseModel):
+    """
+    Token consumption for a single LLM API call or accumulated across calls.
+    单次 LLM API 调用或多次调用累加的 Token 消耗记录。
+    """
+    prompt_tokens: int = 0        # 输入 prompt 的 token 数
+    completion_tokens: int = 0    # 输出 completion 的 token 数
+    total_tokens: int = 0         # 总 token 数（prompt + completion）
+    engine: str = ""              # 推理引擎标识，如 "deepseek-chat"
+
+
+class LLMCallRecord(BaseModel):
+    """
+    Per-LLM-call token consumption record with prompt summary.
+    单次 LLM API 调用的 Token 消耗记录（含提示词摘要）。
+    """
+    call_type: str = ""          # "chat" / "chat_with_tools" / "chat_json"
+    prompt_summary: str = ""     # 首条 user message 截断至 200 字符
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    engine: str = ""
+
+
+class TokenUsageSummary(BaseModel):
+    """
+    Aggregated token consumption across all agents and engines.
+    跨所有智能体和引擎的 Token 消耗汇总。
+    """
+    call_records: list[LLMCallRecord] = Field(default_factory=list)  # 每次LLM调用明细
+    by_engine: dict[str, TokenUsage] = Field(default_factory=dict)   # 按推理引擎汇总
+    total: TokenUsage = Field(default_factory=TokenUsage)            # 全局总量
+
+
+# ======================================================================
 # Execution Results
 # 执行结果模型
 # ======================================================================

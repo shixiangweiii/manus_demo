@@ -51,7 +51,7 @@ from knowledge.retriever import KnowledgeRetriever
 from llm.client import LLMClient
 from memory.long_term import LongTermMemory
 from memory.short_term import ShortTermMemory
-from schema import MemoryEntry, NodeStatus, NodeType, Plan, Reflection, StepResult, StepStatus, TodoStatus
+from schema import MemoryEntry, NodeStatus, NodeType, Plan, Reflection, StepResult, StepStatus, TokenUsage, TokenUsageSummary, TodoStatus
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,9 @@ class OrchestratorAgent:
         """
         self._emit("task_start", {"task": task})
 
+        # Token 追踪：重置记录，开始新任务
+        self.llm_client.reset_usage()
+
         if not config.EMERGENT_PLANNING_ENABLED:
             logger.info("[Orchestrator] Emergent planning mode is disabled via config")
 
@@ -174,11 +177,9 @@ class OrchestratorAgent:
             self._emit("dag_created", dag)
             final_answer = await self._execute_dag_and_reflect(dag)
         elif complexity == "emergent":
-            # v5: Emergent planning mode (Claude Code style)
             self._emit("phase", "Planning (v5 emergent via TODO list)...")
             final_answer = await self._execute_emergent(task, combined_context)
         else:
-            # 未知复杂度值——降级到 complex 而非静默进入 emergent
             logger.error("[Orchestrator] Unknown complexity '%s', degrading to complex", complexity)
             self._emit("phase", f"Planning (v2 hierarchical DAG) - degraded from '{complexity}'...")
             dag = await self.planner.create_dag(task, combined_context)
@@ -187,6 +188,9 @@ class OrchestratorAgent:
 
         # --- Phase 4: Store in memory ---
         # --- 阶段 4：存入长期记忆 ---
+        # Token 追踪：输出汇总
+        summary = self._finalize_token_usage()
+        self._emit("token_usage_summary", summary)
         self._store_memory(task, final_answer)
         self.short_term.add({"role": "assistant", "content": final_answer})
         self._emit("task_complete", {"answer": final_answer})
@@ -437,7 +441,7 @@ class OrchestratorAgent:
                 dag = await self.planner.replan_subtree(
                     dag,
                     failed_node_id=failed_node.id,
-                    feedback=reflection.feedback,  # 将反思反馈传给 Planner 指导改进方向
+                    feedback=reflection.feedback,
                 )
                 # 将 Executor 的状态机注入新 DAG，确保 UI 事件不丢失
                 dag._sm = dag_executor._sm
@@ -464,6 +468,35 @@ class OrchestratorAgent:
         node = dag.nodes.get(node_id)
         success = node.status == NodeStatus.COMPLETED if node else False
         return StepResult(step_id=node_id, success=success, output=output)
+
+    # ------------------------------------------------------------------
+    # Token Usage Tracking helpers
+    # Token 消耗追踪辅助方法
+    # ------------------------------------------------------------------
+
+    def _finalize_token_usage(self) -> TokenUsageSummary:
+        """Compute token usage summary from per-call records."""
+        call_records = self.llm_client.get_call_records()
+        summary = TokenUsageSummary(call_records=call_records)
+
+        # 按引擎汇总
+        by_engine: dict[str, TokenUsage] = {}
+        for record in call_records:
+            if record.engine not in by_engine:
+                by_engine[record.engine] = TokenUsage(engine=record.engine)
+            by_engine[record.engine].prompt_tokens += record.prompt_tokens
+            by_engine[record.engine].completion_tokens += record.completion_tokens
+            by_engine[record.engine].total_tokens += record.total_tokens
+        summary.by_engine = by_engine
+
+        # 全局总量
+        total = TokenUsage(engine=self.llm_client.model)
+        for record in call_records:
+            total.prompt_tokens += record.prompt_tokens
+            total.completion_tokens += record.completion_tokens
+            total.total_tokens += record.total_tokens
+        summary.total = total
+        return summary
 
     def _store_memory(self, task: str, answer: str) -> None:
         """

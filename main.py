@@ -34,7 +34,7 @@ from rich.tree import Tree
 from agents.orchestrator import OrchestratorAgent
 from dag.graph import TaskDAG
 from llm.client import LLMClient
-from schema import NodeType, Plan, Reflection, Step, StepResult, TaskEdge, TaskNode
+from schema import LLMCallRecord, NodeType, Plan, Reflection, Step, StepResult, TaskEdge, TaskNode, TokenUsageSummary
 from tools.code_executor import CodeExecutorTool
 from tools.file_ops import FileOpsTool
 from tools.shell_tool import ShellTool
@@ -103,6 +103,77 @@ def _build_dag_tree(dag: TaskDAG) -> Tree:
             sg_branch.add(act_label)
 
     return tree
+
+
+# ======================================================================
+# Token Usage Summary Renderer
+# Token 消耗追踪可视化
+# ======================================================================
+
+def _render_token_summary(summary: TokenUsageSummary) -> None:
+    """
+    Render token consumption summary as Rich Tables and Panel.
+    以 Rich 表格和面板渲染 Token 消耗追踪汇总。
+    """
+    if not summary.total.total_tokens:
+        console.print("[dim]Token usage: N/A (provider did not return usage data)[/dim]")
+        return
+
+    # --- Per-call records ---
+    if summary.call_records:
+        table = Table(
+            title="Token Consumption Per-Call",
+            border_style="cyan",
+            show_lines=True,
+        )
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Type", style="cyan", width=16)
+        table.add_column("Prompt Summary", style="white", width=40)
+        table.add_column("Prompt", justify="right", width=10)
+        table.add_column("Completion", justify="right", width=10)
+        table.add_column("Total", style="bold green", justify="right", width=10)
+
+        for i, record in enumerate(summary.call_records, 1):
+            table.add_row(
+                str(i),
+                record.call_type,
+                record.prompt_summary[:40],
+                str(record.prompt_tokens),
+                str(record.completion_tokens),
+                str(record.total_tokens),
+            )
+        console.print(table)
+
+    # --- Per-engine totals ---
+    if summary.by_engine:
+        engine_table = Table(
+            title="Token Consumption by Engine",
+            border_style="green",
+            show_lines=True,
+        )
+        engine_table.add_column("Engine", style="cyan", width=20)
+        engine_table.add_column("Prompt Tokens", justify="right", width=15)
+        engine_table.add_column("Completion Tokens", justify="right", width=15)
+        engine_table.add_column("Total Tokens", style="bold green", justify="right", width=15)
+
+        for engine, usage in summary.by_engine.items():
+            engine_table.add_row(
+                engine,
+                str(usage.prompt_tokens),
+                str(usage.completion_tokens),
+                str(usage.total_tokens),
+            )
+        console.print(engine_table)
+
+    # --- Grand total ---
+    console.print(Panel(
+        f"[bold]Total Tokens: {summary.total.total_tokens}[/bold]\n"
+        f"  Prompt:     {summary.total.prompt_tokens}\n"
+        f"  Completion: {summary.total.completion_tokens}\n"
+        f"  [dim]Note: Total may include reasoning tokens (prompt + completion ≤ total)[/dim]",
+        title="[bold green]Token Consumption[/bold green]",
+        border_style="green",
+    ))
 
 
 # ======================================================================
@@ -302,6 +373,11 @@ def on_event(event: str, data: Any) -> None:
     elif event == "memory_stored":
         # 长期记忆已存储提示
         console.print("[dim]   (Result stored in long-term memory)[/dim]")
+
+    elif event == "token_usage_summary":
+        # Token 消耗追踪汇总：显示明细表 + 引擎汇总 + 总计
+        summary: TokenUsageSummary = data
+        _render_token_summary(summary)
 
     elif event == "task_complete":
         # 任务完成：显示绿色边框的最终答案面板
