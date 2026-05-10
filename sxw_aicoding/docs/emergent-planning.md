@@ -738,4 +738,4 @@ EmergentPlannerAgent 通过 `_emit()` 方法向 UI 回调函数发送事件：
 
 ---
 
-> **文档维护**：本文档基于 `agents/emergent_planner.py` (683 行) 和 `schema.py` (第 350-573 行) 的最新代码生成。
+> **文档维护**：本文档基于 `agents/emergent_planner.py` (684 行) 和 `schema.py` (612 行) 的最新代码生成。

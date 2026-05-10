@@ -92,11 +92,11 @@ manus_demo/
 ├── agents/                    # 智能体模块
 │   ├── __init__.py
 │   ├── base.py               # BaseAgent 基类 (182行)
-│   ├── orchestrator.py       # OrchestratorAgent 中央协调者 (490行)
+│   ├── orchestrator.py       # OrchestratorAgent 中央协调者 (523行)
 │   ├── planner.py            # PlannerAgent 混合规划器 (933行)
-│   ├── executor.py           # ExecutorAgent ReAct执行器 (321行)
+│   ├── executor.py           # ExecutorAgent ReAct执行器 (322行)
 │   ├── reflector.py          # ReflectorAgent 反思验证器 (254行)
-│   └── emergent_planner.py   # EmergentPlannerAgent 隐式规划器 (683行)
+│   └── emergent_planner.py   # EmergentPlannerAgent 隐式规划器 (684行)
 │
 ├── dag/                       # DAG 执行引擎
 │   ├── __init__.py
@@ -104,13 +104,13 @@ manus_demo/
 │   ├── executor.py           # DAGExecutor Super-step执行器 (647行)
 │   └── state_machine.py      # NodeStateMachine 节点状态机 (113行)
 │
-├── llm/                       # LLM 客户端
-│   ├── __init__.py
-│   └── client.py             # LLMClient OpenAI兼容封装 (229行)
-│
 ├── react/                     # ReAct 统一引擎 (v6)
 │   ├── __init__.py
 │   └── engine.py             # ReActEngine 统一 ReAct 循环引擎 (245行)
+│
+├── llm/                       # LLM 客户端
+│   ├── __init__.py
+│   └── client.py             # LLMClient OpenAI兼容封装 (282行)
 │
 ├── tools/                     # 工具系统
 │   ├── __init__.py
@@ -119,7 +119,7 @@ manus_demo/
 │   ├── web_search.py         # WebSearchTool 网络搜索 (112行)
 │   ├── code_executor.py      # CodeExecutorTool 代码执行 (101行)
 │   ├── file_ops.py           # FileOpsTool 文件操作 (137行)
-│   ├── shell_tool.py         # ShellTool Shell 命令执行 (151行)
+│   ├── shell_tool.py         # ShellTool Shell命令执行 (151行)
 │   └── subprocess_utils.py   # 子进程管理工具 (155行)
 │
 ├── memory/                    # 记忆系统
@@ -135,50 +135,23 @@ manus_demo/
 │   ├── __init__.py
 │   ├── retriever.py          # KnowledgeRetriever TF-IDF检索 (228行)
 │   └── docs/
-│       └── sample.txt        # 示例知识文档
 │
 ├── tests/                     # 测试模块
-│   ├── __init__.py
-│   ├── test_dag_capabilities.py
-│   ├── test_emergent_planning.py
-│   ├── test_emergent_simple.py
-│   ├── test_llm_integration.py
-│   ├── test_optimizations.py
-│   ├── test_real_tools.py
-│   ├── test_shell_tool.py
-│   ├── test_concurrent_execution.py
-│   └── test_cycle_detection.py
 │
-├── sxw_aicoding/              # 用户工作目录 / 文档目录
-│   ├── docs/
-│   │   ├── codemap.md              # 本代码地图文档
-│   │   ├── CHANGELOG.md            # 版本更新日志
-│   │   ├── data-structures-and-algorithms.md
-│   │   ├── dynamic-features.md
-│   │   ├── emergent-planning.md
-│   │   ├── emergent-planning-test-scenarios.md
-│   │   ├── hybrid-plan-routing.md
-│   │   ├── llm-integration.md
-│   │   ├── planning-gap-analysis.md
-│   │   ├── planning-test-scenarios.md
-│   │   ├── related-papers.md
-│   │   └── upgrade-plan.md
-│   └── temp/
+├── sxw_aicoding/              # 文档目录
+│   └── docs/
 │
-├── .env                       # 环境变量配置
-├── .env.example              # 环境变量示例
-├── config.py                  # 全局配置 (85行)
-├── schema.py                  # 数据模型定义
-├── main.py                    # CLI 入口
-├── requirements.txt           # Python 依赖
-└── README.md                  # 项目说明
+├── config.py                  # 全局配置 (88行)
+├── schema.py                  # 数据模型定义 (612行)
+├── main.py                    # CLI 入口 (515行)
+└── requirements.txt           # Python 依赖
 ```
 
 ## 组件详情
 
 ### 1. OrchestratorAgent
 
-**文件**: `agents/orchestrator.py` (490行)
+**文件**: `agents/orchestrator.py` (523行)
 
 **目的**: 管理完整混合规划生命周期的中央协调者，负责任务分类、路由选择和执行协调。
 
@@ -227,8 +200,6 @@ graph LR
 
 **文件**: `agents/planner.py` (933行)
 
-**目的**: 两阶段混合分类器 + v5探索性模式检测，负责任务分类和计划生成。
-
 **主要职责**:
 - 两阶段任务分类：规则快筛 + LLM 兜底
 - v1 扁平计划生成（2-6步）
@@ -274,7 +245,7 @@ graph TD
 
 ### 3. ExecutorAgent
 
-**文件**: `agents/executor.py` (321行)
+**文件**: `agents/executor.py` (322行)
 
 **目的**: ReAct循环执行器，负责逐步执行计划中的每个步骤/节点。
 
@@ -282,8 +253,33 @@ graph TD
 - 实现 ReAct（推理 + 行动）模式
 - 使用 OpenAI 兼容的 function calling
 - 支持步骤执行和节点执行两种模式
-- v6 集成 ReActEngine Feature Flag
+- v6 集成 ReActEngine Feature Flag（`ENABLE_REACT_ENGINE_V2`）
 - v3 集成 ToolRouter 智能路由
+
+**ReAct 循环流程**:
+```mermaid
+graph TD
+    A[开始] --> B[Thought: LLM推理]
+    B --> C{需要工具?}
+    C -->|是| D[Action: 调用工具]
+    D --> E[Observe: 获取结果]
+    E --> F{完成?}
+    F -->|否| B
+    F -->|是| G[返回最终答案]
+    C -->|否| G
+```
+
+**v6 ReActEngine 集成**:
+```python
+# 如果 ENABLE_REACT_ENGINE_V2=true，使用统一 ReActEngine
+if config.ENABLE_REACT_ENGINE_V2:
+    self._react_engine = ReActEngine(
+        llm_client=self.llm_client,
+        tools=self.tools,
+        max_iterations=self.max_iterations,
+        tool_router=self.tool_router,
+    )
+```
 
 **主要方法签名**:
 ```python
@@ -420,13 +416,24 @@ class BaseAgent:
 
 **目的**: Super-step 并行执行引擎，替代原 Orchestrator 的顺序 for 循环。
 
-**主要职责**:
-- Super-step 并行执行模型
-- 节点状态管理
-- 失败处理（回滚 + 跳过下游子树）
-- 条件边评估
-- v3 自适应规划支持
-- 逐节点 exit criteria 验证
+**Super-step 执行流程**:
+```mermaid
+graph TD
+    A[开始] --> B[找出所有就绪节点]
+    B --> C[限制最大并行数 MAX_PARALLEL_NODES]
+    C --> D[并行执行节点 asyncio.gather]
+    D --> E[合并结果到DAGState]
+    E --> F[验证exit criteria]
+    F --> G{有失败?}
+    G -->|是| H[处理失败: 回滚+子树跳过]
+    G -->|否| I[评估条件边]
+    H --> I
+    I --> J{DAG完成?}
+    J -->|否| K[refresh_ready_states]
+    K --> B
+    J -->|是| L[编译输出]
+    L --> M[返回结果]
+```
 
 **主要方法签名**:
 ```python
@@ -469,13 +476,35 @@ graph TD
 
 **目的**: DAG 数据结构与操作，提供分层任务规划的图结构支持。
 
-**主要职责**:
-- 节点和边的管理
-- 就绪节点发现
-- 拓扑排序
-- 子树跳过标记
-- 状态刷新
-- v3 动态变更支持
+**核心数据结构**:
+```python
+nodes: dict[str, TaskNode]              # 所有节点（key: node_id）
+edges: list[TaskEdge]                   # 所有边
+state: DAGState                         # 集中式共享状态
+_dep_adjacency: dict[str, list[str]]   # source -> [targets] 依赖邻接表
+_reverse_dep_adjacency: dict[str, list[str]]  # target -> [sources] 逆向邻接表
+_checkpoints: list[dict[str, Any]]     # 内存状态快照（用于调试）
+```
+
+**DAG 结构示例**:
+```mermaid
+graph TB
+    Goal[GOAL: 主目标] --> SG1[GOAL→SUBGOAL_1]
+    Goal --> SG2[GOAL→SUBGOAL_2]
+    SG1 --> A1[SUBGOAL→ACTION_1]
+    SG1 --> A2[SUBGOAL→ACTION_2]
+    SG2 --> A3[SUBGOAL→ACTION_3]
+    A1 --> E1[ACTION_1 → DEPENDENCY → ACTION_4]
+    A2 --> E1
+    A3 --> E1
+    style Goal fill:#b8d4ff
+    style SG1 fill:#ffd700
+    style SG2 fill:#ffd700
+    style A1 fill:#90EE90
+    style A2 fill:#90EE90
+    style A3 fill:#90EE90
+    style E1 fill:#90EE90
+```
 
 **主要方法签名**:
 ```python
@@ -553,15 +582,9 @@ class NodeStateMachine:
 
 ### 10. LLMClient
 
-**文件**: `llm/client.py` (229行)
+**文件**: `llm/client.py` (282行)
 
-**目的**: OpenAI 兼容 API 的统一封装，支持多种 LLM 服务商。
-
-**主要职责**:
-- 统一的 chat completions 接口
-- Function calling 支持
-- v6 指数退避重试机制
-- JSON 响应解析
+**目的**: OpenAI 兼容 API 的统一封装，支持多种 LLM 服务商（DeepSeek、Qwen、Ollama、vLLM）。
 
 **主要方法签名**:
 ```python
@@ -579,20 +602,25 @@ class LLMClient:
     async def chat(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> str
     async def chat_with_tools(self, messages: list[dict], tools: list[dict], temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> Any
     async def chat_json(self, messages: list[dict], temperature: float = 0.3, max_tokens: int = 4096, **kwargs) -> Any
-    def parse_json(text: str) -> Any  # staticmethod，_parse_json 为向后兼容别名
+    def parse_json(text: str) -> Any  # staticmethod
+    def get_call_records() -> list[LLMCallRecord]
+    def reset_usage() -> None
 ```
 
-**v6 重试机制**:
+**v6 重试机制流程**:
 ```mermaid
 graph TD
-    A[调用LLM] --> B{成功?}
-    B -->|是| C[返回结果]
+    A[调用 LLM] --> B{成功?}
+    B -->|是| C[记录 token 使用]
     B -->|否| D{可重试错误?}
-    D -->|否| E[抛出异常]
-    D -->|是| F{达到最大重试?}
-    F -->|是| E
-    F -->|否| G[等待退避时间]
-    G --> A
+    D -->|RateLimit| E[等待退避]
+    D -->|Timeout| E
+    D -->|APIError| E
+    D -->|认证错误| F[直接抛出]
+    E --> G{达到最大重试?}
+    G -->|否| A
+    G -->|是| F
+    C --> H[返回结果]
 ```
 
 ### 11. 工具系统
@@ -1042,16 +1070,16 @@ def on_event(event_type: str, data: Any):
 
 | 文件路径 | 行数 | 核心职责 | 关键类/方法 |
 |---------|------|---------|-----------|
-| `agents/orchestrator.py` | 490 | 中央协调者，三路由管理 | `OrchestratorAgent.run()` |
+| `agents/orchestrator.py` | 523 | 中央协调者，三路由管理 | `OrchestratorAgent.run()` |
 | `agents/planner.py` | 933 | 混合分类器 + 计划生成 | `PlannerAgent.classify_task()` |
-| `agents/executor.py` | 321 | ReAct 执行器 | `ExecutorAgent._react_loop()` |
+| `agents/executor.py` | 322 | ReAct 执行器 | `ExecutorAgent._react_loop()` |
 | `agents/reflector.py` | 254 | 质量验证与反馈 | `ReflectorAgent.reflect()` |
-| `agents/emergent_planner.py` | 683 | 隐式规划器 | `EmergentPlannerAgent.execute()` |
+| `agents/emergent_planner.py` | 684 | 隐式规划器 | `EmergentPlannerAgent.execute()` |
 | `agents/base.py` | 182 | 智能体基类 | `BaseAgent.think()` |
 | `dag/executor.py` | 647 | Super-step 并行执行 | `DAGExecutor.execute()` |
 | `dag/graph.py` | 626 | DAG 数据结构 | `TaskDAG.get_ready_nodes()` |
 | `dag/state_machine.py` | 113 | 节点状态机 | `NodeStateMachine.transition()` |
-| `llm/client.py` | 229 | LLM 客户端 | `LLMClient.chat()` |
+| `llm/client.py` | 282 | LLM 客户端 | `LLMClient.chat()` |
 | `react/engine.py` | 245 | 统一 ReAct 引擎 | `ReActEngine.execute()` |
 | `tools/base.py` | 86 | 工具基类 | `BaseTool.execute()` |
 | `tools/router.py` | 167 | 智能工具路由 | `ToolRouter.get_hint()` |
@@ -1064,9 +1092,9 @@ def on_event(event_type: str, data: Any):
 | `memory/long_term.py` | 141 | 长期记忆 | `LongTermMemory.search()` |
 | `context/manager.py` | 186 | 上下文管理 | `ContextManager.compress_if_needed()` |
 | `knowledge/retriever.py` | 228 | 知识检索器 | `KnowledgeRetriever.search()` |
-| `schema.py` | 573 | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
-| `config.py` | 85 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
-| `main.py` | 439 | CLI 入口 | `main()` |
+| `schema.py` | 612 | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
+| `config.py` | 88 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
+| `main.py` | 515 | CLI 入口 | `main()` |
 
 ### 版本演进关键文件
 

@@ -135,15 +135,18 @@ v2 发现了「就绪节点」后，不是排队一个一个做，而是**让它
 `dag/executor.py` — `asyncio.gather` 并行执行：
 
 ```python
-# DAGExecutor._execute_super_step() 核心逻辑
-ready_nodes = dag.get_ready_nodes()  # 找出所有就绪节点
-ready_nodes = ready_nodes[:self._max_parallel]  # 限制最大并行数
+# DAGExecutor.execute() 核心逻辑
+while not dag.is_complete():
+    ready_nodes = dag.get_ready_nodes()  # 找出所有就绪节点
+    ready_nodes = ready_nodes[:self._max_parallel]  # 限制最大并行数（MAX_PARALLEL_NODES=3）
 
-# 关键：使用 asyncio.gather 同时执行多个节点
-results = await asyncio.gather(
-    *[self._execute_single_node(node) for node in ready_nodes],
-    return_exceptions=True  # 即使某个失败，其他继续
-)
+    # 关键：使用 asyncio.gather 同时执行多个节点
+    # return_exceptions=True 确保一个节点失败不影响其他节点
+    results = await asyncio.gather(
+        *[self._run_node_with_timeout(node, dag) for node in ready_nodes],
+        return_exceptions=True
+    )
+    # 合并结果、处理失败、评估条件边...
 ```
 
 ### MAX_PARALLEL_NODES 限制
