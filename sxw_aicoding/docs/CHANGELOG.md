@@ -1,6 +1,6 @@
 # Manus Demo 更新日志
 
-> **更新日期**: 2026-05-05
+> **更新日期**: 2026-05-10
 > **当前版本**: v6.0
 
 ## 概述
@@ -206,8 +206,8 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
   - 并行需求词（"同时"、"并行"等）
   - 动作动词数量（多个动作倾向于复杂任务）
 - **决策阈值**:
-  - `score ≤ -2`: 简单任务 → 返回 `"simple"`
-  - `score ≥ 3`: 复杂任务 → 返回 `"complex"`
+  - `score ≤ -1`: 简单任务 → 返回 `"simple"`
+  - `score ≥ 2`: 复杂任务 → 返回 `"complex"`
   - 其他情况 → 进入 Stage 2
 
 **Stage 2: LLM 分类器** (`_llm_classify()`)
@@ -453,7 +453,7 @@ Action (动作)
 
 **方法**:
 - `save_checkpoint()`: 保存当前执行状态到检查点
-- `restore_checkpoint()`: 从检查点恢复执行状态
+- `to_dict()` / `from_dict()`: 序列化/反序列化 DAG 状态，用于持久化和恢复
 
 **应用场景**:
 - 长时间执行任务的断点续传
@@ -480,7 +480,7 @@ Action (动作)
 **数据结构**:
 - `Plan`: 包含多个 Step 的扁平计划
 - `Step`: 单个执行步骤（包含描述、状态等）
-- `StepStatus`: PENDING, IN_PROGRESS, COMPLETED, FAILED
+- `StepStatus`: PENDING, IN_PROGRESS, COMPLETED, FAILED, SKIPPED
 
 **规划特点**:
 - 生成 2-6 步的扁平计划
@@ -525,7 +525,7 @@ Thought → Action → Observe
 **工具列表**:
 - `web_search`: 模拟的网络搜索工具
 - `execute_python`: 使用 subprocess 执行 Python 代码
-- `file_ops`: 沙箱环境下的文件操作工具
+- `file_ops`: 沙箱环境下的文件操作工具（支持 read/write/list）
 
 **工具特点**:
 - 简单但功能完整
@@ -637,6 +637,11 @@ Orchestrator.classify_task()
 | `LLM_RETRY_MAX_ATTEMPTS` | `3` | v6.0 | LLM 调用最大重试次数 |
 | `LLM_RETRY_BACKOFF_FACTOR` | `2.0` | v6.0 | LLM 重试退避因子 |
 | `ENABLE_REACT_ENGINE_V2` | `false` | v6.0 | 是否启用 ReActEngine v2 统一引擎 |
+| `SHELL_EXEC_TIMEOUT` | `30` | v6.0 | Shell 命令执行超时时间（秒） |
+| `CODE_EXEC_TIMEOUT` | `30` | v6.0 | Python 代码执行超时时间（秒） |
+| `SUBPROCESS_MAX_OUTPUT_BYTES` | `524288` | v6.0 | 子进程最大输出字节数（默认 512KB） |
+| `SHELL_MAX_CONCURRENT` | `3` | v6.0 | 最大并发 Shell 子进程数 |
+| `CODE_MAX_CONCURRENT` | `3` | v6.0 | 最大并发代码执行子进程数 |
 
 ### v5.0 新增配置
 
@@ -673,8 +678,12 @@ Orchestrator.classify_task()
 
 | 参数名 | 默认值 | 版本 | 说明 |
 |--------|--------|------|------|
-| `MAX_STEPS` | `6` | v1.0 | 线性规划最大步数 |
-| `MEMORY_WINDOW_SIZE` | `10` | v1.0 | 短期记忆窗口大小 |
+| `LLM_BASE_URL` | `https://api.deepseek.com/v1` | v1.0 | OpenAI 兼容 API 地址 |
+| `LLM_MODEL` | `deepseek-chat` | v1.0 | 模型名称 |
+| `MAX_CONTEXT_TOKENS` | `8000` | v1.0 | 上下文 Token 上限 |
+| `MAX_REACT_ITERATIONS` | `10` | v1.0 | ReAct 循环最大迭代次数 |
+| `SHORT_TERM_WINDOW` | `20` | v1.0 | 短期记忆窗口大小 |
+| `SANDBOX_DIR` | `~/.manus_demo/sandbox` | v1.0 | 沙箱目录 |
 
 ---
 

@@ -1,7 +1,7 @@
 # Manus Demo - 隐式规划系统详解
 
 > **版本**: v6（含 ReActEngine 可选集成 + ShellTool）
-> **更新日期**: 2026-05-05
+> **更新日期**: 2026-05-10
 > **目的**: 深入解析隐式规划系统的设计理念、实现细节和使用场景
 
 ## 目录
@@ -191,7 +191,7 @@ async def execute(self, task: str, context: str = "") -> str:
 
 **关键设计**：
 - 循环条件：`has_pending()` 返回 True
-- 迭代上限：`MAX_REACT_ITERATIONS`（默认 10，可在 config.py 中配置）
+- 迭代上限：`MAX_EMERGENT_OUTER_ITERATIONS`（默认 `MAX_TODO_ITEMS * MAX_TODO_RETRIES` = 60，可在 config.py 中配置）
 - 阻塞处理：无就绪 TODO 时强制选择 PENDING 项，避免死锁
 
 ---

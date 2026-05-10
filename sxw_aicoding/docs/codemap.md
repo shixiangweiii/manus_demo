@@ -1,6 +1,6 @@
 # Manus Demo - 代码地图
 
-> **生成时间**: 2026-05-05
+> **生成时间**: 2026-05-10
 > **版本**: v6（含 LLM 重试机制 + ReActEngine Feature Flag + ShellTool）
 > **目的**: 当前代码库的综合架构地图
 
@@ -93,7 +93,7 @@ manus_demo/
 │   ├── __init__.py
 │   ├── base.py               # BaseAgent 基类 (182行)
 │   ├── orchestrator.py       # OrchestratorAgent 中央协调者 (490行)
-│   ├── planner.py            # PlannerAgent 混合规划器 (909行)
+│   ├── planner.py            # PlannerAgent 混合规划器 (933行)
 │   ├── executor.py           # ExecutorAgent ReAct执行器 (321行)
 │   ├── reflector.py          # ReflectorAgent 反思验证器 (254行)
 │   └── emergent_planner.py   # EmergentPlannerAgent 隐式规划器 (683行)
@@ -106,7 +106,7 @@ manus_demo/
 │
 ├── llm/                       # LLM 客户端
 │   ├── __init__.py
-│   └── client.py             # LLMClient OpenAI兼容封装 (227行)
+│   └── client.py             # LLMClient OpenAI兼容封装 (229行)
 │
 ├── react/                     # ReAct 统一引擎 (v6)
 │   ├── __init__.py
@@ -117,9 +117,10 @@ manus_demo/
 │   ├── base.py               # BaseTool 工具基类 (86行)
 │   ├── router.py             # ToolRouter 智能路由器 (167行)
 │   ├── web_search.py         # WebSearchTool 网络搜索 (112行)
-│   ├── code_executor.py      # CodeExecutorTool 代码执行 (108行)
+│   ├── code_executor.py      # CodeExecutorTool 代码执行 (101行)
 │   ├── file_ops.py           # FileOpsTool 文件操作 (137行)
-│   └── shell_tool.py         # ShellTool Shell 命令执行 (130行)
+│   ├── shell_tool.py         # ShellTool Shell 命令执行 (151行)
+│   └── subprocess_utils.py   # 子进程管理工具 (155行)
 │
 ├── memory/                    # 记忆系统
 │   ├── __init__.py
@@ -166,7 +167,7 @@ manus_demo/
 │
 ├── .env                       # 环境变量配置
 ├── .env.example              # 环境变量示例
-├── config.py                  # 全局配置
+├── config.py                  # 全局配置 (85行)
 ├── schema.py                  # 数据模型定义
 ├── main.py                    # CLI 入口
 ├── requirements.txt           # Python 依赖
@@ -198,11 +199,11 @@ class OrchestratorAgent:
         tools: list[BaseTool] | None = None,
         on_event: Callable[[str, Any], None] | None = None,
     ) -> None
-    
+
     async def run(self, task: str) -> str
     async def _gather_context(self, task: str) -> str
-    async def _execute_and_reflect_simple(self, task: str, context: str) -> str
-    async def _execute_dag_and_reflect(self, task: str, context: str) -> str
+    async def _execute_and_reflect_simple(self, task: str, plan: Plan, context: str) -> str
+    async def _execute_dag_and_reflect(self, dag: TaskDAG) -> str
     async def _execute_emergent(self, task: str, context: str) -> str
 ```
 
@@ -224,7 +225,7 @@ graph LR
 
 ### 2. PlannerAgent
 
-**文件**: `agents/planner.py` (909行)
+**文件**: `agents/planner.py` (933行)
 
 **目的**: 两阶段混合分类器 + v5探索性模式检测，负责任务分类和计划生成。
 
@@ -249,14 +250,14 @@ _UNCERTAINTY_PATTERN = r"(?:maybe|possibly|might|could|try|attempt)"
 ```python
 class PlannerAgent(BaseAgent):
     async def classify_task(self, task: str) -> str
-    def _rule_classify(self, task: str) -> str | None
+    def _rule_classify(self, task: str) -> str
     async def _llm_classify(self, task: str) -> str
     async def create_plan(self, task: str, context: str = "") -> Plan
     async def create_dag(self, task: str, context: str = "") -> TaskDAG
-    async def replan(self, task: str, failed_step_id: str, context: str) -> Plan
+    async def replan(self, task: str, completed_results: list, failed_steps: list, feedback: str) -> Plan
     async def replan_subtree(self, dag: TaskDAG, failed_node_id: str, context: str) -> TaskDAG
-    async def adapt_plan(self, dag: TaskDAG, adaptations: list[PlanAdaptation]) -> AdaptationResult
-    async def apply_adaptations(self, dag: TaskDAG, actions: list[AdaptAction]) -> None
+    async def adapt_plan(self, dag: TaskDAG) -> AdaptationResult
+    def apply_adaptations(self, dag: TaskDAG, adaptations: list[PlanAdaptation]) -> list[str]
 ```
 
 **两阶段分类器架构**:
@@ -296,10 +297,10 @@ class ExecutorAgent(BaseAgent):
         tool_router: ToolRouter | None = None,
         use_react_engine: bool | None = None,
     ) -> None
-    
+
     async def execute_step(self, step: Step, context: str = "") -> StepResult
     async def execute_node(self, node: TaskNode, context: str = "") -> StepResult
-    async def _react_loop(self, messages: list[dict], tools: list[BaseTool]) -> StepResult
+    async def _react_loop(self, step_id: int | str, prompt: str, context: str = "") -> StepResult
 ```
 
 **ReAct 循环流程**:
@@ -356,16 +357,18 @@ class EmergentPlannerAgent(BaseAgent):
         llm_client: LLMClient,
         tools: list[BaseTool],
         max_iterations: int | None = None,
+        max_outer_iterations: int | None = None,
         context_manager: ContextManager | None = None,
         tool_router: ToolRouter | None = None,
         use_react_engine: bool | None = None,
+        on_event: Callable | None = None,
     ) -> None
-    
+
     async def execute(self, task: str, context: str = "") -> str
-    async def _init_todo_list(self, task: str) -> TodoList
-    async def _execute_todo(self, todo: TodoItem, context: str) -> TodoItem
-    async def _update_todo_list(self, current_todos: TodoList, context: str) -> TodoList
-    async def _compile_answer(self, completed_todos: list[TodoItem], context: str) -> str
+    async def _init_todo_list(self, task: str, context: str) -> None
+    async def _execute_todo(self, todo: TodoItem) -> StepResult
+    async def _update_todo_list(self, last_result: StepResult) -> None
+    async def _compile_answer(self, task: str, results: list[StepResult]) -> str
 ```
 
 **隐式规划流程**:
@@ -401,13 +404,14 @@ class BaseAgent:
         llm_client: LLMClient,
         context_manager: ContextManager | None = None,
     ) -> None
-    
+
     async def think(self, user_input: str, **kwargs: Any) -> str
-    async def think_json(self, user_input: str, schema: dict, **kwargs: Any) -> dict
-    async def think_with_tools(self, user_input: str, tools: list[BaseTool], **kwargs: Any) -> tuple[str, list[ToolCallRecord]]
+    async def think_json(self, user_input: str, **kwargs: Any) -> Any
+    async def think_with_tools(self, user_input: str, tools: list[dict[str, Any]], **kwargs: Any) -> Any
     def add_message(self, role: str, content: str) -> None
     def get_messages(self) -> list[dict[str, Any]]
     def reset(self) -> None
+    def add_tool_result(self, tool_call_id: str, result: str) -> None
 ```
 
 ### 7. DAGExecutor
@@ -435,14 +439,14 @@ class DAGExecutor:
         max_parallel: int | None = None,
         on_event: Callable[[str, Any], None] | None = None,
     ) -> None
-    
-    async def execute(self, dag: TaskDAG) -> tuple[bool, str]
-    async def _run_node(self, node: TaskNode, context: str) -> StepResult
-    async def _run_node_with_timeout(self, node: TaskNode, context: str, timeout: int) -> StepResult
-    async def _handle_failure(self, node: TaskNode, result: StepResult) -> None
-    async def _process_conditions(self, dag: TaskDAG, completed_nodes: list[TaskNode]) -> None
-    async def _adapt_plan(self, dag: TaskDAG) -> None
-    async def _complete_structural_nodes(self, dag: TaskDAG) -> None
+
+    async def execute(self, dag: TaskDAG) -> str
+    async def _run_node(self, node: TaskNode, dag: TaskDAG) -> StepResult
+    async def _run_node_with_timeout(self, node: TaskNode, dag: TaskDAG) -> StepResult
+    async def _handle_failure(self, node: TaskNode, dag: TaskDAG) -> None
+    def _process_conditions(self, dag: TaskDAG) -> None
+    async def _adapt_plan(self, step: int, dag: TaskDAG) -> None
+    def _complete_structural_nodes(self, dag: TaskDAG) -> None
 ```
 
 **Super-step 执行流程**:
@@ -484,19 +488,19 @@ class TaskDAG:
         context: str = "",
         state_machine: NodeStateMachine | None = None,
     ) -> None
-    
+
     def get_ready_nodes(self) -> list[TaskNode]
     def topological_sort(self) -> list[str]
     def mark_subtree_skipped(self, node_id: str) -> None
     def refresh_ready_states(self) -> None
-    def get_downstream(self, node_id: str) -> set[str]
+    def get_downstream(self, node_id: str) -> list[str]
     def is_complete(self) -> bool
-    
+
     # v3 动态变更方法
-    def add_dynamic_node(self, node: TaskNode) -> None
-    def remove_pending_node(self, node_id: str) -> None
-    def modify_node(self, node_id: str, updates: dict) -> None
-    def add_dynamic_edge(self, edge: TaskEdge) -> None
+    def add_dynamic_node(self, node: TaskNode) -> bool
+    def remove_pending_node(self, node_id: str) -> bool
+    def modify_node(self, node_id: str, description: str | None = None, exit_criteria_desc: str | None = None) -> bool
+    def add_dynamic_edge(self, edge: TaskEdge) -> bool
 ```
 
 **DAG 结构示例**:
@@ -549,7 +553,7 @@ class NodeStateMachine:
 
 ### 10. LLMClient
 
-**文件**: `llm/client.py` (227行)
+**文件**: `llm/client.py` (229行)
 
 **目的**: OpenAI 兼容 API 的统一封装，支持多种 LLM 服务商。
 
@@ -571,11 +575,11 @@ class LLMClient:
         max_retries: int | None = None,
         backoff_factor: float | None = None,
     )
-    
+
     async def chat(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> str
-    async def chat_with_tools(self, messages: list[dict], tools: list[dict], temperature: float = 0.7, **kwargs) -> tuple[str, list[ToolCallRecord]]
-    async def chat_json(self, messages: list[dict], schema: dict, temperature: float = 0.7, **kwargs) -> dict
-    def _parse_json(self, text: str) -> dict
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict], temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> Any
+    async def chat_json(self, messages: list[dict], temperature: float = 0.3, max_tokens: int = 4096, **kwargs) -> Any
+    def parse_json(text: str) -> Any  # staticmethod，_parse_json 为向后兼容别名
 ```
 
 **v6 重试机制**:
@@ -604,16 +608,19 @@ class BaseTool(ABC):
     @property
     @abstractmethod
     def name(self) -> str
-    
+
     @property
     @abstractmethod
     def description(self) -> str
-    
+
     @property
-    def parameters(self) -> dict
-    
     @abstractmethod
-    async def execute(self, **kwargs) -> str
+    def parameters_schema(self) -> dict[str, Any]
+
+    @abstractmethod
+    async def execute(self, **kwargs: Any) -> str
+
+    def to_openai_tool(self) -> dict[str, Any]
 ```
 
 #### ToolRouter
@@ -633,8 +640,12 @@ class ToolRouter:
     def __init__(self, available_tools: list[str], failure_threshold: int | None = None)
     def record_success(self, node_id: str, tool_name: str) -> None
     def record_failure(self, node_id: str, tool_name: str) -> None
-    def get_hint(self, node_id: str) -> str | None
-    def get_stats(self) -> dict
+    def should_suggest_alternative(self, node_id: str, tool_name: str) -> bool
+    def get_failing_tools(self, node_id: str) -> list[str]
+    def get_alternative_tools(self, node_id: str, failed_tool: str) -> list[str]
+    def get_hint(self, node_id: str) -> str
+    def get_node_summary(self, node_id: str) -> dict[str, Any]
+    def reset_node(self, node_id: str) -> None
 ```
 
 #### WebSearchTool
@@ -649,7 +660,7 @@ class WebSearchTool(BaseTool):
 ```
 
 #### CodeExecutorTool
-**文件**: `tools/code_executor.py` (108行)
+**文件**: `tools/code_executor.py` (101行)
 
 **目的**: 代码执行工具，通过 subprocess 沙箱执行 Python 代码。
 
@@ -668,18 +679,35 @@ class CodeExecutorTool(BaseTool):
 ```python
 class FileOpsTool(BaseTool):
     async def execute(self, action: str, **kwargs) -> str
-    # 支持的操作: read, write, list, delete
+    # 支持的操作: read, write, list
 ```
 
 #### ShellTool
-**文件**: `tools/shell_tool.py` (130行)
+**文件**: `tools/shell_tool.py` (151行)
 
 **目的**: Shell 命令执行工具，在沙箱子进程中执行 bash 命令。
 
 **主要职责**:
-- 基于 `asyncio.create_subprocess_exec` 实现，支持超时、流式输出捕获
-- 在 sandbox 目录下执行，通过黑名单限制危险命令（`rm -rf`, `mkfs`, `dd` 等）
+- 基于 `subprocess_utils.run_with_limits()` 实现，支持超时、输出大小限制、流式输出捕获
+- 在 sandbox 目录下执行，通过黑名单限制危险命令（`rm -rf`, `mkfs`, `dd`, `sudo` 等）
+- 使用 `asyncio.Semaphore` 控制并发，通过 `build_safe_env()` 剥离敏感环境变量
 - 支持工作目录切换、环境变量传递
+
+**主要方法签名**:
+```python
+class ShellTool(BaseTool):
+    async def execute(self, command: str, timeout: int = 30) -> str
+```
+
+#### SubprocessUtils
+**文件**: `tools/subprocess_utils.py` (155行)
+
+**目的**: 共享子进程管理工具，为 ShellTool 和 CodeExecutorTool 提供统一的子进程执行能力。
+
+**主要职责**:
+- `build_safe_env()`: 剥离敏感环境变量（api_key, secret, token, password, credential）
+- `run_with_limits()`: asyncio 原生子进程执行，支持超时和输出大小限制
+- `_read_with_limit()`: 并发读取 stdout/stderr，超出字节预算时终止进程并截断
 
 **主要方法签名**:
 ```python
@@ -770,7 +798,8 @@ class KnowledgeRetriever:
     def _split_text(self, text: str, chunk_size: int) -> list[str]
     def _tokenize(self, text: str) -> list[str]
     def _compute_tf(self, text: str) -> dict[str, float]
-    def retrieve(self, query: str, top_k: int | None = None) -> list[tuple[str, float]]
+    def search(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]
+    def format_results(self, results: list[dict[str, Any]]) -> str
 ```
 
 ## 数据流
@@ -1014,7 +1043,7 @@ def on_event(event_type: str, data: Any):
 | 文件路径 | 行数 | 核心职责 | 关键类/方法 |
 |---------|------|---------|-----------|
 | `agents/orchestrator.py` | 490 | 中央协调者，三路由管理 | `OrchestratorAgent.run()` |
-| `agents/planner.py` | 909 | 混合分类器 + 计划生成 | `PlannerAgent.classify_task()` |
+| `agents/planner.py` | 933 | 混合分类器 + 计划生成 | `PlannerAgent.classify_task()` |
 | `agents/executor.py` | 321 | ReAct 执行器 | `ExecutorAgent._react_loop()` |
 | `agents/reflector.py` | 254 | 质量验证与反馈 | `ReflectorAgent.reflect()` |
 | `agents/emergent_planner.py` | 683 | 隐式规划器 | `EmergentPlannerAgent.execute()` |
@@ -1022,20 +1051,21 @@ def on_event(event_type: str, data: Any):
 | `dag/executor.py` | 647 | Super-step 并行执行 | `DAGExecutor.execute()` |
 | `dag/graph.py` | 626 | DAG 数据结构 | `TaskDAG.get_ready_nodes()` |
 | `dag/state_machine.py` | 113 | 节点状态机 | `NodeStateMachine.transition()` |
-| `llm/client.py` | 227 | LLM 客户端 | `LLMClient.chat()` |
+| `llm/client.py` | 229 | LLM 客户端 | `LLMClient.chat()` |
 | `react/engine.py` | 245 | 统一 ReAct 引擎 | `ReActEngine.execute()` |
 | `tools/base.py` | 86 | 工具基类 | `BaseTool.execute()` |
 | `tools/router.py` | 167 | 智能工具路由 | `ToolRouter.get_hint()` |
 | `tools/web_search.py` | 112 | 网络搜索工具 | `WebSearchTool.execute()` |
-| `tools/code_executor.py` | 108 | 代码执行工具 | `CodeExecutorTool.execute()` |
+| `tools/code_executor.py` | 101 | 代码执行工具 | `CodeExecutorTool.execute()` |
 | `tools/file_ops.py` | 137 | 文件操作工具 | `FileOpsTool.execute()` |
-| `tools/shell_tool.py` | 130 | Shell 命令执行工具 | `ShellTool.execute()` |
+| `tools/shell_tool.py` | 151 | Shell 命令执行工具 | `ShellTool.execute()` |
+| `tools/subprocess_utils.py` | 155 | 子进程管理工具 | `run_with_limits()` |
 | `memory/short_term.py` | 90 | 短期记忆 | `ShortTermMemory.add()` |
 | `memory/long_term.py` | 141 | 长期记忆 | `LongTermMemory.search()` |
 | `context/manager.py` | 186 | 上下文管理 | `ContextManager.compress_if_needed()` |
-| `knowledge/retriever.py` | 228 | 知识检索器 | `KnowledgeRetriever.retrieve()` |
+| `knowledge/retriever.py` | 228 | 知识检索器 | `KnowledgeRetriever.search()` |
 | `schema.py` | 573 | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
-| `config.py` | 82 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
+| `config.py` | 85 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
 | `main.py` | 439 | CLI 入口 | `main()` |
 
 ### 版本演进关键文件

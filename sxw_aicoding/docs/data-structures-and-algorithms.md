@@ -1491,5 +1491,5 @@ async def run(self, task: str) -> str:
 ---
 
 **文档版本**：v6.0  
-**最后更新**：2026-05-05  
+**最后更新**：2026-05-10
 **维护者**：Manus Demo Team

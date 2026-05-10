@@ -1,6 +1,6 @@
 # Manus Demo v6 隐式规划测试用例集
 
-> **生成时间**: 2026-05-05
+> **生成时间**: 2026-05-10
 > **版本**: v6（集成 LLM retry、mark_pending 重试机制、ShellTool、ReActEngine）
 > **目的**: 验证隐式规划系统的正确性、灵活性和容错能力
 
@@ -480,7 +480,7 @@ ENABLE_REACT_ENGINE_V2=false         # 默认使用 legacy 实现
 - TODO 执行失败
 - 自动调用 `mark_pending()` 将状态回退为 PENDING
 - 下一轮循环重新选择该 TODO
-- 最多重试 `MAX_REACT_ITERATIONS` 次（默认 10 次）
+- 最多重试 `MAX_TODO_RETRIES` 次（默认 3 次）
 - 每次重试都是完整的 ReAct 循环
 
 **观测重点**:

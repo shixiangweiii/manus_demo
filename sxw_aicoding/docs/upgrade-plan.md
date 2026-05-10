@@ -1,7 +1,7 @@
 # Manus Demo 升级计划
 
 > **当前版本**: v6.0
-> **更新日期**: 2026-05-05
+> **更新日期**: 2026-05-10
 > **目的**: 从当前 v6 到未来版本的升级路线图
 
 ---
@@ -78,13 +78,13 @@ class WebSearchTool(BaseTool):
 
 #### 2. Shell 命令执行 — 新增 ShellTool ✅ 已完成
 
-**当前状态**：已实现 `tools/shell_tool.py`，支持执行任意 shell 命令（bash/zsh）
+**当前状态**：已实现 `tools/shell_tool.py` + `tools/subprocess_utils.py`，支持执行任意 shell 命令（bash/zsh）
 
 **实现细节**：
-- 基于 `asyncio.create_subprocess_exec` 实现，支持超时、流式输出捕获
-- 在 sandbox 目录下执行，通过黑名单限制危险命令（`rm -rf /`, `mkfs`, `dd`, `sudo rm -rf` 等）
-- 支持工作目录切换、环境变量传递
-- 配置项: `SHELL_EXEC_TIMEOUT` (默认 30 秒), `SANDBOX_DIR`
+- 基于 `subprocess_utils.run_with_limits()` 统一子进程管理，支持超时、输出大小限制、流式输出捕获
+- 在 sandbox 目录下执行，通过黑名单限制危险命令（`rm -rf /`, `mkfs`, `dd`, `sudo` 等，包含权限提升、网络渗透、系统修改、凭证访问等类别）
+- 使用 `asyncio.Semaphore` 控制并发，通过 `build_safe_env()` 剥离敏感环境变量（api_key, secret, token 等）
+- 配置项: `SHELL_EXEC_TIMEOUT` (默认 30 秒), `SANDBOX_DIR`, `SHELL_MAX_CONCURRENT` (默认 3), `SUBPROCESS_MAX_OUTPUT_BYTES` (默认 512KB)
 
 **预估工作量**：1-2 天
 

@@ -1,7 +1,7 @@
 # Manus Demo - LLM 集成手册
 
 > **版本**: v6（含重试机制 + ReActEngine Feature Flag + ShellTool）
-> **更新日期**: 2026-05-05
+> **更新日期**: 2026-05-10
 > **目的**: 详解 LLM 客户端的设计、配置和使用
 
 ## 目录
@@ -557,9 +557,9 @@ if response.tool_calls:
 
 ## 6. JSON 解析策略
 
-### _parse_json() 静态方法
+### parse_json() 静态方法
 
-LLMClient._parse_json() 使用两种策略的降级处理（Two-strategy fallback），确保从各种 LLM 输出格式中成功提取 JSON。
+LLMClient.parse_json()（staticmethod，`_parse_json` 为向后兼容别名）使用两种策略的降级处理（Two-strategy fallback），确保从各种 LLM 输出格式中成功提取 JSON。
 
 **策略 1：直接解析**
 ```python
@@ -604,7 +604,7 @@ examples = [
 
 for text in examples:
     try:
-        result = LLMClient._parse_json(text)
+        result = LLMClient.parse_json(text)
         print(f"解析成功: {result}")
     except ValueError as e:
         print(f"解析失败: {e}")
@@ -621,14 +621,14 @@ for text in examples:
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI 兼容 API 基础 URL | `https://api.openai.com/v1` |
 | `LLM_API_KEY` | `""` | API 密钥（必须配置） | `sk-xxx...` |
 | `LLM_MODEL` | `deepseek-chat` | 模型名称 | `gpt-4`, `qwen-turbo` |
-| `LLM_TIMEOUT` | - | 请求超时时间（秒） | `60` |
-| `LLM_TEMPERATURE` | - | 默认温度参数 | `0.7` |
-| `LLM_MAX_TOKENS` | - | 默认最大 token 数 | `4096` |
+| `MAX_CONTEXT_TOKENS` | `8000` | 上下文 Token 上限 | `16000` |
 | `LLM_RETRY_ENABLED` | `false` | 是否启用重试机制 | `true` |
 | `LLM_RETRY_MAX_ATTEMPTS` | `3` | 最大重试次数 | `5` |
 | `LLM_RETRY_BACKOFF_FACTOR` | `2.0` | 退避因子 | `1.5` |
 | `ENABLE_REACT_ENGINE_V2` | `false` | 是否使用 ReActEngine V2 | `true` |
 | `SHELL_EXEC_TIMEOUT` | `30` | Shell 命令执行超时（秒） | `60` |
+| `CODE_EXEC_TIMEOUT` | `30` | Python 代码执行超时（秒） | `60` |
+| `SUBPROCESS_MAX_OUTPUT_BYTES` | `524288` | 子进程最大输出字节数 | `1048576` |
 | `SANDBOX_DIR` | `~/.manus_demo/sandbox` | Shell/文件操作沙箱目录 | `./sandbox` |
 
 **配置文件示例** (.env)：
