@@ -374,8 +374,8 @@ class PlannerAgent(BaseAgent):
         Uses SIMPLE_PLANNER_SYSTEM_PROMPT for a lightweight 2-6 step plan.
         使用 SIMPLE_PLANNER_SYSTEM_PROMPT 生成 2-6 步的轻量级计划。
         """
-        self.reset()
         self.system_prompt = SIMPLE_PLANNER_SYSTEM_PROMPT
+        self.reset()
 
         prompt = f"Create an execution plan for this task:\n\nTask: {task}"
         if context:
@@ -399,8 +399,8 @@ class PlannerAgent(BaseAgent):
         Revise the flat plan based on execution progress and feedback (v1 path).
         基于执行进度和反馈修订扁平计划（v1 路径）。
         """
-        self.reset()
         self.system_prompt = SIMPLE_PLANNER_SYSTEM_PROMPT
+        self.reset()
 
         completed_summary = "\n".join(
             f"- Step {r.step_id}: {'SUCCESS' if r.success else 'FAILED'} - {r.output[:200]}"
@@ -437,7 +437,31 @@ class PlannerAgent(BaseAgent):
         将 LLM 的 JSON 输出解析为扁平 Plan 模型（v1）。
         """
         steps = []
-        raw_steps = data.get("steps", []) if isinstance(data, dict) else []
+        if not isinstance(data, dict):
+            logger.warning("[Planner] LLM returned non-dict: %s", type(data).__name__)
+            data = {}
+
+        raw_steps = data.get("steps", [])
+        # Fallback: try alternative keys if "steps" is missing or empty
+        if not raw_steps:
+            for alt_key in ("plan", "tasks", "actions"):
+                alt = data.get(alt_key, [])
+                if isinstance(alt, list) and alt:
+                    logger.warning(
+                        "[Planner] 'steps' missing/empty, using '%s' (%d items) as fallback. "
+                        "Data keys: %s",
+                        alt_key, len(alt), list(data.keys()),
+                    )
+                    raw_steps = alt
+                    break
+
+        if not raw_steps:
+            logger.warning(
+                "[Planner] Plan has 0 steps. LLM response keys: %s, data preview: %.300s",
+                list(data.keys()) if isinstance(data, dict) else "N/A",
+                str(data),
+            )
+
         for s in raw_steps:
             steps.append(Step(
                 id=s.get("id", len(steps) + 1),

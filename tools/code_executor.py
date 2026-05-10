@@ -95,6 +95,7 @@ class CodeExecutorTool(BaseTool):
             output_parts.append(f"Exit code: {result.returncode}")
 
         if not output_parts:
-            return "Code executed successfully (no output)."
+            output_parts.append("Code executed successfully (no output).")
 
+        output_parts.append(f"[Working directory: {config.SANDBOX_DIR}]")
         return "\n".join(output_parts)

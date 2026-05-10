@@ -181,10 +181,12 @@ class LLMClient:
                 **kwargs,
             )
             text = resp.choices[0].message.content or "{}"
+            logger.debug("[chat_json] Raw response: %.500s", text)
         except Exception:
             # 部分模型/服务不支持 response_format，降级为普通文本模式
             logger.warning("JSON mode not supported, falling back to plain text")
             text = await self.chat(messages, temperature=temperature, max_tokens=max_tokens)
+            logger.debug("[chat_json] Fallback response: %.500s", text)
 
         return self.parse_json(text)
 
