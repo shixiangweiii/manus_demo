@@ -15,7 +15,7 @@ Manus Demo is a multi-agent AI system demonstrating autonomous task execution th
 User Task → Orchestrator → [classify_task] → simple / complex / emergent
   simple:    Planner.create_plan()     → Executor (sequential ReAct)  → Reflector
   complex:   Planner.create_dag()      → DAGExecutor (parallel super-steps) → Reflector
-  emergent:  EmergentPlanner.execute() → while(tool_use) loop + TODO list
+  emergent:  EmergentPlanner.execute() → while has_pending_todos (outer scheduling) → per-TODO ReAct (inner tool_use)
 All paths → Token usage summary → Long-term memory store
 ```
 
@@ -83,6 +83,7 @@ Token tracking is centralized in `LLMClient`:
 - `reset_usage()` — clears for a new task
 - `Orchestrator._finalize_token_usage()` — aggregates by engine and computes total from call records
 - No snapshot/delta logic; safe under asyncio concurrency (list.append is atomic in single-threaded event loop)
+- When the LLM provider does not return usage data (e.g., some local Ollama models), `_call_records` has entries with zero tokens and the UI displays "N/A" gracefully
 
 ## Configuration (config.py)
 
@@ -104,6 +105,9 @@ All config via env vars / `.env` file. Key variables:
 | `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5 emergent planning route |
 | `NODE_EXECUTION_TIMEOUT` | `300` | Per-node timeout in seconds |
 | `SANDBOX_DIR` | `~/.manus_demo/sandbox` | Sandboxed file/shell working directory |
+| `MAX_TODO_ITEMS` | `20` | v5 TODO list max size |
+| `MAX_EMERGENT_OUTER_ITERATIONS` | `60` | v5 emergent main loop iteration cap |
+| `TOOL_FAILURE_THRESHOLD` | `2` | v3 consecutive failures before suggesting tool switch |
 
 ## Common Commands
 
@@ -144,7 +148,7 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 
 ## Code Conventions
 
-- **All agents except OrchestratorAgent inherit `BaseAgent`** which provides `think()`, `think_json()`, `think_with_tools()` and manages message history; OrchestratorAgent is a standalone coordinator
+- **All agents except OrchestratorAgent inherit `BaseAgent`** which provides `think()`, `think_json()`, `think_with_tools()` and manages message history; OrchestratorAgent does not inherit BaseAgent (no own LLM message history) — it composes sub-agents and shares a single `LLMClient` instance
 - **All tools inherit `BaseTool`** with `name`, `description`, `parameters_schema`, `execute()`, and `to_openai_tool()`
 - **Async throughout** — all LLM calls and tool executions are `async def`
 - **Event-driven UI** — OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which forwards to the `on_event` callback in `main.py`; ExecutorAgent and ReflectorAgent do not emit events directly
@@ -155,12 +159,12 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 
 ## Important Design Decisions
 
-1. **Three routing paths**: Tasks classified by a two-stage hybrid classifier (rules fast-filter ~60-70% of tasks, LLM fallback for ambiguous ones)
+1. **Three routing paths**: Tasks classified by a two-stage hybrid classifier (rules fast-filter ~60-70% of tasks, LLM fallback for ambiguous ones); unknown classifications fall back to the complex DAG path
 2. **DAG concurrency**: `asyncio.gather` runs ready nodes in parallel within each super-step; `DAGState.node_results` uses per-node dict keys to avoid write conflicts
 3. **State machine enforcement**: `NodeStateMachine.transition()` validates all status changes against `VALID_TRANSITIONS` table; raises on illegal transitions
 4. **Centralized LLM client**: All agents share one `LLMClient` instance; token tracking is accumulated there, not in individual agents
 5. **Sandbox security**: `ShellTool` runs in `SANDBOX_DIR` with command blacklists and stripped env vars; `CodeExecutorTool` uses subprocess with timeout and output size limits; both share `subprocess_utils.run_with_limits()`
-6. **Checkpoint**: `TaskDAG.save_checkpoint()` snapshots full DAG state after each super-step for debugging
+6. **Checkpoint**: `TaskDAG.save_checkpoint()` snapshots full DAG state at key milestones (each super-step, after adaptive planning) for debugging
 
 ## Documentation
 
