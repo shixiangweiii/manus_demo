@@ -83,29 +83,39 @@ class LLMClient:
         用于需要自由文本输出的场景（如 Reflector 的反馈、ContextManager 的摘要）。
 
         v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
+        v7.0: Tracing integration — creates llm.chat span when TRACING_ENABLED=true.
         """
+        # Allow internal callers (e.g. chat_json fallback) to suppress duplicate span creation
+        skip_tracing = kwargs.pop("_skip_tracing", False)
+        span_ctx = None if skip_tracing else self._start_llm_span("chat", messages, temperature, max_tokens)
         last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
-            try:
-                resp = await self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **kwargs,
-                )
-                if config.TOKEN_TRACKING_ENABLED:
-                    self._record_call(resp.usage, "chat", messages)
-                return resp.choices[0].message.content or ""
-            except RETRYABLE_ERRORS as exc:
-                last_error = exc
-                if self.retry_enabled and attempt < self.max_retries:
-                    wait_time = self.backoff_factor ** attempt
-                    logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
-        raise last_error or RuntimeError("LLM call failed")
+        try:
+            for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
+                try:
+                    resp = await self._client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **kwargs,
+                    )
+                    if config.TOKEN_TRACKING_ENABLED:
+                        self._record_call(resp.usage, "chat", messages)
+                    result = resp.choices[0].message.content or ""
+                    self._end_llm_span(span_ctx, success=True)
+                    return result
+                except RETRYABLE_ERRORS as exc:
+                    last_error = exc
+                    if self.retry_enabled and attempt < self.max_retries:
+                        wait_time = self.backoff_factor ** attempt
+                        logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
+            raise last_error or RuntimeError("LLM call failed")
+        except Exception as exc:
+            self._end_llm_span(span_ctx, success=False, error=exc)
+            raise
 
     # ------------------------------------------------------------------
     # Chat with function-calling / tools
@@ -131,31 +141,39 @@ class LLMClient:
         tool_choice="auto" 让 LLM 自行决定是否调用工具（也可能直接给出文本答案）。
 
         v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
+        v7.0: Tracing integration — creates llm.chat_with_tools span when TRACING_ENABLED=true.
         """
+        span_ctx = self._start_llm_span("chat_with_tools", messages, temperature, max_tokens)
         last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
-            try:
-                resp = await self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **kwargs,
-                )
-                if config.TOKEN_TRACKING_ENABLED:
-                    self._record_call(resp.usage, "chat_with_tools", messages)
-                return resp.choices[0].message
-            except RETRYABLE_ERRORS as exc:
-                last_error = exc
-                if self.retry_enabled and attempt < self.max_retries:
-                    wait_time = self.backoff_factor ** attempt
-                    logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
-        raise last_error or RuntimeError("LLM call failed")
+        try:
+            for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
+                try:
+                    resp = await self._client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        tools=tools,
+                        tool_choice="auto",
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **kwargs,
+                    )
+                    if config.TOKEN_TRACKING_ENABLED:
+                        self._record_call(resp.usage, "chat_with_tools", messages)
+                    result = resp.choices[0].message
+                    self._end_llm_span(span_ctx, success=True)
+                    return result
+                except RETRYABLE_ERRORS as exc:
+                    last_error = exc
+                    if self.retry_enabled and attempt < self.max_retries:
+                        wait_time = self.backoff_factor ** attempt
+                        logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
+            raise last_error or RuntimeError("LLM call failed")
+        except Exception as exc:
+            self._end_llm_span(span_ctx, success=False, error=exc)
+            raise
 
     # ------------------------------------------------------------------
     # Convenience: structured JSON output
@@ -177,28 +195,37 @@ class LLMClient:
         若 API 不支持 response_format（如某些 Ollama 模型），
         则降级为从纯文本中提取 JSON。
         用于 Planner 生成计划、Reflector 生成评估结果等结构化输出场景。
-        """
-        try:
-            # 优先使用 JSON mode（强制 LLM 输出合法 JSON）
-            resp = await self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"},  # OpenAI JSON mode
-                **kwargs,
-            )
-            if config.TOKEN_TRACKING_ENABLED:
-                self._record_call(resp.usage, "chat_json", messages)
-            text = resp.choices[0].message.content or "{}"
-            logger.debug("[chat_json] Raw response: %.500s", text)
-        except Exception:
-            # 部分模型/服务不支持 response_format，降级为普通文本模式
-            logger.warning("JSON mode not supported, falling back to plain text")
-            text = await self.chat(messages, temperature=temperature, max_tokens=max_tokens)
-            logger.debug("[chat_json] Fallback response: %.500s", text)
 
-        return self.parse_json(text)
+        v7.0: Tracing integration — creates llm.chat_json span when TRACING_ENABLED=true.
+        """
+        span_ctx = self._start_llm_span("chat_json", messages, temperature, max_tokens)
+        try:
+            try:
+                # 优先使用 JSON mode（强制 LLM 输出合法 JSON）
+                resp = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format={"type": "json_object"},  # OpenAI JSON mode
+                    **kwargs,
+                )
+                if config.TOKEN_TRACKING_ENABLED:
+                    self._record_call(resp.usage, "chat_json", messages)
+                text = resp.choices[0].message.content or "{}"
+                logger.debug("[chat_json] Raw response: %.500s", text)
+            except Exception:
+                # 部分模型/服务不支持 response_format，降级为普通文本模式
+                logger.warning("JSON mode not supported, falling back to plain text")
+                text = await self.chat(messages, temperature=temperature, max_tokens=max_tokens, _skip_tracing=True)
+                logger.debug("[chat_json] Fallback response: %.500s", text)
+
+            result = self.parse_json(text)
+            self._end_llm_span(span_ctx, success=True)
+            return result
+        except Exception as exc:
+            self._end_llm_span(span_ctx, success=False, error=exc)
+            raise
 
     # ------------------------------------------------------------------
     # Helpers
@@ -280,3 +307,111 @@ class LLMClient:
     def reset_usage(self) -> None:
         """Clear call records for a new task."""
         self._call_records.clear()
+
+    # ------------------------------------------------------------------
+    # Tracing Helpers (v7)
+    # 追踪辅助方法（v7 新增）
+    # ------------------------------------------------------------------
+
+    def _start_llm_span(self, call_type: str, messages: list[dict], temperature: float, max_tokens: int) -> Any:
+        """
+        Start a tracing span for an LLM call (if tracing is enabled).
+        为 LLM 调用创建追踪 Span（如果 tracing 已启用）。
+
+        Returns an opaque context object (span + token) or None.
+        返回一个不透明的上下文对象（span + token）或 None。
+        """
+        if not config.TRACING_ENABLED:
+            return None
+
+        try:
+            from opentelemetry import trace, context as otel_context
+            from opentelemetry.trace import StatusCode
+
+            span_name_map = {
+                "chat": "llm.chat",
+                "chat_with_tools": "llm.chat_with_tools",
+                "chat_json": "llm.chat_json",
+            }
+            span_name = span_name_map.get(call_type, f"llm.{call_type}")
+
+            tracer = trace.get_tracer("manus_demo.llm")
+            # Use current context so the LLM span becomes a child of the active phase/task span
+            span = tracer.start_span(span_name, context=otel_context.get_current())
+            # Attach so that any nested spans (e.g. tool calls) become children of this LLM span
+            token = otel_context.attach(trace.set_span_in_context(span))
+
+            # Set pre-call attributes
+            span.set_attribute("gen_ai.system", "openai")
+            span.set_attribute("gen_ai.request.model", self.model)
+            span.set_attribute("gen_ai.call_type", call_type)
+            if temperature is not None:
+                span.set_attribute("gen_ai.request.temperature", temperature)
+            if max_tokens is not None:
+                span.set_attribute("gen_ai.request.max_tokens", max_tokens)
+
+            # Optionally record prompt content
+            if config.TRACING_LOG_PROMPTS and messages:
+                for msg in messages:
+                    if msg.get("role") == "user":
+                        content = msg.get("content", "")
+                        max_len = config.TRACING_MAX_ATTRIBUTE_LENGTH
+                        if len(content) > max_len:
+                            content = content[:max_len] + "...[truncated]"
+                        span.set_attribute("gen_ai.prompt.content", content)
+                        break
+
+            import time
+            return {"span": span, "token": token, "start_time": time.perf_counter()}
+        except Exception:
+            logger.debug("[LLMClient] Failed to start tracing span", exc_info=True)
+            return None
+
+    def _end_llm_span(self, span_ctx: Any, success: bool = True, error: Exception | None = None) -> None:
+        """
+        End a tracing span for an LLM call.
+        结束 LLM 调用的追踪 Span。
+        """
+        if span_ctx is None:
+            return
+
+        try:
+            import time
+            from opentelemetry import context as otel_context
+            from opentelemetry.trace import StatusCode
+
+            span = span_ctx["span"]
+            token = span_ctx.get("token")
+            start_time = span_ctx["start_time"]
+
+            # Detach context FIRST to restore parent context immediately,
+            # regardless of whether subsequent span operations fail.
+            # This prevents context leakage in error paths.
+            if token:
+                otel_context.detach(token)
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            span.set_attribute("latency_ms", round(elapsed_ms, 2))
+
+            # Record token usage from last call record
+            if self._call_records:
+                last_record = self._call_records[-1]
+                if last_record.prompt_tokens > 0:
+                    span.set_attribute("gen_ai.usage.input_tokens", last_record.prompt_tokens)
+                if last_record.completion_tokens > 0:
+                    span.set_attribute("gen_ai.usage.output_tokens", last_record.completion_tokens)
+                if last_record.total_tokens > 0:
+                    span.set_attribute("gen_ai.usage.total_tokens", last_record.total_tokens)
+
+            if success:
+                span.set_status(StatusCode.OK)
+            else:
+                if error:
+                    span.set_attribute("error.type", type(error).__name__)
+                    span.set_attribute("error.message", str(error)[:500])
+                    span.record_exception(error)
+                span.set_status(StatusCode.ERROR, str(error)[:200] if error else "unknown error")
+
+            span.end()
+        except Exception:
+            logger.debug("[LLMClient] Failed to end tracing span", exc_info=True)

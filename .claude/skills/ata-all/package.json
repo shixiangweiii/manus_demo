@@ -1,0 +1,11 @@
+{
+  "name": "ata-all",
+  "version": "0.19.0",
+  "description": "ATA 官方接口，包含文章搜索、文章详情、消息推送等能力；可查询技术方案与社区内容并通过技小蜜推送。ATA 是阿里技术生态内部工程师交流平台，提供文章、专题、圈儿与活动等功能。",
+  "publishConfig": {
+    "registry": "https://contextlab.alibaba-inc.com/skill"
+  },
+  "aoneKit": {
+    "generated": true
+  }
+}

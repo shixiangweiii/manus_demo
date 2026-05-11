@@ -1,0 +1,925 @@
+
+# Manus Demo - 全链路 Tracing 模块配置与使用指南
+
+> **版本**: v7.0  
+> **更新日期**: 2026-05-11  
+> **目的**: 介绍全链路 Tracing 模块的配置方法、使用流程、操作手册和故障排查，帮助开发人员快速启用和利用运行时可观察性能力
+
+---
+
+## 目录
+
+- [1. 概述与价值](#1-概述与价值)
+- [2. 快速开始](#2-快速开始)
+- [3. 配置参考](#3-配置参考)
+- [4. 导出后端详解](#4-导出后端详解)
+- [5. 模块结构与文件说明](#5-模块结构与文件说明)
+- [6. Span 层级与数据模型](#6-span-层级与数据模型)
+- [7. 自定义埋点（装饰器）](#7-自定义埋点装饰器)
+- [8. 集成原理](#8-集成原理)
+- [9. 隐私与安全](#9-隐私与安全)
+- [10. 性能影响](#10-性能影响)
+- [11. 常见操作手册](#11-常见操作手册)
+- [12. 故障排查](#12-故障排查)
+- [13. 与评测模块的关系](#13-与评测模块的关系)
+- [14. 扩展指南](#14-扩展指南)
+
+---
+
+## 1. 概述与价值
+
+### 1.1 什么是全链路 Tracing
+
+Tracing 模块基于 [OpenTelemetry](https://opentelemetry.io/) 标准，为 Manus Demo 的任务执行全生命周期提供结构化的可观察性能力。
+
+一次完整的任务执行会被记录为一棵 **Span 树**，从任务接收到最终响应，覆盖：
+
+```
+分类 → 规划 → 执行（含 LLM 调用 + 工具调用）→ 反思 → 持久化
+```
+
+### 1.2 解决的问题
+
+| 之前（仅事件回调） | 现在（Tracing 模块） |
+|---|---|
+| 事件仅在内存中流转，进程结束后丢失 | Span 持久化到文件 / OTLP 后端 |
+| 扁平事件流，无层级关系 | 结构化的 Span 父子树 + 时间线 |
+| 无法进行 LLM 调用粒度的性能分析 | 每次 LLM 调用记录 model、tokens、latency |
+| 跨组件因果关系不可追踪 | 统一 Trace ID 串联全链路 |
+
+### 1.3 设计原则
+
+- **零侵入**：通过事件桥接 + 装饰器集成，核心 Agent 业务逻辑零改动
+- **零开销**：`TRACING_ENABLED=false` 时不创建 Span、不加载 OpenTelemetry 依赖
+- **Feature Flag 控制**：环境变量一键开关，向后完全兼容
+- **多后端支持**：开发时用 Console / File，生产时切换到 OTLP / Phoenix
+
+---
+
+## 2. 快速开始
+
+### 2.1 安装依赖
+
+```bash
+pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
+```
+
+或直接使用项目的 `requirements.txt`：
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2.2 最简启用（控制台输出）
+
+在 `.env` 文件中添加：
+
+```bash
+TRACING_ENABLED=true
+TRACING_BACKEND=console
+```
+
+然后正常运行项目：
+
+```bash
+python main.py
+```
+
+控制台将输出 OpenTelemetry 标准格式的 Span 信息。
+
+### 2.3 文件输出（推荐开发使用）
+
+```bash
+TRACING_ENABLED=true
+TRACING_BACKEND=file
+```
+
+Trace 数据将以 JSON 格式写入 `traces/` 目录：
+
+```
+traces/
+└── 5b4de5adb669fe05923ecf33e41e2263_1715414400000.json
+```
+
+### 2.4 Rich 格式输出（最佳开发体验）
+
+需要额外安装 `rich` 包：
+
+```bash
+pip install rich
+```
+
+```bash
+TRACING_ENABLED=true
+TRACING_BACKEND=rich
+```
+
+终端将以带图标和颜色的树形结构渲染 Span：
+
+```
+🔍 task_execution (1.2s) ✅
+  🎯 orchestrator.gather_context (50ms) ✅
+  📋 planner.classify_task (200ms) ✅ [complexity=simple]
+  ⚡ execution.simple (800ms) ✅
+    🤖 llm.chat_with_tools (350ms) ✅ [model=deepseek-chat, total_tokens=1024]
+    🔧 tool.execute.web_search (150ms) ✅
+  🪞 reflector.reflect (100ms) ✅ [passed=True]
+```
+
+### 2.5 OTLP 后端（Jaeger / Phoenix）
+
+```bash
+TRACING_ENABLED=true
+TRACING_BACKEND=otlp
+TRACING_ENDPOINT=http://localhost:4318
+```
+
+如果使用 [Arize Phoenix](https://phoenix.arize.com/)（推荐的 LLM 可观察性工具）：
+
+```bash
+TRACING_ENABLED=true
+TRACING_BACKEND=phoenix
+TRACING_ENDPOINT=http://localhost:6006
+```
+
+> Phoenix 后端会自动在 endpoint 后追加 `/v1/traces`。
+
+### 2.6 关闭 Tracing
+
+```bash
+TRACING_ENABLED=false
+```
+
+或直接从 `.env` 中删除 `TRACING_ENABLED`（默认为 `false`）。
+
+---
+
+## 3. 配置参考
+
+所有配置通过环境变量或 `.env` 文件设置：
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `TRACING_ENABLED` | `false` | 总开关。`true` 启用，`false` 关闭（零开销） |
+| `TRACING_BACKEND` | `console` | 导出后端：`console` / `file` / `rich` / `otlp` / `phoenix` |
+| `TRACING_ENDPOINT` | `http://localhost:4318` | OTLP HTTP 端点地址 |
+| `TRACING_SERVICE_NAME` | `manus-demo` | 服务标识名称（在后端 UI 中区分不同服务） |
+| `TRACING_SAMPLE_RATE` | `1.0` | 采样率，范围 `0.0` - `1.0`。`1.0` = 全量采集 |
+| `TRACING_LOG_PROMPTS` | `false` | 是否记录完整的 prompt / response 内容 |
+| `TRACING_MAX_ATTR_LENGTH` | `1000` | 属性值最大字符长度（超出部分截断） |
+
+### 3.1 推荐配置
+
+**开发环境**：
+
+```bash
+TRACING_ENABLED=true
+TRACING_BACKEND=file
+TRACING_LOG_PROMPTS=true       # 开发时记录 prompt 便于调试
+TRACING_SAMPLE_RATE=1.0        # 全量采集
+```
+
+**生产环境**：
+
+```bash
+TRACING_ENABLED=true
+TRACING_BACKEND=otlp
+TRACING_ENDPOINT=http://your-otel-collector:4318
+TRACING_LOG_PROMPTS=false      # 生产环境禁止记录 prompt（隐私保护）
+TRACING_SAMPLE_RATE=0.1        # 10% 采样，降低开销
+TRACING_MAX_ATTR_LENGTH=500
+```
+
+---
+
+## 4. 导出后端详解
+
+### 4.1 console — 标准控制台
+
+使用 OpenTelemetry SDK 自带的 `ConsoleSpanExporter`，输出原始 Span 数据到 stdout。
+
+- **适用场景**：快速验证 tracing 是否正常工作
+- **处理器**：`SimpleSpanProcessor`（同步即时输出）
+- **无额外依赖**
+
+### 4.2 file — JSON 文件
+
+使用自定义的 `FileSpanExporter`，将每个 Trace 输出为独立的 JSON 文件。
+
+- **适用场景**：开发调试、离线分析、CI/CD 中采集 Trace 数据
+- **处理器**：`BatchSpanProcessor`（异步批量导出）
+- **输出目录**：`traces/`（相对于项目根目录）
+- **文件命名**：`{trace_id}_{timestamp_ms}.json`
+
+**JSON 文件结构**：
+
+```json
+{
+  "trace_id": "5b4de5adb669fe05923ecf33e41e2263",
+  "exported_at": "2026-05-11T10:30:00.000Z",
+  "spans": [
+    {
+      "span_id": "a1b2c3d4e5f60718",
+      "parent_span_id": null,
+      "name": "task_execution",
+      "start_time": "2026-05-11T10:30:00.000Z",
+      "end_time": "2026-05-11T10:30:01.200Z",
+      "duration_ms": 1200.0,
+      "attributes": {
+        "task.input": "Write a Python function...",
+        "task.complexity": "simple",
+        "task.success": true
+      },
+      "events": [],
+      "status": "OK"
+    },
+    {
+      "span_id": "b2c3d4e5f6071829",
+      "parent_span_id": "a1b2c3d4e5f60718",
+      "name": "planner.classify_task",
+      "start_time": "2026-05-11T10:30:00.050Z",
+      "end_time": "2026-05-11T10:30:00.250Z",
+      "duration_ms": 200.0,
+      "attributes": {
+        "task.complexity": "simple",
+        "latency_ms": 200.0
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}
+```
+
+### 4.3 rich — Rich 控制台
+
+使用自定义的 `RichConsoleExporter`，以带图标和颜色的格式渲染 Span。
+
+- **适用场景**：开发调试时的最佳视觉体验
+- **处理器**：`SimpleSpanProcessor`（同步即时输出）
+- **额外依赖**：`pip install rich`
+
+**图标映射**：
+
+| Span 类型 | 图标 | 示例 |
+|---|---|---|
+| task_execution | 🔍 | 根 Span |
+| orchestrator | 🎯 | 上下文收集 |
+| planner | 📋 | 任务分类、规划 |
+| execution | ⚡ | DAG/简单/涌现执行 |
+| llm | 🤖 | LLM 调用 |
+| tool | 🔧 | 工具调用 |
+| reflector | 🪞 | 反思 |
+| memory | 🧠 | 记忆操作 |
+| react | 💭 | ReAct 循环 |
+| todo | 📝 | 涌现规划 TODO |
+
+### 4.4 otlp — OTLP 标准协议
+
+使用 `OTLPSpanExporter`，通过 HTTP 协议将 Span 发送到任何兼容 OTLP 的后端。
+
+- **适用场景**：生产环境、与 Jaeger / Grafana Tempo / Datadog 等集成
+- **处理器**：`BatchSpanProcessor`（异步批量导出）
+- **额外依赖**：`pip install opentelemetry-exporter-otlp`
+
+### 4.5 phoenix — Arize Phoenix
+
+与 `otlp` 相同的导出方式，但自动追加 `/v1/traces` 路径后缀。
+
+- **适用场景**：LLM 应用的专业可观察性工具
+- **推荐使用**：Arize Phoenix 对 GenAI Span 有原生的可视化支持
+
+**启动 Phoenix**：
+
+```bash
+pip install arize-phoenix
+python -m phoenix.server.main serve
+# Phoenix UI: http://localhost:6006
+```
+
+---
+
+## 5. 模块结构与文件说明
+
+```
+tracing/
+├── __init__.py      # 模块入口：条件导入 + No-op Stubs
+├── config.py        # 配置集中管理（从 root config.py 读取）
+├── spans.py         # Span 名称 / Attribute 键名 / Event 名称常量
+├── provider.py      # TracerProvider 工厂（Resource + Exporter + Sampler）
+├── exporters.py     # 自定义导出器（FileSpanExporter + RichConsoleExporter）
+├── decorators.py    # 声明式装饰器（@traced / @traced_llm_call / @traced_tool_call）
+└── bridge.py        # 事件桥接器（_emit 事件 → OTel Span）
+```
+
+| 文件 | 职责 | 关键类/函数 |
+|---|---|---|
+| `__init__.py` | 模块门面，`TRACING_ENABLED=false` 时提供 no-op 桩 | `init_tracing()`, `TracingBridge`, `traced()` |
+| `config.py` | 集中管理所有配置常量 | `ENABLED`, `BACKEND`, `ENDPOINT`, `SAMPLE_RATE` |
+| `spans.py` | 语义常量，遵循 OTel GenAI SemConv | `SpanName`, `AttrKey`, `EventName` |
+| `provider.py` | 初始化 OTel SDK | `init_tracing()`, `get_tracer()`, `shutdown_tracing()` |
+| `exporters.py` | File + Rich 导出器 | `FileSpanExporter`, `RichConsoleExporter` |
+| `decorators.py` | 方法级声明式埋点 | `@traced()`, `@traced_llm_call`, `@traced_tool_call` |
+| `bridge.py` | 事件流转 Span 桥接 | `TracingBridge.on_event()` |
+
+---
+
+## 6. Span 层级与数据模型
+
+### 6.1 Span 树结构
+
+一次完整的任务执行生成如下 Span 层级树：
+
+```
+Trace: task_execution/{task_id}
+├── orchestrator.gather_context
+│   ├── memory.search
+│   └── knowledge.retrieve
+├── planner.classify_task
+│   └── llm.chat (classification)
+├── planner.create_dag / planner.create_plan / planner.create_todo_list
+│   └── llm.chat_json (plan generation)
+├── execution.dag / execution.simple / execution.emergent
+│   ├── dag.super_step.{n}
+│   │   ├── node.execute.{node_id}
+│   │   │   ├── react.iteration.{i}
+│   │   │   │   ├── llm.chat_with_tools
+│   │   │   │   └── tool.execute.{tool_name}
+│   │   │   └── react.iteration.{i+1}
+│   │   └── node.execute.{node_id_2}  (并行)
+│   └── dag.super_step.{n+1}
+├── reflector.reflect
+│   └── llm.chat_json (reflection)
+└── memory.store
+```
+
+### 6.2 关键 Attributes
+
+**任务级别**：
+
+| Attribute | 类型 | 示例 |
+|---|---|---|
+| `task.id` | string | `"abc123"` |
+| `task.input` | string | `"Write a Python function..."` |
+| `task.complexity` | string | `"simple"` / `"complex"` |
+| `task.success` | bool | `true` |
+
+**LLM 调用**（遵循 OTel GenAI SemConv）：
+
+| Attribute | 类型 | 示例 |
+|---|---|---|
+| `gen_ai.system` | string | `"openai"` |
+| `gen_ai.request.model` | string | `"deepseek-chat"` |
+| `gen_ai.request.temperature` | float | `0.7` |
+| `gen_ai.usage.input_tokens` | int | `512` |
+| `gen_ai.usage.output_tokens` | int | `256` |
+| `gen_ai.usage.total_tokens` | int | `768` |
+| `latency_ms` | float | `350.0` |
+
+**工具调用**：
+
+| Attribute | 类型 | 示例 |
+|---|---|---|
+| `tool.name` | string | `"web_search"` |
+| `tool.parameters` | string(JSON) | `'{"query": "python tutorial"}'` |
+| `tool.success` | bool | `true` |
+| `tool.result_size` | int | `1024` |
+| `latency_ms` | float | `150.0` |
+
+**反思**：
+
+| Attribute | 类型 | 示例 |
+|---|---|---|
+| `reflection.passed` | bool | `true` |
+| `reflection.score` | float | `0.85` |
+| `reflection.feedback` | string | `"Code is correct"` |
+
+### 6.3 Event 名称
+
+Span 内部的关键事件：
+
+| Event | 触发场景 |
+|---|---|
+| `llm.request.start` / `llm.request.end` | LLM 请求开始/结束 |
+| `llm.retry` | LLM 请求重试 |
+| `tool.call.start` / `tool.call.end` | 工具调用开始/结束 |
+| `plan.generated` | 计划生成完成 |
+| `reflection.complete` | 反思完成 |
+| `replan.triggered` | 触发重新规划 |
+| `node.state_transition` | DAG 节点状态转换 |
+
+---
+
+## 7. 自定义埋点（装饰器）
+
+除了 Bridge 自动采集的事件外，你还可以使用装饰器为自定义代码添加埋点。
+
+### 7.1 `@traced` — 通用方法追踪
+
+```python
+from tracing import traced
+
+@traced("my_module.process_data")
+async def process_data(input_data: str) -> str:
+    """This method will be automatically traced."""
+    result = do_something(input_data)
+    return result
+
+@traced("my_module.sync_operation")
+def sync_operation(x: int) -> int:
+    """同步方法同样支持。"""
+    return x * 2
+```
+
+自动记录：
+- Span 名称（自定义或自动推导 `{class_name}.{method_name}`）
+- 执行耗时（`latency_ms`）
+- 异常信息（`error.type`, `error.message`）
+- 自定义静态属性
+
+带自定义属性：
+
+```python
+@traced("data.transform", attributes={"data.format": "json", "data.version": "2.0"})
+async def transform(data: dict) -> dict:
+    ...
+```
+
+### 7.2 `@traced_llm_call` — LLM 调用专用
+
+```python
+from tracing import traced_llm_call
+
+class MyLLMWrapper:
+    model = "gpt-4"
+
+    @traced_llm_call
+    async def chat(self, messages, temperature=0.7, max_tokens=4096):
+        ...
+```
+
+自动记录：
+- `gen_ai.system`, `gen_ai.request.model`
+- `gen_ai.request.temperature`, `gen_ai.request.max_tokens`
+- `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`
+- `latency_ms`, 异常信息
+
+### 7.3 `@traced_tool_call` — 工具调用专用
+
+```python
+from tracing import traced_tool_call
+
+class MyTool:
+    name = "my_custom_tool"
+
+    @traced_tool_call
+    async def execute(self, query: str) -> str:
+        ...
+```
+
+自动记录：
+- `tool.name`, `tool.parameters`（JSON 序列化）
+- `tool.success`, `tool.result_size`
+- `latency_ms`, `tool.error`
+
+### 7.4 `TRACING_ENABLED=false` 时的行为
+
+当 Tracing 关闭时，所有装饰器退化为 **透传（pass-through）**，不创建 Span、不记录属性、不产生任何性能开销：
+
+```python
+# TRACING_ENABLED=false 时，traced 等价于：
+def traced(span_name="", attributes=None):
+    def decorator(func):
+        return func  # 原封不动返回原函数
+    return decorator
+```
+
+---
+
+## 8. 集成原理
+
+### 8.1 双通道架构
+
+Tracing 通过两个互补的通道收集数据：
+
+```
+通道 1: 事件桥接（TracingBridge）
+  OrchestratorAgent._emit() → on_event() → TracingBridge.on_event()
+  覆盖：任务生命周期事件（task_start, phase, node_running, reflection 等）
+
+通道 2: 直接埋点（traced_execute / _start_llm_span）
+  LLMClient.chat() → _start_llm_span() / _end_llm_span()
+  BaseTool.traced_execute() → execute() with Span wrapping
+  覆盖：LLM 调用细节、工具执行细节
+```
+
+### 8.2 TracingBridge 事件映射
+
+Bridge 将现有事件流自动转换为 Span：
+
+| 事件名 | 生成的 Span | 说明 |
+|---|---|---|
+| `task_start` | `task_execution`（根 Span） | 任务开始 |
+| `phase: "Gathering context..."` | `orchestrator.gather_context` | 上下文收集阶段 |
+| `phase: "Classifying task..."` | `planner.classify_task` | 任务分类阶段 |
+| `phase: "Planning (v2 ..."` | `planner.create_dag` | DAG 规划 |
+| `phase: "Planning (v1 ..."` | `planner.create_plan` | 简单规划 |
+| `phase: "Planning (v5 ..."` | `planner.create_todo_list` | 涌现规划 |
+| `phase: "Executing DAG..."` | `execution.dag` | DAG 执行 |
+| `phase: "Executing simple..."` | `execution.simple` | 简单执行 |
+| `phase: "Reflecting..."` | `reflector.reflect` | 反思阶段 |
+| `node_running` | `node.execute.{id}` | 节点开始执行 |
+| `node_complete` | — (结束 Span) | 节点执行完成 |
+| `reflection` | 事件附加到当前 Span | 反思结果 |
+| `task_complete` | — (结束根 Span) | 任务完成 |
+
+### 8.3 多播事件分发
+
+TracingBridge 通过多播模式与现有的 UI 回调、EvaluationProbe 共存：
+
+```python
+# agents/orchestrator.py 中的初始化
+multicast = OrchestratorAgent._make_multicast(
+    original_on_event,          # UI 回调
+    tracing_bridge.on_event,    # Tracing 桥接
+)
+```
+
+多播保证：
+- 一个订阅者的异常不影响其他订阅者
+- 所有订阅者都能收到完整的事件流
+
+### 8.4 工具调用的 Tracing 入口
+
+`BaseTool` 提供 `traced_execute()` 方法作为带 tracing 的执行入口：
+
+```python
+# 所有执行器（ExecutorAgent / ReActEngine / EmergentPlannerAgent）
+# 使用 traced_execute 而非 execute：
+result = await tool.traced_execute(**func_args)
+
+# traced_execute 内部逻辑：
+# 1. TRACING_ENABLED=false → 直接调用 execute()
+# 2. TRACING_ENABLED=true  → 创建 Span → 调用 execute() → 记录属性
+```
+
+这种模板方法模式保证了子类无需任何修改即可获得 tracing 能力。
+
+---
+
+## 9. 隐私与安全
+
+### 9.1 默认安全策略
+
+| 策略 | 默认行为 | 配置项 |
+|---|---|---|
+| Prompt / Response 内容 | **不记录** | `TRACING_LOG_PROMPTS=true` 显式开启 |
+| 属性值截断 | 超过 1000 字符自动截断 | `TRACING_MAX_ATTR_LENGTH` |
+| 敏感字段脱敏 | 包含 `api_key`/`password`/`token`/`secret`/`credential`/`authorization` 的属性值替换为 `[REDACTED]` | 内置，不可配置 |
+
+### 9.2 敏感字段检测
+
+`tracing/decorators.py` 中的 `_is_sensitive_key()` 函数会检测属性键名是否包含以下模式：
+
+```python
+SENSITIVE_KEYS = {
+    "api_key", "api_secret", "token", "password",
+    "credential", "secret", "authorization",
+}
+```
+
+匹配时属性值被替换为 `[REDACTED]`，原始值不会被导出。
+
+### 9.3 生产环境建议
+
+```bash
+TRACING_LOG_PROMPTS=false         # 绝不记录 prompt 内容
+TRACING_MAX_ATTR_LENGTH=500       # 限制属性长度
+TRACING_SAMPLE_RATE=0.1           # 10% 采样
+```
+
+---
+
+## 10. 性能影响
+
+### 10.1 关闭时（TRACING_ENABLED=false）
+
+**零开销**。原理：
+
+1. `tracing/__init__.py` 在模块加载时检查 `TRACING_ENABLED`
+2. 如果为 `false`，导出的都是 no-op 桩（空函数、空类）
+3. OpenTelemetry SDK 不会被加载，不会被 import
+4. `BaseTool.traced_execute()` 直接委托给 `execute()`，只有一次 `if` 判断开销
+
+### 10.2 开启时的开销
+
+| 组件 | 开销 | 说明 |
+|---|---|---|
+| Bridge 事件处理 | ~0.01ms/事件 | 字典查找 + Span 创建 |
+| Span 创建 | ~0.05ms/Span | OTel SDK 内部开销 |
+| BatchSpanProcessor | 异步后台 | 不阻塞主线程 |
+| FileSpanExporter | 磁盘 I/O | 批量写入，影响极小 |
+| OTLP Exporter | 网络 I/O | 异步发送，不阻塞主流程 |
+
+**典型场景**：一次包含 5 个 LLM 调用 + 3 个工具调用的复杂任务，Tracing 额外耗时 < 1ms。
+
+### 10.3 采样率优化
+
+生产环境建议设置采样率：
+
+```bash
+TRACING_SAMPLE_RATE=0.1   # 只追踪 10% 的请求
+```
+
+采样基于 `TraceIdRatioBased`，确保被采样的 Trace 包含完整的 Span 树。
+
+---
+
+## 11. 常见操作手册
+
+### 11.1 分析 LLM 调用耗时
+
+**目的**：找出哪些 LLM 调用最慢，识别性能瓶颈。
+
+```bash
+# 1. 启用 file 后端
+TRACING_ENABLED=true TRACING_BACKEND=file python main.py
+
+# 2. 分析 trace 文件中的 LLM spans
+python3 -c "
+import json, glob
+for f in glob.glob('traces/*.json'):
+    data = json.load(open(f))
+    llm_spans = [s for s in data['spans'] if s['name'].startswith('llm.')]
+    for s in sorted(llm_spans, key=lambda x: x['duration_ms'], reverse=True):
+        model = s['attributes'].get('gen_ai.request.model', 'N/A')
+        tokens = s['attributes'].get('gen_ai.usage.total_tokens', 'N/A')
+        print(f'{s[\"name\"]:30s} {s[\"duration_ms\"]:8.1f}ms  model={model}  tokens={tokens}')
+"
+```
+
+### 11.2 统计 Token 消耗
+
+```python
+import json, glob
+
+total_input_tokens = 0
+total_output_tokens = 0
+
+for filepath in glob.glob("traces/*.json"):
+    data = json.load(open(filepath))
+    for span in data["spans"]:
+        attrs = span.get("attributes", {})
+        total_input_tokens += attrs.get("gen_ai.usage.input_tokens", 0)
+        total_output_tokens += attrs.get("gen_ai.usage.output_tokens", 0)
+
+print(f"Total input tokens:  {total_input_tokens}")
+print(f"Total output tokens: {total_output_tokens}")
+print(f"Total tokens:        {total_input_tokens + total_output_tokens}")
+```
+
+### 11.3 检查工具调用成功率
+
+```python
+import json, glob
+from collections import Counter
+
+tool_stats = Counter()
+tool_errors = Counter()
+
+for filepath in glob.glob("traces/*.json"):
+    data = json.load(open(filepath))
+    for span in data["spans"]:
+        if span["name"].startswith("tool.execute"):
+            tool_name = span["attributes"].get("tool.name", "unknown")
+            tool_stats[tool_name] += 1
+            if not span["attributes"].get("tool.success", True):
+                tool_errors[tool_name] += 1
+
+print("Tool call statistics:")
+for tool, count in tool_stats.most_common():
+    errors = tool_errors.get(tool, 0)
+    success_rate = (count - errors) / count * 100
+    print(f"  {tool}: {count} calls, {success_rate:.0f}% success")
+```
+
+### 11.4 查看完整的 Span 树
+
+```python
+import json
+
+data = json.load(open("traces/YOUR_TRACE_FILE.json"))
+
+# Build parent-child tree
+children = {}
+root = None
+for span in data["spans"]:
+    parent_id = span.get("parent_span_id")
+    if parent_id is None:
+        root = span
+    else:
+        children.setdefault(parent_id, []).append(span)
+
+def print_tree(span, indent=0):
+    status = "✅" if span["status"] == "OK" else "❌"
+    print(f"{'  ' * indent}{status} {span['name']} ({span['duration_ms']:.1f}ms)")
+    for child in children.get(span["span_id"], []):
+        print_tree(child, indent + 1)
+
+print_tree(root)
+```
+
+### 11.5 对接 Phoenix UI
+
+```bash
+# 1. 安装并启动 Phoenix
+pip install arize-phoenix
+python -m phoenix.server.main serve
+
+# 2. 配置环境变量
+TRACING_ENABLED=true
+TRACING_BACKEND=phoenix
+TRACING_ENDPOINT=http://localhost:6006
+
+# 3. 运行任务
+python main.py
+
+# 4. 在浏览器中打开 Phoenix UI
+open http://localhost:6006
+```
+
+在 Phoenix UI 中你可以：
+- 查看 Span 时间线瀑布图
+- 查看 LLM 调用的 token 用量统计
+- 对比不同 Trace 的性能差异
+- 搜索和过滤特定的 Span
+
+---
+
+## 12. 故障排查
+
+### 12.1 Tracing 没有生效
+
+**检查清单**：
+
+1. 确认 `TRACING_ENABLED=true` 已设置（区分大小写，必须小写 `true`）
+2. 确认 `.env` 文件在项目根目录下
+3. 确认已安装 OpenTelemetry 依赖：
+   ```bash
+   pip install opentelemetry-api opentelemetry-sdk
+   ```
+4. 查看日志中是否有 `[Tracing] Initialized` 信息
+
+### 12.2 File 后端没有生成文件
+
+**可能原因**：
+- `BatchSpanProcessor` 是异步批量导出，短任务可能未触发导出
+- 解决：确保程序正常退出（触发 `shutdown_tracing()` 刷新缓冲区）
+- 或在代码末尾手动调用：
+  ```python
+  from tracing import shutdown_tracing
+  shutdown_tracing()
+  ```
+
+### 12.3 OTLP 连接失败
+
+```
+[Tracing] OTLP exporter not available, falling back to console.
+```
+
+**解决**：
+```bash
+pip install opentelemetry-exporter-otlp
+```
+
+如果是连接后端失败，检查 `TRACING_ENDPOINT` 是否正确且后端服务正在运行。
+
+### 12.4 Rich 后端输出为纯文本
+
+```
+[RichConsoleExporter] 'rich' package not installed, falling back to print
+```
+
+**解决**：
+```bash
+pip install rich
+```
+
+### 12.5 "Overriding of current TracerProvider is not allowed"
+
+多次调用 `init_tracing()` 或测试中多次设置 TracerProvider 会触发此警告。
+
+**解决**：`init_tracing()` 是幂等的，重复调用不会出错（内部有 `_initialized` 守卫）。如果在测试中遇到，参考 `tests/test_tracing.py` 中的 `monkeypatch` 方案。
+
+### 12.6 属性值被截断
+
+```json
+{"tool.parameters": "{\"query\": \"very long query......[truncated]"}
+```
+
+这是预期行为。调整 `TRACING_MAX_ATTR_LENGTH` 以增大截断长度：
+
+```bash
+TRACING_MAX_ATTR_LENGTH=5000
+```
+
+---
+
+## 13. 与评测模块的关系
+
+Tracing 和评测（Evaluation）是两个互补的可观察性模块：
+
+| 维度 | Evaluation | Tracing |
+|---|---|---|
+| **时机** | 离线基准测试 | 运行时实时追踪 |
+| **数据** | 指标聚合（正确率、Token 消耗） | 结构化 Span 树 + 时间线 |
+| **目的** | 量化对比三种范式 | 诊断单次执行的性能瓶颈 |
+| **集成方式** | `EvaluationProbe` 订阅事件 | `TracingBridge` 订阅事件 |
+| **共存** | ✅ 可同时启用 | ✅ 可同时启用 |
+
+两者共享同一套事件机制（`_emit`/`on_event` → 多播分发），互不干扰。
+
+---
+
+## 14. 扩展指南
+
+### 14.1 添加新的导出后端
+
+1. 在 `tracing/exporters.py` 中创建新类，继承 `SpanExporter`
+2. 实现 `export(spans)`, `shutdown()`, `force_flush()` 方法
+3. 在 `tracing/provider.py` 的 `_create_exporter()` 中注册新后端名称
+
+```python
+# tracing/exporters.py
+class MyCustomExporter(SpanExporter):
+    def export(self, spans):
+        for span in spans:
+            # 你的导出逻辑
+            ...
+        return SpanExportResult.SUCCESS
+
+# tracing/provider.py
+def _create_exporter(backend):
+    ...
+    elif backend == "my_custom":
+        from tracing.exporters import MyCustomExporter
+        return MyCustomExporter()
+```
+
+### 14.2 添加新的事件处理
+
+在 `tracing/bridge.py` 的 `TracingBridge` 类中：
+
+1. 在 `_EVENT_HANDLERS` 映射表中注册新事件
+2. 实现对应的处理方法
+
+```python
+_EVENT_HANDLERS = {
+    ...
+    "my_new_event": "_on_my_new_event",
+}
+
+def _on_my_new_event(self, data):
+    if self._phase_span:
+        self._phase_span.add_event("my_event", attributes={"key": "value"})
+```
+
+### 14.3 添加新的 Span 名称或属性
+
+在 `tracing/spans.py` 中添加常量：
+
+```python
+class SpanName:
+    ...
+    MY_NEW_OPERATION = "my_module.new_operation"
+
+class AttrKey:
+    ...
+    MY_NEW_ATTR = "my_module.new_attribute"
+```
+
+### 14.4 为新工具添加 Tracing
+
+新工具只需继承 `BaseTool` 并实现 `execute()` 方法，Tracing 能力自动获得：
+
+```python
+class MyNewTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "my_new_tool"
+
+    async def execute(self, **kwargs) -> str:
+        # 你的工具逻辑
+        return "result"
+
+# 执行器调用 traced_execute 即可自动追踪
+result = await tool.traced_execute(param="value")
+```
+
+---
+
+> **相关文档**：
+> - [Tracing 设计文档](./tracing-design.md) — 详细的架构设计和技术决策
+> - [评测模块使用指南](./evaluation-guide.md) — 离线基准测试
+> - [代码地图](./codemap.md) — 项目整体结构
+> - [更新日志](./CHANGELOG.md) — 版本变更记录

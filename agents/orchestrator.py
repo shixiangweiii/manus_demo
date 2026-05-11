@@ -100,6 +100,18 @@ class OrchestratorAgent:
         self.llm_client = llm_client or LLMClient()  # 共享 LLM 客户端
         self.context_manager = ContextManager()       # 上下文压缩管理器
 
+        # --- Tracing integration (v7) ---
+        # 全链路追踪集成（v7 新增）
+        # 初始化 TracingBridge，通过多播模式与现有 on_event 共存
+        self._tracing_bridge = None
+        if config.TRACING_ENABLED:
+            from tracing import TracingBridge, init_tracing
+            init_tracing()  # 幂等初始化 TracerProvider
+            self._tracing_bridge = TracingBridge()
+            # 多播：事件同时发送给原始回调 + TracingBridge
+            original_on_event = on_event or (lambda *_: None)
+            on_event = self._make_multicast(original_on_event, self._tracing_bridge.on_event)
+
         # Sub-agents（各专用子智能体）
         self.planner = PlannerAgent(self.llm_client, self.context_manager)
         self.executor_agent = ExecutorAgent(
@@ -510,6 +522,27 @@ class OrchestratorAgent:
         )
         self.long_term.store(entry)
         self._emit("memory_stored", entry)
+
+    @staticmethod
+    def _make_multicast(*callbacks: Callable) -> Callable:
+        """
+        Create a multicast event callback that dispatches to multiple subscribers.
+        创建多播事件回调，将事件分发给多个订阅者。
+
+        Each subscriber's failure is isolated — one failing callback doesn't
+        prevent others from receiving the event.
+        每个订阅者的失败是隔离的 —— 一个回调失败不影响其他订阅者。
+        """
+        def multicast(event: str, data: Any = None) -> None:
+            for cb in callbacks:
+                try:
+                    cb(event, data)
+                except Exception:
+                    logger.debug(
+                        "[Orchestrator] Multicast callback failed for event '%s'",
+                        event, exc_info=True,
+                    )
+        return multicast
 
     def _emit(self, event: str, data: Any = None) -> None:
         """

@@ -558,7 +558,7 @@ class EmergentPlannerAgent(BaseAgent):
                     is_error = True
                 else:
                     try:
-                        result = await tool.execute(**func_args)
+                        result = await tool.traced_execute(**func_args)
                         self.tool_router.record_success(str(todo.id), func_name)
                     except Exception as exc:
                         result = f"Tool execution error: {exc}"

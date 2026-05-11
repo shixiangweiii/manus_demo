@@ -86,3 +86,15 @@ LLM_RETRY_BACKOFF_FACTOR = float(os.getenv("LLM_RETRY_BACKOFF_FACTOR", "2.0"))  
 
 # --- Token Usage Tracking ---
 TOKEN_TRACKING_ENABLED = os.getenv("TOKEN_TRACKING_ENABLED", "true").lower() == "true"  # 是否启用 Token 消耗追踪
+
+# ======================================================================
+# Tracing Configuration (v7)
+# 全链路追踪配置（v7 新增）
+# ======================================================================
+TRACING_ENABLED: bool = os.getenv("TRACING_ENABLED", "false").lower() == "true"       # 总开关（默认关闭，向后兼容）
+TRACING_BACKEND: str = os.getenv("TRACING_BACKEND", "console")                        # 导出后端：console / file / rich / otlp / phoenix
+TRACING_ENDPOINT: str = os.getenv("TRACING_ENDPOINT", "http://localhost:4318")         # OTLP HTTP 端点地址
+TRACING_SERVICE_NAME: str = os.getenv("TRACING_SERVICE_NAME", "manus-demo")            # 服务标识
+TRACING_SAMPLE_RATE: float = max(0.0, min(1.0, float(os.getenv("TRACING_SAMPLE_RATE", "1.0"))))  # 采样率 (clamped to 0.0-1.0)
+TRACING_LOG_PROMPTS: bool = os.getenv("TRACING_LOG_PROMPTS", "false").lower() == "true"  # 是否记录完整 prompt（默认关闭，隐私保护）
+TRACING_MAX_ATTRIBUTE_LENGTH: int = int(os.getenv("TRACING_MAX_ATTR_LENGTH", "1000"))  # 属性值最大字符数

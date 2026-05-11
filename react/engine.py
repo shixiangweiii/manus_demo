@@ -196,7 +196,7 @@ class ReActEngine:
                     is_error = True
                 else:
                     try:
-                        result = await tool.execute(**func_args)
+                        result = await tool.traced_execute(**func_args)
                         self.tool_router.record_success(str(step_id), func_name)
                     except Exception as exc:
                         result = f"Error: Tool execution error: {exc}"
