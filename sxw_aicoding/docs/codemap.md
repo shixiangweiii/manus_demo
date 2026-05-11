@@ -1,7 +1,7 @@
 # Manus Demo - 代码地图
 
 > **生成时间**: 2026-05-11
-> **版本**: v6（含 LLM 重试机制 + ReActEngine Feature Flag + ShellTool + 评测模块）
+> **版本**: v7（含全链路 Tracing + Web Viewer + LLM 重试机制 + ReActEngine + ShellTool + 评测模块）
 > **目的**: 当前代码库的综合架构地图
 
 ## 目录
@@ -72,6 +72,7 @@ v3 → 自适应规划（运行时 DAG 变更）+ 工具路由（基于失败的
 v4 → 两阶段混合分类器（规则 + LLM）+ 自动 v1/v2 路径选择
 v5 → Claude Code 风格隐式规划 + TODO 列表管理 + while(tool_use) 主循环（新增第三条执行路径）
 v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag + 评测模块（零侵入事件探针 + 四维度加权评分 + 12 基准任务）
+v7 → 全链路 Tracing（OpenTelemetry Span 树 + 多后端导出 + 声明式装饰器）+ 内置 Web Viewer（FastAPI 树形可视化）
 ```
 
 ### 核心特性
@@ -83,6 +84,8 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 - **隐式规划**：Claude Code 风格，通过 TODO 列表动态涌现规划
 - **LLM 重试**：v6 新增指数退避重试机制，提升稳定性
 - **评测模块**：零侵入事件探针 + 四维度加权评分（规划/执行/效率/反思）+ 12 基准任务 + 三模式对比报告
+- **全链路 Tracing**：基于 OpenTelemetry 标准的结构化 Span 树，覆盖任务全生命周期
+- **Web Viewer**：内置 FastAPI 可视化查看器，暗色主题树形 Span 展示
 
 ## 模块结构
 
@@ -144,6 +147,21 @@ manus_demo/
 │   ├── runner.py             # EvaluationProbe + EvaluationRunner (568行)
 │   ├── report.py             # Rich 报告 + JSON 导出 (308行)
 │   └── eval_cli.py           # CLI 入口 (185行)
+│
+├── tracing/                    # 全链路追踪模块 (v7)
+│   ├── __init__.py            # 模块入口 + No-op Stubs
+│   ├── __main__.py            # Web Viewer CLI 入口
+│   ├── config.py              # Tracing 配置集中管理
+│   ├── spans.py               # Span/Attribute/Event 语义常量
+│   ├── provider.py            # TracerProvider 工厂
+│   ├── exporters.py           # FileSpanExporter + RichConsoleExporter
+│   ├── decorators.py          # @traced / @traced_llm_call / @traced_tool_call
+│   ├── bridge.py              # TracingBridge 事件→Span 桥接器
+│   ├── server.py              # Web Viewer FastAPI 应用
+│   └── templates/             # Web Viewer HTML 模板
+│       ├── base.html
+│       ├── trace_list.html
+│       └── trace_detail.html
 │
 ├── tests/                     # 测试模块
 │
@@ -992,105 +1010,29 @@ python -m evaluation.eval_cli [OPTIONS]
 ```
 
 
+### N. TracingBridge
+
+**文件**: `tracing/bridge.py`
+**目的**: 将 _emit 事件流自动转换为 OpenTelemetry Span 树
+
+主要能力：
+- 订阅 Orchestrator 的 _emit 事件回调
+- 维护 Span 栈追踪父子层级
+- 使用事件到处理器的映射表，支持 task/phase/node/todo/step/reflection 等全量事件
+- 异常安全，tracing 错误不影响主流程
+
+### N+1. Trace Web Viewer
+
+**文件**: `tracing/server.py` + `tracing/__main__.py`
+**目的**: 内置的 Web 可视化界面，查看本地 trace 文件
+
+主要能力：
+- Trace 列表页（按时间倒序，含状态、Span 数量、耗时）
+- Trace 详情页（可折叠树形 Span 层级 + 属性展开面板）
+- JSON API（/api/traces, /api/traces/{file_id}）
+- CLI 启动：python -m tracing --port 8600
+
 ## 数据流
-
-### 完整任务执行流程
-
-```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant Main as Main
-    participant Orchestrator as Orchestrator
-    participant Planner as Planner
-    participant Memory as Memory
-    participant Knowledge as Knowledge
-    participant Executor as Executor
-    participant Reflector as Reflector
-    
-    User->>Main: 输入任务
-    Main->>Orchestrator: run(task)
-    
-    Orchestrator->>Memory: 检索相关记忆
-    Memory-->>Orchestrator: 返回记忆条目
-    
-    Orchestrator->>Knowledge: 检索相关知识
-    Knowledge-->>Orchestrator: 返回相关文档
-    
-    Orchestrator->>Planner: classify_task(task)
-    Planner->>Planner: 规则快筛
-    alt 规则明确
-        Planner-->>Orchestrator: 返回分类结果
-    else 规则模糊
-        Planner->>Planner: LLM分类
-        Planner-->>Orchestrator: 返回分类结果
-    end
-    
-    alt Simple路径
-        Orchestrator->>Planner: create_plan()
-        Planner-->>Orchestrator: 返回扁平计划
-        Orchestrator->>Executor: 顺序执行计划
-        loop 每个步骤
-            Executor->>Executor: ReAct循环
-        end
-        Orchestrator->>Reflector: reflect()
-    else Complex路径
-        Orchestrator->>Planner: create_dag()
-        Planner-->>Orchestrator: 返回DAG
-        Orchestrator->>Executor: 执行DAG
-        loop 每个Super-step
-            Executor->>Executor: 并行执行就绪节点
-        end
-        Orchestrator->>Reflector: reflect_dag()
-    else Emergent路径
-        Orchestrator->>Planner: 隐式规划
-        Planner-->>Orchestrator: 返回TODO列表
-        loop while(tool_use)
-            Executor->>Executor: 执行待办项
-            Executor->>Planner: 更新TODO列表
-        end
-    end
-    
-    Reflector-->>Orchestrator: 返回验证结果
-    
-    alt 验证通过
-        Orchestrator->>Memory: 存储学习成果
-        Orchestrator-->>User: 返回最终答案
-    else 验证失败
-        Orchestrator->>Planner: 重规划
-        Planner-->>Orchestrator: 返回新计划
-        Orchestrator->>Executor: 重新执行
-    end
-```
-
-### 数据流转关键节点
-
-1. **上下文收集阶段**
-   - 从 LongTermMemory 检索相关历史经验
-   - 从 KnowledgeRetriever 检索相关知识文档
-   - 合并为 context 字符串传递给后续组件
-
-2. **任务分类阶段**
-   - 规则快筛：使用 6 个正则模式快速分类
-   - LLM 兜底：对模糊任务进行轻量级 LLM 分类
-
-3. **计划生成阶段**
-   - Simple: 生成 2-6 步扁平计划
-   - Complex: 生成 3 层分层 DAG（Goal -> SubGoals -> Actions）
-   - Emergent: 初始化 TODO 列表（1-3 项）
-
-4. **执行阶段**
-   - Simple: Executor 顺序执行，每步独立 ReAct 循环
-   - Complex: DAGExecutor Super-step 并行执行
-   - Emergent: while(tool_use) 循环，动态更新 TODO
-
-5. **反思阶段**
-   - 验证 exit criteria 是否满足
-   - 评估执行质量
-   - 决定是否需要重规划
-
-6. **持久化阶段**
-   - 将任务摘要和学习成果存入 LongTermMemory
-   - 为未来类似任务提供经验参考
 
 ## 关键设计模式
 
@@ -1241,9 +1183,9 @@ def on_event(event_type: str, data: Any):
 | `dag/executor.py` | 647 | Super-step 并行执行 | `DAGExecutor.execute()` |
 | `dag/graph.py` | 626 | DAG 数据结构 | `TaskDAG.get_ready_nodes()` |
 | `dag/state_machine.py` | 113 | 节点状态机 | `NodeStateMachine.transition()` |
-| `llm/client.py` | 282 | LLM 客户端 | `LLMClient.chat()` |
+| `llm/client.py` | 417 | LLM 客户端 | `LLMClient.chat()` |
 | `react/engine.py` | 245 | 统一 ReAct 引擎 | `ReActEngine.execute()` |
-| `tools/base.py` | 86 | 工具基类 | `BaseTool.execute()` |
+| `tools/base.py` | 174 | 工具基类 | `BaseTool.execute()` |
 | `tools/router.py` | 167 | 智能工具路由 | `ToolRouter.get_hint()` |
 | `tools/web_search.py` | 112 | 网络搜索工具 | `WebSearchTool.execute()` |
 | `tools/code_executor.py` | 101 | 代码执行工具 | `CodeExecutorTool.execute()` |
@@ -1259,6 +1201,15 @@ def on_event(event_type: str, data: Any):
 | `evaluation/runner.py` | 568 | 事件探针 + 评测执行器 | `EvaluationProbe`, `EvaluationRunner` |
 | `evaluation/report.py` | 308 | Rich 报告 + JSON 导出 | `render_comparison_table()`, `export_json()` |
 | `evaluation/eval_cli.py` | 185 | 评测 CLI 入口 | `main()` |
+| `tracing/__init__.py` | - | 模块入口 + No-op Stubs | - |
+| `tracing/__main__.py` | - | Web Viewer CLI 入口 | - |
+| `tracing/config.py` | - | Tracing 配置集中管理 | - |
+| `tracing/spans.py` | - | Span/Attribute/Event 语义常量 | - |
+| `tracing/provider.py` | - | TracerProvider 工厂 | - |
+| `tracing/exporters.py` | - | FileSpanExporter + RichConsoleExporter | - |
+| `tracing/decorators.py` | - | @traced / @traced_llm_call / @traced_tool_call | - |
+| `tracing/bridge.py` | - | TracingBridge 事件→Span 桥接器 | - |
+| `tracing/server.py` | - | Web Viewer FastAPI 应用 | - |
 | `schema.py` | 612 | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
 | `config.py` | 88 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
 | `main.py` | 515 | CLI 入口 | `main()` |
@@ -1274,6 +1225,7 @@ def on_event(event_type: str, data: Any):
 | v5 | `agents/emergent_planner.py` | 隐式规划 + TODO 列表管理 |
 | v6 | `llm/client.py`, `agents/executor.py`, `agents/emergent_planner.py`, `tools/shell_tool.py`, `react/engine.py` | LLM 重试 + ReActEngine + ShellTool + 统一 ReAct 引擎 |
 | v6 | `evaluation/metrics.py`, `evaluation/benchmark.py`, `evaluation/runner.py`, `evaluation/report.py`, `evaluation/eval_cli.py`, `tests/test_evaluation.py` | 评测模块：零侵入事件探针 + 四维度加权评分 + 12 基准任务 + 三模式对比报告 |
+| v7 | `tracing/bridge.py`, `tracing/exporters.py`, `tracing/decorators.py`, `tracing/provider.py`, `tracing/server.py`, `llm/client.py`, `tools/base.py` | 全链路 Tracing + Web Viewer |
 
 ### 测试文件
 
@@ -1288,6 +1240,7 @@ def on_event(event_type: str, data: Any):
 | `tests/test_shell_tool.py` | Shell 工具测试 |
 | `tests/test_concurrent_execution.py` | 并发执行测试 |
 | `tests/test_cycle_detection.py` | 循环检测测试 |
+| `tests/test_tracing.py` | Tracing 模块测试（27 用例） |
 
 ### 文档文件
 
@@ -1305,6 +1258,7 @@ def on_event(event_type: str, data: Any):
 | `docs/planning-test-scenarios.md` | 规划测试场景 |
 | `docs/related-papers.md` | 相关论文（DAAO, RouteLLM） |
 | `docs/upgrade-plan.md` | v6 升级计划 |
+| `docs/tracing-guide.md` | v7 Tracing 使用指南 |
 
 ---
 
@@ -1319,5 +1273,6 @@ Manus Demo 是一个功能完整的多智能体任务执行系统，具有以下
 5. **隐式规划**：Claude Code 风格的动态规划，适应不确定性任务
 6. **LLM 重试机制**：v6 新增的指数退避重试，提升系统稳定性
 7. **Shell 命令执行**：v6 新增 `ShellTool`，支持在沙箱中执行 bash 命令，增强真实环境交互能力
+8. **全链路 Tracing**：v7 新增基于 OpenTelemetry 的结构化 Span 树，覆盖 LLM 调用、工具执行、反思等全生命周期，支持 File/Rich/OTLP/Phoenix 多后端导出，并提供内置 Web Viewer 可视化查看器
 
 该系统展示了如何将多种先进技术（ReAct、DAG、状态机、混合路由等）整合为一个实用的多智能体系统，为复杂任务的自动化执行提供了完整的解决方案。

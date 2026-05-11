@@ -1,7 +1,7 @@
 # Manus Demo 更新日志
 
-> **更新日期**: 2026-05-10
-> **当前版本**: v6.0
+> **更新日期**: 2026-05-11
+> **当前版本**: v7.0
 
 ## 概述
 
@@ -16,7 +16,98 @@ v3 → 自适应规划（运行时 DAG 变更）+ 工具路由（基于失败的
 v4 → 两阶段混合分类器（规则 + LLM）+ 自动 v1/v2 路径选择
 v5 → Claude Code 风格隐式规划 + TODO 列表管理 + while(tool_use) 主循环
 v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
+v7 → 全链路 Tracing（OpenTelemetry 标准 Span 树）+ 内置 Web Viewer（FastAPI 树形可视化）
 ```
+
+---
+
+## v7.0 (2026-05-11)
+
+### 核心特性：全链路 Tracing + Web 可视化
+
+#### 1. Tracing 模块（全链路追踪）
+
+**新增文件**:
+- `tracing/__init__.py`: 模块入口，TRACING_ENABLED=false 时提供 no-op stubs
+- `tracing/config.py`: 集中管理 tracing 配置常量
+- `tracing/spans.py`: Span 名称、Attribute 键名、Event 名称语义常量
+- `tracing/provider.py`: TracerProvider 工厂（Resource + Exporter + Sampler）
+- `tracing/exporters.py`: FileSpanExporter（JSON 文件）+ RichConsoleExporter（树形控制台）
+- `tracing/decorators.py`: @traced、@traced_llm_call、@traced_tool_call 声明式装饰器
+- `tracing/bridge.py`: TracingBridge 事件桥接器（_emit 事件 → OTel Span）
+
+**修改文件**:
+- `llm/client.py`: 新增 _start_llm_span/_end_llm_span，LLM 调用自动创建 Span
+- `tools/base.py`: 新增 traced_execute() 和 _sanitize_params()，工具调用自动 trace + 敏感参数脱敏
+- `agents/orchestrator.py`: 集成 TracingBridge 到多播事件系统
+- `config.py`: 新增 TRACING_* 系列配置项
+
+**设计原则**:
+- **零侵入**：通过事件桥接 + 装饰器集成，核心 Agent 业务逻辑零改动
+- **零开销**：TRACING_ENABLED=false 时不创建 Span、不加载 OpenTelemetry
+- **多后端支持**：console/file/rich/otlp/phoenix
+- **隐私保护**：默认不记录 prompt，敏感字段自动脱敏
+
+**Span 层级结构**:
+```
+task_execution
+├── orchestrator.gather_context
+├── planner.classify_task
+│   └── llm.chat
+├── execution.simple / execution.dag / execution.emergent
+│   ├── llm.chat_with_tools
+│   └── tool.execute.{name}
+├── reflector.reflect
+└── memory.store
+```
+
+#### 2. Trace Web Viewer（内置可视化）
+
+**新增文件**:
+- `tracing/server.py`: FastAPI 应用（API + 页面路由 + Span 树构建）
+- `tracing/__main__.py`: CLI 入口（python -m tracing 启动 Web 服务）
+- `tracing/templates/base.html`: 暗色主题基础模板
+- `tracing/templates/trace_list.html`: Trace 列表页
+- `tracing/templates/trace_detail.html`: Trace 详情页（可折叠树形 + 属性面板）
+
+**功能**:
+- **列表页**：展示所有 trace 文件（状态、根 Span、Span 数量、耗时）
+- **详情页**：可折叠树形结构展示 Span 层级，点击节点展开 attributes/events
+- **JSON API**：/api/traces、/api/traces/{file_id}
+- **启动方式**：`python -m tracing --port 8600`
+
+**安全措施**:
+- Jinja2 tojson 过滤器防 XSS
+- file_id 路径遍历防御
+- Span 树循环引用检测
+
+#### 3. 配置项
+
+| 参数名 | 默认值 | 说明 |
+|--------|--------|------|
+| TRACING_ENABLED | false | 总开关 |
+| TRACING_BACKEND | console | 导出后端 |
+| TRACING_ENDPOINT | http://localhost:4318 | OTLP 端点 |
+| TRACING_SERVICE_NAME | manus-demo | 服务标识 |
+| TRACING_SAMPLE_RATE | 1.0 | 采样率（自动 clamp 到 0.0-1.0） |
+| TRACING_LOG_PROMPTS | false | 是否记录 prompt |
+| TRACING_MAX_ATTR_LENGTH | 1000 | 属性值最大长度 |
+
+#### 4. 依赖
+
+新增：
+- opentelemetry-api>=1.27.0
+- opentelemetry-sdk>=1.27.0
+- opentelemetry-exporter-otlp>=1.27.0
+- fastapi>=0.100.0
+- uvicorn[standard]>=0.20.0
+- jinja2>=3.1.0
+
+#### 5. 测试覆盖
+
+**文件**: tests/test_tracing.py (27 个测试用例)
+
+测试内容：Feature Flag 开关、装饰器行为、敏感数据脱敏、Span 属性截断、Bridge 事件处理、FileSpanExporter 输出格式等
 
 ---
 
@@ -629,6 +720,18 @@ Orchestrator.classify_task()
 
 ## 配置项汇总
 
+### v7.0 新增配置
+
+| 参数名 | 默认值 | 版本 | 说明 |
+|--------|--------|------|------|
+| `TRACING_ENABLED` | `false` | v7.0 | Tracing 总开关 |
+| `TRACING_BACKEND` | `console` | v7.0 | Tracing 导出后端（console/file/rich/otlp/phoenix） |
+| `TRACING_ENDPOINT` | `http://localhost:4318` | v7.0 | OTLP 端点地址 |
+| `TRACING_SERVICE_NAME` | `manus-demo` | v7.0 | 服务标识名称 |
+| `TRACING_SAMPLE_RATE` | `1.0` | v7.0 | 采样率（自动 clamp 到 0.0-1.0） |
+| `TRACING_LOG_PROMPTS` | `false` | v7.0 | 是否记录 LLM prompt 内容 |
+| `TRACING_MAX_ATTR_LENGTH` | `1000` | v7.0 | Span 属性值最大长度 |
+
 ### v6.0 新增配置
 
 | 参数名 | 默认值 | 版本 | 说明 |
@@ -688,6 +791,26 @@ Orchestrator.classify_task()
 ---
 
 ## 迁移指南
+
+### 从 v6.0 升级到 v7.0
+
+**新增功能**:
+- 全链路 Tracing（基于 OpenTelemetry）
+- Trace Web Viewer（内置 FastAPI 可视化查看器）
+
+**迁移步骤**:
+1. 安装新增依赖：`pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp fastapi uvicorn jinja2`
+2. 更新配置文件，添加 Tracing 相关配置项（可选）
+3. 启用 Tracing：设置 `TRACING_ENABLED=true`
+4. 选择导出后端：设置 `TRACING_BACKEND=console/file/rich/otlp/phoenix`
+5. 启动 Web Viewer：`python -m tracing --port 8600`
+6. 验证现有功能是否正常（Tracing 默认关闭，不影响现有行为）
+
+**注意事项**:
+- Tracing 功能默认关闭（`TRACING_ENABLED=false`），零开销运行
+- 敏感参数（如 API Key、密码）会自动脱敏
+- 默认不记录 LLM prompt 内容，如需记录需设置 `TRACING_LOG_PROMPTS=true`
+- Web Viewer 仅用于本地开发调试，生产环境建议禁用或使用专业 APM 工具
 
 ### 从 v5.0 升级到 v6.0
 
@@ -797,7 +920,7 @@ Orchestrator.classify_task()
 
 ## 总结
 
-Manus Demo 从 v1.0 到 v6.0 的演进过程，展现了多智能体系统在规划能力、执行效率、健壮性等方面的持续改进：
+Manus Demo 从 v1.0 到 v7.0 的演进过程，展现了多智能体系统在规划能力、执行效率、健壮性、可观测性等方面的持续改进：
 
 - **v1.0**: 奠定基础，实现简单的线性规划和顺序执行
 - **v2.0**: 引入 DAG 和并行执行，大幅提升复杂任务处理能力
@@ -805,5 +928,6 @@ Manus Demo 从 v1.0 到 v6.0 的演进过程，展现了多智能体系统在规
 - **v4.0**: 优化任务分类和路由，提升性能和准确性
 - **v5.0**: 引入隐式规划范式，拓展任务处理范围
 - **v6.0**: 增强系统健壮性，提高 LLM 调用的可靠性
+- **v7.0**: 建立全链路可观测性，提供 OpenTelemetry 标准 Tracing + 内置 Web 可视化查看器
 
 每个版本都在前一个版本的基础上进行改进，同时保持向后兼容性，为用户提供平滑的升级体验。
