@@ -1,4 +1,6 @@
-# CLAUDE.md — Manus Demo Project Context
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -57,6 +59,12 @@ manus_demo/
 ├── knowledge/
 │   ├── retriever.py           # KnowledgeRetriever — TF-IDF + cosine similarity document retrieval
 │   └── docs/                  # Knowledge base text files
+├── evaluation/                # Evaluation module — benchmark 3 plan-and-execute paradigms
+│   ├── metrics.py             # Core metric models + scoring functions (4-dimension weighted)
+│   ├── benchmark.py           # 12 benchmark tasks with ground truth
+│   ├── runner.py              # EvaluationProbe (event listener) + EvaluationRunner
+│   ├── report.py              # Rich console comparison report + JSON export
+│   └── eval_cli.py            # CLI entry: `python -m evaluation.eval_cli`
 ├── tests/                     # pytest suite (mock-based, no LLM API required)
 └── sxw_aicoding/docs/         # Detailed architecture docs (codemap, CHANGELOG, design docs)
 ```
@@ -134,6 +142,14 @@ python -m pytest tests/test_dag_capabilities.py -v
 python -m pytest tests/test_emergent_planning.py -v
 python -m pytest tests/ -v
 
+# Evaluation module tests (49 tests, mock-based)
+python -m pytest tests/test_evaluation.py -v
+
+# Evaluation CLI (requires LLM_API_KEY)
+python -m evaluation.eval_cli --dry-run                    # Show benchmark tasks
+python -m evaluation.eval_cli --difficulty easy --modes simple  # Quick smoke test
+python -m evaluation.eval_cli --output results.json        # Full eval with JSON export
+
 # Syntax check modified files
 python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 ```
@@ -165,6 +181,7 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 4. **Centralized LLM client**: All agents share one `LLMClient` instance; token tracking is accumulated there, not in individual agents
 5. **Sandbox security**: `ShellTool` runs in `SANDBOX_DIR` with command blacklists and stripped env vars; `CodeExecutorTool` uses subprocess with timeout and output size limits; both share `subprocess_utils.run_with_limits()`
 6. **Checkpoint**: `TaskDAG.save_checkpoint()` snapshots full DAG state at key milestones (each super-step, after adaptive planning) for debugging
+7. **Evaluation via event probe**: `EvaluationProbe` hooks into `on_event` callback without modifying core code; forced routing via `config.PLAN_MODE` override with `classification_forced` flag to correctly handle scoring weights
 
 ## Documentation
 
@@ -177,3 +194,4 @@ Detailed design docs live in `sxw_aicoding/docs/`:
 - `hybrid-plan-routing.md` — v4 two-stage classifier design
 - `llm-integration.md` — v6 LLM retry + ReActEngine design
 - `upgrade-plan.md` — v6 upgrade plan with completion status
+- `evaluation-guide.md` — Evaluation module design, metrics system, usage guide, and extension instructions
