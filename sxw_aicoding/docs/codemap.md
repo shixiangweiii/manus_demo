@@ -1,7 +1,7 @@
 # Manus Demo - 代码地图
 
-> **生成时间**: 2026-05-10
-> **版本**: v6（含 LLM 重试机制 + ReActEngine Feature Flag + ShellTool）
+> **生成时间**: 2026-05-11
+> **版本**: v6（含 LLM 重试机制 + ReActEngine Feature Flag + ShellTool + 评测模块）
 > **目的**: 当前代码库的综合架构地图
 
 ## 目录
@@ -71,7 +71,7 @@ v2 → DAG 分层规划 + 并行 Super-step + 局部重规划 + 节点状态机 
 v3 → 自适应规划（运行时 DAG 变更）+ 工具路由（基于失败的切换）+ 动态 DAG 增删改
 v4 → 两阶段混合分类器（规则 + LLM）+ 自动 v1/v2 路径选择
 v5 → Claude Code 风格隐式规划 + TODO 列表管理 + while(tool_use) 主循环（新增第三条执行路径）
-v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
+v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag + 评测模块（零侵入事件探针 + 四维度加权评分 + 12 基准任务）
 ```
 
 ### 核心特性
@@ -82,6 +82,7 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 - **状态机管控**：严格节点生命周期管理，防止非法状态转移
 - **隐式规划**：Claude Code 风格，通过 TODO 列表动态涌现规划
 - **LLM 重试**：v6 新增指数退避重试机制，提升稳定性
+- **评测模块**：零侵入事件探针 + 四维度加权评分（规划/执行/效率/反思）+ 12 基准任务 + 三模式对比报告
 
 ## 模块结构
 
@@ -135,6 +136,14 @@ manus_demo/
 │   ├── __init__.py
 │   ├── retriever.py          # KnowledgeRetriever TF-IDF检索 (228行)
 │   └── docs/
+│
+├── evaluation/                 # 评测模块
+│   ├── __init__.py           # 模块入口，学术参考 (17行)
+│   ├── metrics.py            # 指标模型 + 评分函数 (479行)
+│   ├── benchmark.py          # 12 个基准任务 (310行)
+│   ├── runner.py             # EvaluationProbe + EvaluationRunner (568行)
+│   ├── report.py             # Rich 报告 + JSON 导出 (308行)
+│   └── eval_cli.py           # CLI 入口 (185行)
 │
 ├── tests/                     # 测试模块
 │
@@ -830,6 +839,159 @@ class KnowledgeRetriever:
     def format_results(self, results: list[dict[str, Any]]) -> str
 ```
 
+### 14. 评测模块
+
+#### EvaluationProbe（事件探针）
+
+**文件**: `evaluation/runner.py` (568行) 中的 `EvaluationProbe` 类
+
+**目的**: 零侵入式事件探针，挂接到 OrchestratorAgent 的事件回调，被动收集各阶段指标数据。
+
+**设计原则**:
+- 不修改核心代码（agents/、dag/、react/ 等模块零改动）
+- 只读取事件数据，不修改 data
+- 通过 `on_event` 回调挂接
+
+**核心机制**:
+```python
+# 挂接方式
+orchestrator = OrchestratorAgent(on_event=probe.on_event)
+# probe 被动接收所有事件，解析并填充指标字段
+# 任务结束后调用 probe.build_result() 生成 TaskEvaluationResult
+```
+
+**监听的事件类型**:
+
+| 事件 | 收集的指标 |
+|------|-----------|
+| `task_complexity` | 分类结果 |
+| `plan` / `dag_created` / `todo_list_initialized` | 计划结构（步骤数、节点数、环检测、todo 数量） |
+| `step_complete` / `step_failed` / `node_completed` / `node_failed` | 执行结果（完成/失败数、工具调用记录、迭代数） |
+| `phase` + "Re-planning" / "Partial replan" | 重规划次数 |
+| `plan_adaptation` / `adaptive_planning` | DAG 自适应规划次数 |
+| `reflection` | 反思判定结果、评分 |
+| `token_usage_summary` | 总 token 消耗 |
+| `task_complete` | 最终答案、任务成功判定 |
+
+**主要方法签名**:
+```python
+class EvaluationProbe:
+    def __init__(self) -> None
+    def reset(self) -> None
+    def on_event(self, event: str, data: Any) -> None
+    def build_result(self, task: BenchmarkTask, forced_mode: PlanMode, llm_model: str) -> TaskEvaluationResult
+```
+
+#### EvaluationRunner（评测执行器）
+
+**文件**: `evaluation/runner.py` 中的 `EvaluationRunner` 类
+
+**目的**: 编排多任务×多模式的评测执行流程。
+
+**执行流程**:
+```mermaid
+graph LR
+    A[CLI 参数解析] --> B[加载 BenchmarkTasks]
+    B --> C[循环: mode × task]
+    C --> D[创建 Probe]
+    D --> E[强制 PLAN_MODE]
+    E --> F[Orchestrator.run]
+    F --> G[probe.build_result]
+    G --> C
+    C --> H[aggregate_results]
+    H --> I[render_full_report]
+```
+
+**主要方法签名**:
+```python
+class EvaluationRunner:
+    def __init__(self, llm_client: LLMClient | None = None, tools: list[BaseTool] | None = None)
+    async def evaluate_task(self, task: BenchmarkTask, mode: PlanMode) -> TaskEvaluationResult
+    async def evaluate_mode(self, mode: PlanMode, tasks: list[BenchmarkTask] | None = None) -> AggregatedMetrics
+    async def evaluate_all_modes(self, tasks: list[BenchmarkTask] | None = None, modes: list[PlanMode] | None = None) -> dict[PlanMode, AggregatedMetrics]
+```
+
+#### 指标模型（metrics.py）
+
+**文件**: `evaluation/metrics.py` (479行)
+
+**目的**: Pydantic 数据模型和四维度加权评分函数。
+
+**数据模型**:
+
+| 模型 | 行数 | 用途 |
+|------|------|------|
+| `PlanMode` | - | 枚举：simple / complex / emergent |
+| `TaskDifficulty` | - | 枚举：easy / medium / hard |
+| `FailureCategory` | - | 12 种失败类别枚举 |
+| `PlanningMetrics` | ~15 行 | 规划阶段指标（分类准确性、步骤覆盖、计划有效性） |
+| `ExecutionMetrics` | ~15 行 | 执行阶段指标（任务成功、步骤成功率、工具准确率） |
+| `EfficiencyMetrics` | ~8 行 | 效率指标（Token 消耗、重规划次数、轨迹效率） |
+| `ReflectionMetrics` | ~10 行 | 反思指标（反思准确性、FP/FN、观测标记） |
+| `TaskEvaluationResult` | ~20 行 | 单次任务完整评测结果 |
+| `AggregatedMetrics` | ~25 行 | 多任务聚合指标 |
+
+**评分函数**:
+
+| 函数 | 权重分配 |
+|------|---------|
+| `compute_planning_score()` | 自动模式：40%分类 + 30%结构 + 20%覆盖 + 10%速度；强制模式：50%结构 + 35%覆盖 + 15%速度 |
+| `compute_execution_score()` | 50%任务成功 + 30%步骤成功率 + 20%工具准确率 |
+| `compute_efficiency_score()` | 40%轨迹效率 + 30%Token效率 + 20%时间效率 + 10%重规划惩罚 |
+| `compute_overall_score()` | 30%规划 + 40%执行 + 20%效率 + 10%反思 |
+| `aggregate_results()` | 多任务聚合，含 reflection_coverage_rate 过滤 |
+
+#### 基准任务（benchmark.py）
+
+**文件**: `evaluation/benchmark.py` (310行)
+
+**目的**: 12 个预定义基准任务，覆盖 3 个难度等级和 4 种工具组合。
+
+**任务分布**:
+
+| 难度 | 数量 | 期望分类 | 工具组合 |
+|------|------|---------|---------|
+| easy | 4 | simple | web_search / execute_python / file_ops / shell（各 1 个单工具任务） |
+| medium | 4 | complex | web_search+execute_python（2 个）、file_ops+execute_python（2 个） |
+| hard | 4 | complex/emergent | web_search+execute_python+file_ops / web_search+execute_python+shell / execute_python+web_search / execute_python+file_ops |
+
+**Ground Truth 验证**:
+- `must_include_keywords`: 答案必须包含的关键词（不区分大小写）
+- `must_not_include`: 答案不得包含的禁止关键词
+- `expected_subtasks`: 步骤覆盖率计算（支持中英文分割）
+
+#### 报告生成（report.py）
+
+**文件**: `evaluation/report.py` (308行)
+
+**目的**: Rich 控制台对比报告 + JSON 结构化导出。
+
+**输出组成**:
+1. **对比总表**（`render_comparison_table`）— 三模式并排，最优值标绿
+2. **各难度成功率表**
+3. **失败分布表** — 按 FailureCategory 统计
+4. **各模式详细报告**（`render_mode_detail`）— 每任务粒度
+5. **树形总结**（`render_summary_tree`）— 模式级摘要
+6. **JSON 导出**（`export_json`）— 含 per_task_results 的完整数据
+
+#### 评测 CLI（eval_cli.py）
+
+**文件**: `evaluation/eval_cli.py` (185行)
+
+**目的**: 评测命令行入口，支持多维度筛选和输出控制。
+
+**使用方式**:
+```bash
+python -m evaluation.eval_cli [OPTIONS]
+  --modes simple complex          # 指定规划模式
+  --difficulty easy               # 按难度筛选
+  --tasks easy_001 easy_002       # 指定任务 ID
+  --output results.json           # 导出 JSON
+  --dry-run                       # 展示任务但不执行
+  --verbose                       # 调试日志
+```
+
+
 ## 数据流
 
 ### 完整任务执行流程
@@ -1092,6 +1254,11 @@ def on_event(event_type: str, data: Any):
 | `memory/long_term.py` | 141 | 长期记忆 | `LongTermMemory.search()` |
 | `context/manager.py` | 186 | 上下文管理 | `ContextManager.compress_if_needed()` |
 | `knowledge/retriever.py` | 228 | 知识检索器 | `KnowledgeRetriever.search()` |
+| `evaluation/metrics.py` | 479 | 评测指标模型 + 评分函数 | `compute_overall_score()`, `aggregate_results()` |
+| `evaluation/benchmark.py` | 310 | 12 个基准任务定义 | `get_benchmark_tasks()` |
+| `evaluation/runner.py` | 568 | 事件探针 + 评测执行器 | `EvaluationProbe`, `EvaluationRunner` |
+| `evaluation/report.py` | 308 | Rich 报告 + JSON 导出 | `render_comparison_table()`, `export_json()` |
+| `evaluation/eval_cli.py` | 185 | 评测 CLI 入口 | `main()` |
 | `schema.py` | 612 | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
 | `config.py` | 88 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
 | `main.py` | 515 | CLI 入口 | `main()` |
@@ -1106,6 +1273,7 @@ def on_event(event_type: str, data: Any):
 | v4 | `agents/planner.py` | 两阶段混合分类器 |
 | v5 | `agents/emergent_planner.py` | 隐式规划 + TODO 列表管理 |
 | v6 | `llm/client.py`, `agents/executor.py`, `agents/emergent_planner.py`, `tools/shell_tool.py`, `react/engine.py` | LLM 重试 + ReActEngine + ShellTool + 统一 ReAct 引擎 |
+| v6 | `evaluation/metrics.py`, `evaluation/benchmark.py`, `evaluation/runner.py`, `evaluation/report.py`, `evaluation/eval_cli.py`, `tests/test_evaluation.py` | 评测模块：零侵入事件探针 + 四维度加权评分 + 12 基准任务 + 三模式对比报告 |
 
 ### 测试文件
 
