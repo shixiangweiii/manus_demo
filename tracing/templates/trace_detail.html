@@ -236,6 +236,87 @@
         word-break: break-all;
     }
 
+    /* Long text attribute block */
+    .long-attr-block {
+        margin-bottom: 12px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        overflow: hidden;
+    }
+
+    .long-attr-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 12px;
+        background: var(--bg-secondary);
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .long-attr-header:hover {
+        background: var(--bg-hover);
+    }
+
+    .long-attr-key {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 500;
+    }
+
+    .long-attr-badge {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .long-attr-chars {
+        font-size: 10px;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+    }
+
+    .long-attr-toggle {
+        font-size: 10px;
+        color: var(--text-muted);
+    }
+
+    .btn-copy-small {
+        font-size: 10px;
+        padding: 1px 6px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--bg-card);
+        color: var(--text-muted);
+        cursor: pointer;
+        font-family: var(--font-mono);
+    }
+
+    .btn-copy-small:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
+    }
+
+    .long-attr-pre {
+        background: var(--bg-secondary);
+        padding: 12px;
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 480px;
+        overflow-y: auto;
+        display: none;
+        border-top: 1px solid var(--border);
+    }
+
+    .long-attr-pre.expanded {
+        display: block;
+    }
+
     /* Events list */
     .event-item {
         padding: 8px 12px;
@@ -305,7 +386,7 @@
 {% block extra_js %}
 <script>
 (function() {
-    // Span tree data from server (tojson auto-escapes </script> to prevent XSS)
+    // Span tree data from server (tojson auto-escapes closing-script tags to prevent XSS)
     const treeData = {{ tree | tojson }};
 
     const container = document.getElementById('tree-container');
@@ -431,20 +512,61 @@
         html += '</table>';
         html += '</div>';
 
-        // Attributes section
+        // Attributes section: separate short attrs (table) from long text (collapsible blocks)
         const attrs = node.attributes || {};
-        const attrKeys = Object.keys(attrs);
-        if (attrKeys.length > 0) {
+        const attrKeys = Object.keys(attrs).sort();
+        const LONG_THRESHOLD = 150;
+        const shortKeys = [];
+        const longKeys = [];
+        for (const key of attrKeys) {
+            let val = attrs[key];
+            if (typeof val === 'object') val = JSON.stringify(val, null, 2);
+            const s = String(val);
+            if (s.includes('\n') && s.length > LONG_THRESHOLD) {
+                longKeys.push(key);
+            } else {
+                shortKeys.push(key);
+            }
+        }
+
+        // Short attrs in table
+        if (shortKeys.length > 0 || longKeys.length === 0) {
             html += '<div class="detail-section">';
             html += '<div class="detail-section-title">Attributes (' + attrKeys.length + ')</div>';
-            html += '<table class="attr-table">';
-            for (const key of attrKeys.sort()) {
-                let val = attrs[key];
-                if (typeof val === 'object') val = JSON.stringify(val, null, 2);
-                html += attrRow(key, String(val));
+            if (shortKeys.length > 0) {
+                html += '<table class="attr-table">';
+                for (const key of shortKeys) {
+                    let val = attrs[key];
+                    if (typeof val === 'object') val = JSON.stringify(val, null, 2);
+                    html += attrRow(key, String(val));
+                }
+                html += '</table>';
             }
-            html += '</table>';
+            if (shortKeys.length === 0 && longKeys.length > 0) {
+                html += '<div style="color: var(--text-muted); font-size: 12px;">All attributes are long-text (see below).</div>';
+            }
             html += '</div>';
+        }
+
+        // Long text attrs as collapsible blocks
+        for (const key of longKeys) {
+            let val = String(attrs[key]);
+            const blockId = 'long-' + key.replace(/[^a-zA-Z0-9]/g, '_');
+            const lines = val.split('\n').length;
+
+            html += '<div class="detail-section">';
+            html += '<div class="long-attr-block">';
+            html += '<div class="long-attr-header" onclick="this.nextElementSibling.classList.toggle(\'expanded\');';
+            html += '  var t=this.querySelector(\'.long-attr-toggle\');';
+            html += '  t.textContent=t.textContent===\'▶ Expand\'?\'▼ Collapse\':\'▶ Expand\';">';
+            html += '<span class="long-attr-key">' + escapeHtml(key) + '</span>';
+            html += '<span class="long-attr-badge">';
+            html += '<span class="long-attr-chars">' + val.length + ' chars / ' + lines + ' lines</span>';
+            html += '<button class="btn-copy-small" onclick="event.stopPropagation();copyBlock(\'' + blockId + '\',this)">Copy</button>';
+            html += '<span class="long-attr-toggle">▶ Expand</span>';
+            html += '</span></div>';
+            html += '<pre class="long-attr-pre" id="' + blockId + '">' + escapeHtml(val) + '</pre>';
+            html += '</div></div>';
         }
 
         // Events section
@@ -506,6 +628,16 @@
 
     // Initialize
     renderTree();
+
+    // Global helper: copy long-attr content
+    window.copyBlock = function(id, btn) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        navigator.clipboard.writeText(el.textContent).then(function() {
+            btn.textContent = 'Copied';
+            setTimeout(function() { btn.textContent = 'Copy'; }, 1200);
+        });
+    };
 })();
 </script>
 {% endblock %}

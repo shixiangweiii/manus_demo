@@ -351,16 +351,16 @@ class LLMClient:
             if max_tokens is not None:
                 span.set_attribute("gen_ai.request.max_tokens", max_tokens)
 
-            # Optionally record prompt content
+            # Optionally record prompt content (full, no truncation for debuggability)
             if config.TRACING_LOG_PROMPTS and messages:
+                parts = []
                 for msg in messages:
-                    if msg.get("role") == "user":
-                        content = msg.get("content", "")
-                        max_len = config.TRACING_MAX_ATTRIBUTE_LENGTH
-                        if len(content) > max_len:
-                            content = content[:max_len] + "...[truncated]"
-                        span.set_attribute("gen_ai.prompt.content", content)
-                        break
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if content:
+                        parts.append(f"[{role}]\n{content}")
+                if parts:
+                    span.set_attribute("gen_ai.prompt.content", "\n\n".join(parts))
 
             import time
             return {"span": span, "token": token, "start_time": time.perf_counter()}

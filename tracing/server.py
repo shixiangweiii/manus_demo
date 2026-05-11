@@ -220,8 +220,7 @@ async def index():
 async def trace_list_page(request: Request):
     """Render the trace list page."""
     traces = _load_all_traces()
-    return templates.TemplateResponse("trace_list.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "trace_list.html", {
         "traces": traces,
         "traces_dir": str(_get_traces_dir()),
     })
@@ -238,8 +237,7 @@ async def trace_detail_page(request: Request, file_id: str):
     tree = _build_span_tree(spans)
     trace_id = data.get("trace_id", file_id)
 
-    return templates.TemplateResponse("trace_detail.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "trace_detail.html", {
         "trace_id": trace_id,
         "file_id": file_id,
         "exported_at": data.get("exported_at", "N/A"),
