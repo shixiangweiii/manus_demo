@@ -1,0 +1,511 @@
+{% extends "base.html" %}
+
+{% block title %}Trace {{ trace_id[:16] }}…{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* ============================================================
+     * Trace Detail - Tree View Styles
+     * ============================================================ */
+
+    /* Breadcrumb override */
+    .trace-header {
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+    }
+
+    .trace-meta {
+        display: flex;
+        gap: 24px;
+        font-size: 13px;
+        color: var(--text-muted);
+    }
+
+    .trace-meta-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    /* Tree container */
+    .tree-container {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        overflow-x: auto;
+    }
+
+    /* Tree node */
+    .tree-node {
+        position: relative;
+        margin-left: 0;
+    }
+
+    .tree-node .tree-node {
+        margin-left: 24px;
+        border-left: 1px solid var(--border);
+        padding-left: 0;
+    }
+
+    /* Node row */
+    .node-row {
+        display: flex;
+        align-items: center;
+        padding: 6px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background 0.15s;
+        gap: 8px;
+        position: relative;
+    }
+
+    .node-row:hover {
+        background: var(--bg-hover);
+    }
+
+    .node-row.selected {
+        background: var(--bg-hover);
+        outline: 1px solid var(--accent);
+    }
+
+    /* Tree connector line */
+    .tree-node .tree-node > .node-row::before {
+        content: '';
+        position: absolute;
+        left: -12px;
+        top: 50%;
+        width: 12px;
+        height: 1px;
+        background: var(--border);
+    }
+
+    /* Expand/collapse toggle */
+    .node-toggle {
+        width: 16px;
+        height: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        color: var(--text-muted);
+        flex-shrink: 0;
+        cursor: pointer;
+        border-radius: 3px;
+        transition: all 0.15s;
+    }
+
+    .node-toggle:hover {
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+    }
+
+    .node-toggle.expanded {
+        transform: rotate(90deg);
+    }
+
+    .node-toggle.leaf {
+        visibility: hidden;
+    }
+
+    /* Node icon */
+    .node-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+    }
+
+    /* Node name */
+    .node-name {
+        font-family: var(--font-mono);
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--text-primary);
+    }
+
+    /* Node duration */
+    .node-duration {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-left: auto;
+        flex-shrink: 0;
+    }
+
+    /* Node status */
+    .node-status {
+        font-size: 12px;
+        flex-shrink: 0;
+    }
+
+    /* Children container */
+    .node-children {
+        overflow: hidden;
+        transition: max-height 0.2s ease-out;
+    }
+
+    .node-children.collapsed {
+        max-height: 0 !important;
+    }
+
+    /* Detail panel */
+    .detail-panel {
+        margin-top: 24px;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+        display: none;
+    }
+
+    .detail-panel.visible {
+        display: block;
+    }
+
+    .detail-panel-header {
+        padding: 12px 16px;
+        background: var(--bg-secondary);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .detail-panel-header .node-icon {
+        font-size: 16px;
+    }
+
+    .detail-panel-header .node-name {
+        font-size: 14px;
+    }
+
+    .detail-panel-body {
+        padding: 16px;
+    }
+
+    .detail-section {
+        margin-bottom: 16px;
+    }
+
+    .detail-section:last-child {
+        margin-bottom: 0;
+    }
+
+    .detail-section-title {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-muted);
+        margin-bottom: 8px;
+    }
+
+    /* Attribute table */
+    .attr-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .attr-table tr {
+        border-bottom: 1px solid var(--border);
+    }
+
+    .attr-table tr:last-child {
+        border-bottom: none;
+    }
+
+    .attr-table td {
+        padding: 6px 0;
+        font-size: 13px;
+        vertical-align: top;
+    }
+
+    .attr-key {
+        font-family: var(--font-mono);
+        color: var(--accent);
+        white-space: nowrap;
+        padding-right: 16px;
+        width: 1%;
+    }
+
+    .attr-value {
+        font-family: var(--font-mono);
+        color: var(--text-primary);
+        word-break: break-all;
+    }
+
+    /* Events list */
+    .event-item {
+        padding: 8px 12px;
+        background: var(--bg-secondary);
+        border-radius: 4px;
+        margin-bottom: 6px;
+        font-size: 13px;
+    }
+
+    .event-item:last-child {
+        margin-bottom: 0;
+    }
+
+    .event-name {
+        font-family: var(--font-mono);
+        color: var(--warning);
+        font-weight: 500;
+    }
+
+    .event-time {
+        color: var(--text-muted);
+        font-size: 12px;
+        margin-left: 8px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="/traces">Traces</a>
+    <span>›</span>
+    <span class="mono">{{ trace_id[:16] }}…</span>
+</div>
+
+<div class="trace-header">
+    <h1 class="page-title">Trace Detail</h1>
+    <div class="trace-meta">
+        <div class="trace-meta-item">
+            <span>📊</span>
+            <span>{{ span_count }} spans</span>
+        </div>
+        <div class="trace-meta-item">
+            <span>🕐</span>
+            <span>{{ exported_at }}</span>
+        </div>
+        <div class="trace-meta-item">
+            <span>🆔</span>
+            <span class="mono">{{ trace_id }}</span>
+        </div>
+    </div>
+</div>
+
+<div class="tree-container" id="tree-container">
+    <!-- Tree will be rendered by JavaScript -->
+    <div style="color: var(--text-muted); text-align: center; padding: 32px;">Loading tree</div>
+</div>
+
+<div class="detail-panel" id="detail-panel">
+    <div class="detail-panel-header" id="detail-header">
+        <span class="node-icon" id="detail-icon"></span>
+        <span class="node-name" id="detail-name"></span>
+    </div>
+    <div class="detail-panel-body" id="detail-body"></div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    // Span tree data from server (tojson auto-escapes </script> to prevent XSS)
+    const treeData = {{ tree | tojson }};
+
+    const container = document.getElementById('tree-container');
+    const detailPanel = document.getElementById('detail-panel');
+    const detailHeader = document.getElementById('detail-header');
+    const detailBody = document.getElementById('detail-body');
+
+    // Format duration
+    function formatDuration(ms) {
+        if (ms == null || ms === 0) return '';
+        if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+        return Math.round(ms) + 'ms';
+    }
+
+    // Format status
+    function formatStatus(status) {
+        if (status === 'OK') return '✅';
+        if (status === 'ERROR') return '❌';
+        return '⚪';
+    }
+
+    // Render a single tree node recursively
+    function renderNode(node, depth) {
+        const div = document.createElement('div');
+        div.className = 'tree-node';
+
+        const hasChildren = node.children && node.children.length > 0;
+
+        // Node row
+        const row = document.createElement('div');
+        row.className = 'node-row';
+        row.dataset.spanId = node.span_id || '';
+
+        // Toggle
+        const toggle = document.createElement('span');
+        toggle.className = 'node-toggle' + (hasChildren ? ' expanded' : ' leaf');
+        toggle.textContent = '▶';
+        row.appendChild(toggle);
+
+        // Icon
+        const icon = document.createElement('span');
+        icon.className = 'node-icon';
+        icon.textContent = node.icon || '📌';
+        row.appendChild(icon);
+
+        // Name
+        const name = document.createElement('span');
+        name.className = 'node-name';
+        name.textContent = node.name || 'unknown';
+        row.appendChild(name);
+
+        // Duration
+        const duration = document.createElement('span');
+        duration.className = 'node-duration';
+        duration.textContent = formatDuration(node.duration_ms);
+        row.appendChild(duration);
+
+        // Status
+        const status = document.createElement('span');
+        status.className = 'node-status';
+        status.textContent = formatStatus(node.status);
+        row.appendChild(status);
+
+        div.appendChild(row);
+
+        // Children container
+        if (hasChildren) {
+            const childrenDiv = document.createElement('div');
+            childrenDiv.className = 'node-children';
+
+            for (const child of node.children) {
+                childrenDiv.appendChild(renderNode(child, depth + 1));
+            }
+
+            div.appendChild(childrenDiv);
+
+            // Toggle click handler
+            toggle.addEventListener('click', function(e) {
+                e.stopPropagation();
+                const isExpanded = toggle.classList.contains('expanded');
+                if (isExpanded) {
+                    toggle.classList.remove('expanded');
+                    childrenDiv.classList.add('collapsed');
+                } else {
+                    toggle.classList.add('expanded');
+                    childrenDiv.classList.remove('collapsed');
+                }
+            });
+        }
+
+        // Row click handler - show detail
+        row.addEventListener('click', function() {
+            showDetail(node);
+            // Highlight selected
+            document.querySelectorAll('.node-row.selected').forEach(el => el.classList.remove('selected'));
+            row.classList.add('selected');
+        });
+
+        return div;
+    }
+
+    // Show span detail panel
+    function showDetail(node) {
+        detailPanel.classList.add('visible');
+
+        // Header
+        document.getElementById('detail-icon').textContent = node.icon || '📌';
+        document.getElementById('detail-name').textContent = node.name || 'unknown';
+
+        // Body
+        let html = '';
+
+        // Basic info section
+        html += '<div class="detail-section">';
+        html += '<div class="detail-section-title">Basic Info</div>';
+        html += '<table class="attr-table">';
+        html += attrRow('span_id', node.span_id || 'N/A');
+        html += attrRow('parent_span_id', node.parent_span_id || '(root)');
+        html += attrRow('status', formatStatus(node.status) + ' ' + (node.status || 'UNSET'));
+        html += attrRow('duration', formatDuration(node.duration_ms) || 'N/A');
+        html += attrRow('start_time', node.start_time || 'N/A');
+        html += attrRow('end_time', node.end_time || 'N/A');
+        html += '</table>';
+        html += '</div>';
+
+        // Attributes section
+        const attrs = node.attributes || {};
+        const attrKeys = Object.keys(attrs);
+        if (attrKeys.length > 0) {
+            html += '<div class="detail-section">';
+            html += '<div class="detail-section-title">Attributes (' + attrKeys.length + ')</div>';
+            html += '<table class="attr-table">';
+            for (const key of attrKeys.sort()) {
+                let val = attrs[key];
+                if (typeof val === 'object') val = JSON.stringify(val, null, 2);
+                html += attrRow(key, String(val));
+            }
+            html += '</table>';
+            html += '</div>';
+        }
+
+        // Events section
+        const events = node.events || [];
+        if (events.length > 0) {
+            html += '<div class="detail-section">';
+            html += '<div class="detail-section-title">Events (' + events.length + ')</div>';
+            for (const evt of events) {
+                html += '<div class="event-item">';
+                html += '<span class="event-name">' + escapeHtml(evt.name || 'event') + '</span>';
+                if (evt.timestamp) {
+                    html += '<span class="event-time">' + escapeHtml(evt.timestamp) + '</span>';
+                }
+                if (evt.attributes && Object.keys(evt.attributes).length > 0) {
+                    html += '<br><span style="color: var(--text-secondary); font-size: 12px;">';
+                    html += escapeHtml(JSON.stringify(evt.attributes));
+                    html += '</span>';
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+
+        detailBody.innerHTML = html;
+    }
+
+    // Helper: render attribute row
+    function attrRow(key, value) {
+        return '<tr><td class="attr-key">' + escapeHtml(key) + '</td><td class="attr-value">' + escapeHtml(value) + '</td></tr>';
+    }
+
+    // Helper: escape HTML
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Render the tree
+    function renderTree() {
+        container.innerHTML = '';
+
+        if (!treeData || treeData.length === 0) {
+            container.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 32px;">No spans found in this trace.</div>';
+            return;
+        }
+
+        for (const root of treeData) {
+            container.appendChild(renderNode(root, 0));
+        }
+
+        // Auto-select root span
+        if (treeData.length > 0) {
+            showDetail(treeData[0]);
+            const firstRow = container.querySelector('.node-row');
+            if (firstRow) firstRow.classList.add('selected');
+        }
+    }
+
+    // Initialize
+    renderTree();
+})();
+</script>
+{% endblock %}

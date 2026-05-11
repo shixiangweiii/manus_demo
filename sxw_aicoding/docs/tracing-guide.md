@@ -94,12 +94,14 @@ TRACING_ENABLED=true
 TRACING_BACKEND=file
 ```
 
-Trace 数据将以 JSON 格式写入 `traces/` 目录：
+Trace 数据将以 JSON 格式写入 `traces/` 目录，每个 Trace 一个文件，文件名以 Trace ID 命名：
 
 ```
 traces/
-└── 5b4de5adb669fe05923ecf33e41e2263_1715414400000.json
+└── 5b4de5adb669fe05923ecf33e41e2263.json
 ```
+
+> **设计说明**：文件名使用稳定的 `{trace_id}.json` 命名，而非带时间戳后缀。这样 `BatchSpanProcessor` 多次导出同一 Trace 的 Span 时，后续批次会自动**追加合并**到同一文件中，确保一次完整任务执行的所有 Span 始终聚合在同一个 JSON 文件内，便于离线分析。
 
 ### 2.4 Rich 格式输出（最佳开发体验）
 
@@ -144,7 +146,43 @@ TRACING_ENDPOINT=http://localhost:6006
 
 > Phoenix 后端会自动在 endpoint 后追加 `/v1/traces`。
 
-### 2.6 关闭 Tracing
+### 2.7 Web 可视化查看器（推荐查看历史 Trace）
+
+当你使用 `file` 后端生成了 trace 文件后，可以通过内置的 Web Viewer 在浏览器中以树形结构查看：
+
+```bash
+# 启动 Trace Web Viewer（默认端口 8600，自动打开浏览器）
+python -m tracing
+
+# 自定义端口和目录
+python -m tracing --port 9000 --dir ./my_traces
+
+# 不自动打开浏览器
+python -m tracing --no-open
+```
+
+浏览器打开后：
+- **列表页** (`/traces`)：展示所有已保存的 Trace 文件（状态、根 Span 名称、Span 数量、耗时）
+- **详情页** (`/traces/{trace_id}`)：以可折叠树形结构展示 Span 层级，点击节点查看详细属性
+
+```
+http://localhost:8600/traces
+├── Trace 列表（按时间倒序）
+│   └── 点击某行 → 进入详情页
+└── Trace 详情
+    ├── 🔍 task_execution (1.2s) ✅
+    │   ├── 📋 planner.classify_task (200ms) ✅
+    │   │   └── 🤖 llm.chat (140ms) ✅
+    │   ├── ⚡ execution.simple (640ms) ✅
+    │   │   ├── 🤖 llm.chat_with_tools (330ms) ✅
+    │   │   └── 🔧 tool.execute.execute_python (270ms) ✅
+    │   └── 🪞 reflector.reflect (190ms) ✅
+    └── 属性面板（点击 Span 展开）
+```
+
+> **依赖**：`pip install fastapi uvicorn jinja2`（已包含在 requirements.txt 中）
+
+### 2.8 关闭 Tracing
 
 ```bash
 TRACING_ENABLED=false
@@ -164,7 +202,7 @@ TRACING_ENABLED=false
 | `TRACING_BACKEND` | `console` | 导出后端：`console` / `file` / `rich` / `otlp` / `phoenix` |
 | `TRACING_ENDPOINT` | `http://localhost:4318` | OTLP HTTP 端点地址 |
 | `TRACING_SERVICE_NAME` | `manus-demo` | 服务标识名称（在后端 UI 中区分不同服务） |
-| `TRACING_SAMPLE_RATE` | `1.0` | 采样率，范围 `0.0` - `1.0`。`1.0` = 全量采集 |
+| `TRACING_SAMPLE_RATE` | `1.0` | 采样率，范围 `0.0` - `1.0`（超出范围自动 clamp）。`1.0` = 全量采集 |
 | `TRACING_LOG_PROMPTS` | `false` | 是否记录完整的 prompt / response 内容 |
 | `TRACING_MAX_ATTR_LENGTH` | `1000` | 属性值最大字符长度（超出部分截断） |
 
@@ -208,15 +246,16 @@ TRACING_MAX_ATTR_LENGTH=500
 
 - **适用场景**：开发调试、离线分析、CI/CD 中采集 Trace 数据
 - **处理器**：`BatchSpanProcessor`（异步批量导出）
-- **输出目录**：`traces/`（相对于项目根目录）
-- **文件命名**：`{trace_id}_{timestamp_ms}.json`
+- **输出目录**：`traces/`（相对于项目根目录，可通过 `TRACING_FILE_OUTPUT_DIR` 配置）
+- **文件命名**：`{trace_id}.json`（稳定命名，多 batch 自动合并到同一文件）
+- **合并策略**：首次写入创建文件并写入 spans 数组；后续 batch 读取已有内容并追加新 span，去重后重新写入
 
 **JSON 文件结构**：
 
 ```json
 {
   "trace_id": "5b4de5adb669fe05923ecf33e41e2263",
-  "exported_at": "2026-05-11T10:30:00.000Z",
+  "exported_at": "2026-05-11T10:30:01.200Z",
   "spans": [
     {
       "span_id": "a1b2c3d4e5f60718",
@@ -226,7 +265,7 @@ TRACING_MAX_ATTR_LENGTH=500
       "end_time": "2026-05-11T10:30:01.200Z",
       "duration_ms": 1200.0,
       "attributes": {
-        "task.input": "Write a Python function...",
+        "task.input": "Write a Python function that returns hello world",
         "task.complexity": "simple",
         "task.success": true
       },
@@ -251,6 +290,8 @@ TRACING_MAX_ATTR_LENGTH=500
 }
 ```
 
+> **注意**：由于使用 `BatchSpanProcessor` 异步批量导出，短时任务可能在程序退出前尚未触发导出。请确保程序正常退出（会自动调用 `shutdown_tracing()` 刷新缓冲区）。如手动终止，可在退出前调用 `shutdown_tracing()`。
+
 ### 4.3 rich — Rich 控制台
 
 使用自定义的 `RichConsoleExporter`，以带图标和颜色的格式渲染 Span。
@@ -272,7 +313,7 @@ TRACING_MAX_ATTR_LENGTH=500
 | reflector | 🪞 | 反思 |
 | memory | 🧠 | 记忆操作 |
 | react | 💭 | ReAct 循环 |
-| todo | 📝 | 涌现规划 TODO |
+| todo | 📝 | 涌现规划任务项 |
 
 ### 4.4 otlp — OTLP 标准协议
 
@@ -297,6 +338,47 @@ python -m phoenix.server.main serve
 # Phoenix UI: http://localhost:6006
 ```
 
+### 4.6 web — 内置 Web Viewer
+
+使用自定义的 FastAPI 应用，提供浏览器端的树形 Trace 可视化界面。
+
+- **适用场景**：查看本地 `file` 后端保存的历史 Trace，无需安装外部可观测平台
+- **启动方式**：`python -m tracing`（独立 CLI 命令，不依赖 TRACING_BACKEND 配置）
+- **额外依赖**：`pip install fastapi uvicorn jinja2`
+
+**功能特性**：
+
+| 功能 | 说明 |
+|---|---|
+| Trace 列表页 | 表格展示所有 trace 文件，含状态、根 Span 名称、Span 数量、耗时、文件大小 |
+| Trace 详情页 | 可折叠树形 Span 层级，与 RichConsoleExporter 图标一致 |
+| 属性面板 | 点击 Span 展开完整 attributes 和 events |
+| 暗色主题 | DevTools 风格的暗色界面 |
+| JSON API | `GET /api/traces` 和 `GET /api/traces/{trace_id}` 供程序化访问 |
+
+**CLI 参数**：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--port` / `-p` | `8600` | Web 服务端口 |
+| `--dir` / `-d` | `./traces` | trace JSON 文件目录 |
+| `--host` | `127.0.0.1` | 绑定地址 |
+| `--no-open` | — | 不自动打开浏览器 |
+
+**使用示例**：
+
+```bash
+# 1. 先用 file 后端运行任务生成 trace 文件
+TRACING_ENABLED=true TRACING_BACKEND=file python main.py
+
+# 2. 启动 Web Viewer 查看
+python -m tracing
+
+# 3. 浏览器打开 http://localhost:8600/traces
+```
+
+> **注意**：Web Viewer 是只读的，它直接读取 `traces/` 目录中的 JSON 文件。你可以在 agent 运行的同时启动 Viewer，新产生的 trace 文件刷新页面即可看到。
+
 ---
 
 ## 5. 模块结构与文件说明
@@ -304,23 +386,32 @@ python -m phoenix.server.main serve
 ```
 tracing/
 ├── __init__.py      # 模块入口：条件导入 + No-op Stubs
+├── __main__.py      # Web Viewer CLI 入口（python -m tracing）
 ├── config.py        # 配置集中管理（从 root config.py 读取）
 ├── spans.py         # Span 名称 / Attribute 键名 / Event 名称常量
 ├── provider.py      # TracerProvider 工厂（Resource + Exporter + Sampler）
 ├── exporters.py     # 自定义导出器（FileSpanExporter + RichConsoleExporter）
 ├── decorators.py    # 声明式装饰器（@traced / @traced_llm_call / @traced_tool_call）
-└── bridge.py        # 事件桥接器（_emit 事件 → OTel Span）
+├── bridge.py        # 事件桥接器（_emit 事件 → OTel Span）
+├── server.py        # Web Viewer FastAPI 应用
+└── templates/       # Web Viewer HTML 模板
+    ├── base.html          # 基础模板（暗色主题）
+    ├── trace_list.html    # Trace 列表页
+    └── trace_detail.html  # Trace 详情页（树形视图）
 ```
 
 | 文件 | 职责 | 关键类/函数 |
 |---|---|---|
 | `__init__.py` | 模块门面，`TRACING_ENABLED=false` 时提供 no-op 桩 | `init_tracing()`, `TracingBridge`, `traced()` |
+| `__main__.py` | Web Viewer CLI 入口 | `main()` — argparse + uvicorn 启动 |
 | `config.py` | 集中管理所有配置常量 | `ENABLED`, `BACKEND`, `ENDPOINT`, `SAMPLE_RATE` |
 | `spans.py` | 语义常量，遵循 OTel GenAI SemConv | `SpanName`, `AttrKey`, `EventName` |
 | `provider.py` | 初始化 OTel SDK | `init_tracing()`, `get_tracer()`, `shutdown_tracing()` |
 | `exporters.py` | File + Rich 导出器 | `FileSpanExporter`, `RichConsoleExporter` |
 | `decorators.py` | 方法级声明式埋点 | `@traced()`, `@traced_llm_call`, `@traced_tool_call` |
 | `bridge.py` | 事件流转 Span 桥接 | `TracingBridge.on_event()` |
+| `server.py` | Web Viewer 服务 | `app` (FastAPI), `_build_span_tree()` |
+| `templates/` | Jinja2 模板 | 列表页 + 详情页（树形展示） |
 
 ---
 
@@ -360,7 +451,7 @@ Trace: task_execution/{task_id}
 | Attribute | 类型 | 示例 |
 |---|---|---|
 | `task.id` | string | `"abc123"` |
-| `task.input` | string | `"Write a Python function..."` |
+| `task.input` | string | `"Write a Python function that returns hello world"` |
 | `task.complexity` | string | `"simple"` / `"complex"` |
 | `task.success` | bool | `true` |
 
@@ -442,7 +533,7 @@ def sync_operation(x: int) -> int:
 ```python
 @traced("data.transform", attributes={"data.format": "json", "data.version": "2.0"})
 async def transform(data: dict) -> dict:
-    ...
+    return {"normalized": True, "payload": data}
 ```
 
 ### 7.2 `@traced_llm_call` — LLM 调用专用
@@ -455,7 +546,11 @@ class MyLLMWrapper:
 
     @traced_llm_call
     async def chat(self, messages, temperature=0.7, max_tokens=4096):
-        ...
+        return {
+            "model": self.model,
+            "content": "hello from traced llm call",
+            "usage": {"input_tokens": 12, "output_tokens": 6},
+        }
 ```
 
 自动记录：
@@ -474,7 +569,7 @@ class MyTool:
 
     @traced_tool_call
     async def execute(self, query: str) -> str:
-        ...
+        return f"processed query: {query}"
 ```
 
 自动记录：
@@ -484,7 +579,7 @@ class MyTool:
 
 ### 7.4 `TRACING_ENABLED=false` 时的行为
 
-当 Tracing 关闭时，所有装饰器退化为 **透传（pass-through）**，不创建 Span、不记录属性、不产生任何性能开销：
+当 Tracing 关闭时，所有装饰器退化为 **透传模式**，不创建 Span、不记录属性、不产生任何性能开销：
 
 ```python
 # TRACING_ENABLED=false 时，traced 等价于：
@@ -520,14 +615,14 @@ Bridge 将现有事件流自动转换为 Span：
 | 事件名 | 生成的 Span | 说明 |
 |---|---|---|
 | `task_start` | `task_execution`（根 Span） | 任务开始 |
-| `phase: "Gathering context..."` | `orchestrator.gather_context` | 上下文收集阶段 |
-| `phase: "Classifying task..."` | `planner.classify_task` | 任务分类阶段 |
-| `phase: "Planning (v2 ..."` | `planner.create_dag` | DAG 规划 |
-| `phase: "Planning (v1 ..."` | `planner.create_plan` | 简单规划 |
-| `phase: "Planning (v5 ..."` | `planner.create_todo_list` | 涌现规划 |
-| `phase: "Executing DAG..."` | `execution.dag` | DAG 执行 |
-| `phase: "Executing simple..."` | `execution.simple` | 简单执行 |
-| `phase: "Reflecting..."` | `reflector.reflect` | 反思阶段 |
+| `phase: "Gathering context"` | `orchestrator.gather_context` | 上下文收集阶段 |
+| `phase: "Classifying task complexity"` | `planner.classify_task` | 任务分类阶段 |
+| `phase: "Planning (v2 hierarchical DAG)"` | `planner.create_dag` | DAG 规划 |
+| `phase: "Planning (v1 simple flat plan)"` | `planner.create_plan` | 简单规划 |
+| `phase: "Planning (v5 emergent via task list)"` | `planner.create_todo_list` | 涌现规划 |
+| `phase: "Executing DAG (attempt 1)"` | `execution.dag` | DAG 执行 |
+| `phase: "Executing simple plan"` | `execution.simple` | 简单执行 |
+| `phase: "Reflecting on results"` | `reflector.reflect` | 反思阶段 |
 | `node_running` | `node.execute.{id}` | 节点开始执行 |
 | `node_complete` | — (结束 Span) | 节点执行完成 |
 | `reflection` | 事件附加到当前 Span | 反思结果 |
@@ -554,9 +649,11 @@ multicast = OrchestratorAgent._make_multicast(
 `BaseTool` 提供 `traced_execute()` 方法作为带 tracing 的执行入口：
 
 ```python
-# 所有执行器（ExecutorAgent / ReActEngine / EmergentPlannerAgent）
-# 使用 traced_execute 而非 execute：
-result = await tool.traced_execute(**func_args)
+async def run_tool_with_tracing(tool, func_args: dict):
+    # 所有执行器（ExecutorAgent / ReActEngine / EmergentPlannerAgent）
+    # 使用 traced_execute 而非 execute：
+    result = await tool.traced_execute(**func_args)
+    return result
 
 # traced_execute 内部逻辑：
 # 1. TRACING_ENABLED=false → 直接调用 execute()
@@ -773,13 +870,32 @@ open http://localhost:6006
 ### 12.2 File 后端没有生成文件
 
 **可能原因**：
-- `BatchSpanProcessor` 是异步批量导出，短任务可能未触发导出
-- 解决：确保程序正常退出（触发 `shutdown_tracing()` 刷新缓冲区）
+- `BatchSpanProcessor` 是异步批量导出（默认每 5 秒或缓冲区满 256 个 span 触发），短任务可能在退出前未触发导出
+- 解决：确保程序正常退出（`main.py` 末尾会自动调用 `shutdown_tracing()` 刷新缓冲区）
+- 如果手动终止了进程，缓冲区中未导出的 span 会丢失
 - 或在代码末尾手动调用：
   ```python
   from tracing import shutdown_tracing
   shutdown_tracing()
   ```
+
+### 12.2.1 File 后端文件内容不完整
+
+**可能原因**：
+- 任务执行时间较长，`BatchSpanProcessor` 可能会分多个 batch 导出同一 Trace 的 Span
+- 文件命名为 `{trace_id}.json`，后续 batch 会自动读取已有文件并追加新 span
+- 如果在导出期间程序异常终止，可能只有部分 span 被写入
+
+**验证方法**：
+```bash
+# 检查 trace 文件中 span 数量是否与预期一致
+python3 -c "
+import json
+data = json.load(open('traces/YOUR_TRACE_ID.json'))
+print(f'Span count: {data[\"span_count\"]}')
+print(f'Actual spans: {len(data[\"spans\"])}')
+"
+```
 
 ### 12.3 OTLP 连接失败
 
@@ -814,7 +930,7 @@ pip install rich
 ### 12.6 属性值被截断
 
 ```json
-{"tool.parameters": "{\"query\": \"very long query......[truncated]"}
+{"tool.parameters": "{\"query\": \"very long query content [truncated]"}
 ```
 
 这是预期行为。调整 `TRACING_MAX_ATTR_LENGTH` 以增大截断长度：
@@ -854,16 +970,16 @@ Tracing 和评测（Evaluation）是两个互补的可观察性模块：
 class MyCustomExporter(SpanExporter):
     def export(self, spans):
         for span in spans:
-            # 你的导出逻辑
-            ...
+            span_name = getattr(span, "name", "unknown")
+            print(f"export span: {span_name}")
         return SpanExportResult.SUCCESS
 
 # tracing/provider.py
 def _create_exporter(backend):
-    ...
-    elif backend == "my_custom":
+    if backend == "my_custom":
         from tracing.exporters import MyCustomExporter
         return MyCustomExporter()
+    return ConsoleSpanExporter()
 ```
 
 ### 14.2 添加新的事件处理
@@ -875,7 +991,7 @@ def _create_exporter(backend):
 
 ```python
 _EVENT_HANDLERS = {
-    ...
+    "task_start": "_on_task_start",
     "my_new_event": "_on_my_new_event",
 }
 
@@ -890,11 +1006,11 @@ def _on_my_new_event(self, data):
 
 ```python
 class SpanName:
-    ...
+    TASK_EXECUTION = "task_execution"
     MY_NEW_OPERATION = "my_module.new_operation"
 
 class AttrKey:
-    ...
+    TASK_ID = "task.id"
     MY_NEW_ATTR = "my_module.new_attribute"
 ```
 
@@ -909,11 +1025,13 @@ class MyNewTool(BaseTool):
         return "my_new_tool"
 
     async def execute(self, **kwargs) -> str:
-        # 你的工具逻辑
-        return "result"
+        value = kwargs.get("param", "default")
+        return f"result: {value}"
 
-# 执行器调用 traced_execute 即可自动追踪
-result = await tool.traced_execute(param="value")
+async def run_new_tool(tool: MyNewTool) -> str:
+    # 执行器调用 traced_execute 即可自动追踪
+    result = await tool.traced_execute(param="value")
+    return result
 ```
 
 ---

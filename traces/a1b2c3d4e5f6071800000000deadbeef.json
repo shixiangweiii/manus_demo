@@ -1,0 +1,119 @@
+{
+  "trace_id": "a1b2c3d4e5f6071800000000deadbeef",
+  "exported_at": "2026-05-11T10:30:01.000Z",
+  "spans": [
+    {
+      "span_id": "span_root_001",
+      "parent_span_id": null,
+      "name": "task_execution",
+      "start_time": "2026-05-11T10:30:00.000Z",
+      "end_time": "2026-05-11T10:30:01.200Z",
+      "duration_ms": 1200.0,
+      "attributes": {
+        "task.input": "Write a hello world function",
+        "task.complexity": "simple",
+        "task.success": true
+      },
+      "events": [],
+      "status": "OK"
+    },
+    {
+      "span_id": "span_classify_002",
+      "parent_span_id": "span_root_001",
+      "name": "planner.classify_task",
+      "start_time": "2026-05-11T10:30:00.050Z",
+      "end_time": "2026-05-11T10:30:00.250Z",
+      "duration_ms": 200.0,
+      "attributes": {
+        "task.complexity": "simple",
+        "latency_ms": 200.0
+      },
+      "events": [],
+      "status": "OK"
+    },
+    {
+      "span_id": "span_llm_003",
+      "parent_span_id": "span_classify_002",
+      "name": "llm.chat",
+      "start_time": "2026-05-11T10:30:00.100Z",
+      "end_time": "2026-05-11T10:30:00.240Z",
+      "duration_ms": 140.0,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "deepseek-chat",
+        "gen_ai.usage.total_tokens": 512
+      },
+      "events": [],
+      "status": "OK"
+    },
+    {
+      "span_id": "span_exec_004",
+      "parent_span_id": "span_root_001",
+      "name": "execution.simple",
+      "start_time": "2026-05-11T10:30:00.260Z",
+      "end_time": "2026-05-11T10:30:00.900Z",
+      "duration_ms": 640.0,
+      "attributes": {},
+      "events": [],
+      "status": "OK"
+    },
+    {
+      "span_id": "span_llm_tools_005",
+      "parent_span_id": "span_exec_004",
+      "name": "llm.chat_with_tools",
+      "start_time": "2026-05-11T10:30:00.270Z",
+      "end_time": "2026-05-11T10:30:00.600Z",
+      "duration_ms": 330.0,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "deepseek-chat",
+        "gen_ai.usage.total_tokens": 1024
+      },
+      "events": [],
+      "status": "OK"
+    },
+    {
+      "span_id": "span_tool_006",
+      "parent_span_id": "span_exec_004",
+      "name": "tool.execute.execute_python",
+      "start_time": "2026-05-11T10:30:00.610Z",
+      "end_time": "2026-05-11T10:30:00.880Z",
+      "duration_ms": 270.0,
+      "attributes": {
+        "tool.name": "execute_python",
+        "tool.success": true,
+        "tool.result_size": 42
+      },
+      "events": [
+        {
+          "name": "tool.call.start",
+          "timestamp": "2026-05-11T10:30:00.610Z",
+          "attributes": {}
+        }
+      ],
+      "status": "OK"
+    },
+    {
+      "span_id": "span_reflect_007",
+      "parent_span_id": "span_root_001",
+      "name": "reflector.reflect",
+      "start_time": "2026-05-11T10:30:00.910Z",
+      "end_time": "2026-05-11T10:30:01.100Z",
+      "duration_ms": 190.0,
+      "attributes": {
+        "reflection.passed": true,
+        "reflection.score": 0.92
+      },
+      "events": [
+        {
+          "name": "reflection.complete",
+          "timestamp": "2026-05-11T10:30:01.100Z",
+          "attributes": {
+            "passed": true
+          }
+        }
+      ],
+      "status": "OK"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Traces{% endblock %}
+{% block nav_traces %}active{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Traces</h1>
+<p class="page-subtitle">Directory: <span class="mono">{{ traces_dir }}</span> &middot; {{ traces | length }} trace(s) found</p>
+
+{% if traces %}
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Trace ID</th>
+                <th>Root Span</th>
+                <th>Spans</th>
+                <th>Duration</th>
+                <th>Exported At</th>
+                <th>Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for trace in traces %}
+            <tr onclick="window.location='/traces/{{ trace.file_id }}'" style="cursor: pointer;">
+                <td>
+                    {% if trace.status == "OK" %}
+                    <span class="status-ok">✅</span>
+                    {% else %}
+                    <span class="status-error">❌</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="/traces/{{ trace.file_id }}" class="mono">{{ trace.trace_id[:16] }}…</a>
+                </td>
+                <td>{{ trace.root_span_name }}</td>
+                <td>{{ trace.span_count }}</td>
+                <td class="duration">
+                    {% if trace.total_duration_ms >= 1000 %}
+                        {{ "%.1f" | format(trace.total_duration_ms / 1000) }}s
+                    {% else %}
+                        {{ "%.0f" | format(trace.total_duration_ms) }}ms
+                    {% endif %}
+                </td>
+                <td class="text-muted text-sm">{{ trace.exported_at }}</td>
+                <td class="text-muted text-sm">{{ trace.file_size_kb }}KB</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="empty-state">
+    <div class="empty-state-icon">📭</div>
+    <p>No traces found</p>
+    <p class="text-sm text-muted" style="margin-top: 8px;">
+        Run your agent with <code>TRACING_ENABLED=true TRACING_BACKEND=file</code> to generate trace files.
+    </p>
+</div>
+{% endif %}
+{% endblock %}

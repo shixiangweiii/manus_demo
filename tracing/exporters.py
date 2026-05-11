@@ -70,10 +70,12 @@ class FileSpanExporter(SpanExporter):
                     except (json.JSONDecodeError, OSError):
                         existing_spans = []
 
+                all_spans = existing_spans + span_dicts
                 output = {
                     "trace_id": trace_id,
                     "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                    "spans": existing_spans + span_dicts,
+                    "span_count": len(all_spans),
+                    "spans": all_spans,
                 }
 
                 with open(filepath, "w", encoding="utf-8") as f:
