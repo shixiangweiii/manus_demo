@@ -284,12 +284,13 @@ class LLMClient:
         if not prompt_summary:
             prompt_summary = call_type
 
+        if usage is None:
+            logger.warning("[LLMClient] API response missing usage data (model=%s)", self.model)
+            return
+
         prompt_tokens = getattr(usage, 'prompt_tokens', 0) or 0
         completion_tokens = getattr(usage, 'completion_tokens', 0) or 0
         total_tokens = getattr(usage, 'total_tokens', 0) or 0
-
-        if usage is None:
-            logger.warning("[LLMClient] API response missing usage data (model=%s)", self.model)
 
         self._call_records.append(LLMCallRecord(
             call_type=call_type,
@@ -384,16 +385,12 @@ class LLMClient:
             token = span_ctx.get("token")
             start_time = span_ctx["start_time"]
 
-            # Detach context FIRST to restore parent context immediately,
-            # regardless of whether subsequent span operations fail.
-            # This prevents context leakage in error paths.
-            if token:
-                otel_context.detach(token)
-
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             span.set_attribute("latency_ms", round(elapsed_ms, 2))
 
-            # Record token usage from last call record
+            # Record token usage from last call record.
+            # Depends on _record_call being called before _end_llm_span
+            # (safe in single-threaded asyncio event loop — no await between them).
             if self._call_records:
                 last_record = self._call_records[-1]
                 if last_record.prompt_tokens > 0:
@@ -412,6 +409,11 @@ class LLMClient:
                     span.record_exception(error)
                 span.set_status(StatusCode.ERROR, str(error)[:200] if error else "unknown error")
 
+            # End span before detaching context (OTel lifecycle convention).
             span.end()
+
+            # Detach after span.end() to restore parent context.
+            if token:
+                otel_context.detach(token)
         except Exception:
             logger.debug("[LLMClient] Failed to end tracing span", exc_info=True)

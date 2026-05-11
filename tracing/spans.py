@@ -207,3 +207,27 @@ class EventName:
 
     # --- Context ---
     CONTEXT_COMPRESSED = "context.compressed"
+
+
+# ======================================================================
+# Span Icons（Span 图标映射 —— 统一真实来源）
+# ======================================================================
+
+SPAN_ICONS: dict[str, str] = {
+    "task_execution": "\U0001f50d",
+    "orchestrator": "\U0001f3af",
+    "planner": "\U0001f4cb",
+    "execution": "⚡",
+    "dag": "\U0001f504",
+    "node": "\U0001f3af",
+    "react": "\U0001f4ad",
+    "llm": "\U0001f916",
+    "tool": "\U0001f527",
+    "reflector": "\U0001fa9e",
+    "memory": "\U0001f9e0",
+    "knowledge": "\U0001f4da",
+    "todo": "\U0001f4dd",
+    "step": "\U0001f463",
+}
+
+DEFAULT_SPAN_ICON = "\U0001f4cc"

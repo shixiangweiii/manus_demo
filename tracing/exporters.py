@@ -165,24 +165,6 @@ class RichConsoleExporter(SpanExporter):
     适合开发/调试：展示 Span 层级和耗时。
     """
 
-    # Emoji mapping for span types
-    _ICONS = {
-        "task_execution": "🔍",
-        "orchestrator": "🎯",
-        "planner": "📋",
-        "execution": "⚡",
-        "dag": "🔄",
-        "node": "🎯",
-        "react": "💭",
-        "llm": "🤖",
-        "tool": "🔧",
-        "reflector": "🪞",
-        "memory": "🧠",
-        "knowledge": "📚",
-        "todo": "📝",
-        "step": "👣",
-    }
-
     def __init__(self):
         try:
             from rich.console import Console
@@ -277,10 +259,11 @@ class RichConsoleExporter(SpanExporter):
     def _format_span_line(self, span: ReadableSpan, depth: int) -> str:
         """Format a single span line with icon, name, duration, status, and key attributes."""
         from opentelemetry.trace import StatusCode
+        from tracing.spans import SPAN_ICONS, DEFAULT_SPAN_ICON
 
         # Determine icon
-        icon = "📌"
-        for prefix, emoji in self._ICONS.items():
+        icon = DEFAULT_SPAN_ICON
+        for prefix, emoji in SPAN_ICONS.items():
             if span.name.startswith(prefix) or prefix in span.name:
                 icon = emoji
                 break

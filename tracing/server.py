@@ -44,23 +44,10 @@ def _get_traces_dir() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Span icon mapping (consistent with RichConsoleExporter)
+# Span icon mapping (shared source of truth in spans.py)
 # ---------------------------------------------------------------------------
 
-SPAN_ICONS: dict[str, str] = {
-    "task": "🔍",
-    "orchestrator": "🎯",
-    "planner": "📋",
-    "execution": "⚡",
-    "llm": "🤖",
-    "tool": "🔧",
-    "reflector": "🪞",
-    "memory": "🧠",
-    "react": "💭",
-    "todo": "📝",
-    "dag": "📊",
-    "node": "⚙️",
-}
+from tracing.spans import SPAN_ICONS, DEFAULT_SPAN_ICON
 
 
 def _get_span_icon(span_name: str) -> str:
@@ -68,7 +55,7 @@ def _get_span_icon(span_name: str) -> str:
     for prefix, icon in SPAN_ICONS.items():
         if span_name.startswith(prefix) or prefix in span_name:
             return icon
-    return "📌"
+    return DEFAULT_SPAN_ICON
 
 
 # ---------------------------------------------------------------------------

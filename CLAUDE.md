@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Manus Demo is a multi-agent AI system demonstrating autonomous task execution through hybrid plan routing. The system classifies tasks by complexity and routes them to one of three execution paradigms: simple flat planning (v1), DAG-based parallel execution (v2), or emergent TODO-list planning (v5).
+Manus Demo is a multi-agent AI system demonstrating autonomous task execution through hybrid plan routing. The system classifies tasks by complexity and routes them to one of three execution paradigms: simple flat planning (v1), DAG-based parallel execution (v2), or emergent TODO-list planning (v5). A v7 tracing module provides OpenTelemetry-based full-lifecycle observability.
 
 - **Language**: Python 3.11+ (async/await throughout)
 - **LLM**: OpenAI-compatible API (DeepSeek default, supports Ollama/Qwen/etc.)
 - **UI**: Rich console with event-driven rendering
-- **Current version**: v6.0
+- **Current version**: v7.0
 
 ## Architecture
 
@@ -19,6 +19,7 @@ User Task → Orchestrator → [classify_task] → simple / complex / emergent
   complex:   Planner.create_dag()      → DAGExecutor (parallel super-steps) → Reflector
   emergent:  EmergentPlanner.execute() → while has_pending_todos (outer scheduling) → per-TODO ReAct (inner tool_use)
 All paths → Token usage summary → Long-term memory store
+All paths → TracingBridge (event-to-span, v7 OpenTelemetry)
 ```
 
 ## Source Layout
@@ -51,6 +52,16 @@ manus_demo/
 │   ├── shell_tool.py          # ShellTool — sandboxed bash execution with command blacklist
 │   ├── subprocess_utils.py    # Shared subprocess runner with timeout + output-size limits
 │   └── router.py              # ToolRouter — per-node failure tracking, suggests alternative tools on threshold
+├── tracing/                   # v7 OpenTelemetry-based full-lifecycle tracing
+│   ├── __init__.py            # Lazy imports — no-ops when TRACING_ENABLED=false
+│   ├── config.py              # Tracing-specific config (backend, sample rate, sensitive data patterns)
+│   ├── provider.py            # TracerProvider factory with multi-backend support (console/file/rich/otlp/phoenix)
+│   ├── bridge.py              # TracingBridge — subscribes to _emit events, creates parent-child OTel spans
+│   ├── decorators.py          # @traced, @traced_llm_call, @traced_tool_call decorators
+│   ├── spans.py               # SpanName, AttrKey, EventName constants
+│   ├── exporters.py           # FileSpanExporter, RichConsoleExporter
+│   ├── server.py              # FastAPI web viewer for trace visualization (Jinja2 templates)
+│   └── __main__.py            # `python -m tracing` entry point for standalone viewer
 ├── memory/
 │   ├── short_term.py          # ShortTermMemory — sliding-window message buffer
 │   └── long_term.py           # LongTermMemory — JSON-file persistence + keyword search
@@ -83,7 +94,7 @@ manus_demo/
 | `TokenUsageSummary` | Aggregated token usage: call_records + by_engine + total |
 | `Reflection` | Reflector output (passed, score, feedback, suggestions) |
 
-## Token Tracking (current design)
+## Token Tracking
 
 Token tracking is centralized in `LLMClient`:
 - `_call_records: list[LLMCallRecord]` — appended on every successful API call via `_record_call()`
@@ -92,6 +103,16 @@ Token tracking is centralized in `LLMClient`:
 - `Orchestrator._finalize_token_usage()` — aggregates by engine and computes total from call records
 - No snapshot/delta logic; safe under asyncio concurrency (list.append is atomic in single-threaded event loop)
 - When the LLM provider does not return usage data (e.g., some local Ollama models), `_call_records` has entries with zero tokens and the UI displays "N/A" gracefully
+
+## Tracing (v7)
+
+OpenTelemetry-based tracing adds observability without modifying core execution logic:
+- **TracingBridge** subscribes to the same `_emit` event callback used by the UI and evaluation probe; it translates events into OTel Spans with parent-child hierarchy
+- **Zero overhead when disabled**: `tracing/__init__.py` uses conditional imports — when `TRACING_ENABLED=false`, all tracing symbols resolve to no-op stubs with no OpenTelemetry dependency loaded
+- **Multi-backend**: console, file (JSON), Rich console, OTLP HTTP, Phoenix
+- **Web viewer**: `python -m tracing` starts a FastAPI server for trace visualization
+- **Decorators**: `@traced`, `@traced_llm_call`, `@traced_tool_call` for manual span creation
+- **Sensitive data**: `SENSITIVE_KEYS` set in `tracing/config.py` triggers automatic redaction of api_key, token, etc.
 
 ## Configuration (config.py)
 
@@ -116,6 +137,11 @@ All config via env vars / `.env` file. Key variables:
 | `MAX_TODO_ITEMS` | `20` | v5 TODO list max size |
 | `MAX_EMERGENT_OUTER_ITERATIONS` | `60` | v5 emergent main loop iteration cap |
 | `TOOL_FAILURE_THRESHOLD` | `2` | v3 consecutive failures before suggesting tool switch |
+| `TRACING_ENABLED` | `false` | Master switch for v7 tracing |
+| `TRACING_BACKEND` | `console` | `console` / `file` / `rich` / `otlp` / `phoenix` |
+| `TRACING_ENDPOINT` | `http://localhost:4318` | OTLP HTTP endpoint |
+| `TRACING_SAMPLE_RATE` | `1.0` | Sampling rate (0.0–1.0) |
+| `TRACING_LOG_PROMPTS` | `false` | Record full prompt/response in spans |
 
 ## Common Commands
 
@@ -137,12 +163,19 @@ PLAN_MODE=simple python main.py "task"
 PLAN_MODE=complex python main.py "task"
 PLAN_MODE=emergent python main.py "task"
 
+# Tracing viewer (v7)
+python -m tracing                    # Start web viewer on http://localhost:8000
+
 # Tests (no API key needed)
 python -m pytest tests/test_dag_capabilities.py -v
 python -m pytest tests/test_emergent_planning.py -v
+python -m pytest tests/test_tracing.py -v
 python -m pytest tests/ -v
 
-# Evaluation module tests (49 tests, mock-based)
+# Run a single test
+python -m pytest tests/test_dag_capabilities.py::test_topological_sort -v
+
+# Evaluation module tests (mock-based)
 python -m pytest tests/test_evaluation.py -v
 
 # Evaluation CLI (requires LLM_API_KEY)
@@ -160,6 +193,8 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 - `pydantic` — Data models with validation
 - `rich` — Terminal UI (tables, panels, trees)
 - `python-dotenv` — `.env` file loading
+- `opentelemetry-api` / `opentelemetry-sdk` / `opentelemetry-exporter-otlp` — v7 tracing
+- `fastapi` / `uvicorn` / `jinja2` — v7 trace web viewer
 - `pytest` / `pytest-asyncio` — Testing (optional)
 
 ## Code Conventions
@@ -170,7 +205,7 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 - **Event-driven UI** — OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which forwards to the `on_event` callback in `main.py`; ExecutorAgent and ReflectorAgent do not emit events directly
 - **Pydantic models** for data structures, but LLM message passing uses raw `list[dict[str, Any]]` (OpenAI API compatibility)
 - **Chinese + English bilingual comments** — most modules have dual-language docstrings
-- **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`)
+- **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`)
 - **Token tracking centralized** — only `LLMClient` and `OrchestratorAgent` manage token usage; individual execution agents (Executor, EmergentPlanner, Reflector, Planner) have no token tracking code
 
 ## Important Design Decisions
@@ -182,12 +217,13 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 5. **Sandbox security**: `ShellTool` runs in `SANDBOX_DIR` with command blacklists and stripped env vars; `CodeExecutorTool` uses subprocess with timeout and output size limits; both share `subprocess_utils.run_with_limits()`
 6. **Checkpoint**: `TaskDAG.save_checkpoint()` snapshots full DAG state at key milestones (each super-step, after adaptive planning) for debugging
 7. **Evaluation via event probe**: `EvaluationProbe` hooks into `on_event` callback without modifying core code; forced routing via `config.PLAN_MODE` override with `classification_forced` flag to correctly handle scoring weights
+8. **Tracing via event bridge**: `TracingBridge` hooks into the same `on_event` callback as the UI and evaluation; it creates OTel Spans with parent-child hierarchy matching the task execution flow; exception-safe — tracing errors never affect main execution
 
 ## Documentation
 
 Detailed design docs live in `sxw_aicoding/docs/`:
 - `codemap.md` — Full component reference with method signatures and data flow diagrams
-- `CHANGELOG.md` — Version history v1→v6 with per-feature breakdown
+- `CHANGELOG.md` — Version history v1→v7 with per-feature breakdown
 - `data-structures-and-algorithms.md` — Schema, graph algorithms, state machine details
 - `dynamic-features.md` — v1→v5 dynamic capability comparison
 - `emergent-planning.md` — v5 emergent planning system design
@@ -195,3 +231,5 @@ Detailed design docs live in `sxw_aicoding/docs/`:
 - `llm-integration.md` — v6 LLM retry + ReActEngine design
 - `upgrade-plan.md` — v6 upgrade plan with completion status
 - `evaluation-guide.md` — Evaluation module design, metrics system, usage guide, and extension instructions
+- `tracing-design.md` — v7 tracing architecture and design rationale
+- `tracing-guide.md` — v7 tracing usage guide and extension instructions

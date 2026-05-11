@@ -388,10 +388,10 @@ tracing/
 ├── __init__.py      # 模块入口：条件导入 + No-op Stubs
 ├── __main__.py      # Web Viewer CLI 入口（python -m tracing）
 ├── config.py        # 配置集中管理（从 root config.py 读取）
-├── spans.py         # Span 名称 / Attribute 键名 / Event 名称常量
+├── spans.py         # Span 名称 / Attribute 键名 / Event 名称常量 / SPAN_ICONS 图标映射
 ├── provider.py      # TracerProvider 工厂（Resource + Exporter + Sampler）
 ├── exporters.py     # 自定义导出器（FileSpanExporter + RichConsoleExporter）
-├── decorators.py    # 声明式装饰器（@traced / @traced_llm_call / @traced_tool_call）
+├── decorators.py    # 声明式装饰器（@traced）+ 共享工具函数
 ├── bridge.py        # 事件桥接器（_emit 事件 → OTel Span）
 ├── server.py        # Web Viewer FastAPI 应用
 └── templates/       # Web Viewer HTML 模板
@@ -402,13 +402,13 @@ tracing/
 
 | 文件 | 职责 | 关键类/函数 |
 |---|---|---|
-| `__init__.py` | 模块门面，`TRACING_ENABLED=false` 时提供 no-op 桩 | `init_tracing()`, `TracingBridge`, `traced()` |
+| `__init__.py` | 模块门面，`TRACING_ENABLED=false` 时提供 no-op 桩 | `init_tracing()`, `TracingBridge`, `traced()`（仅 `traced` 装饰器） |
 | `__main__.py` | Web Viewer CLI 入口 | `main()` — argparse + uvicorn 启动 |
 | `config.py` | 集中管理所有配置常量 | `ENABLED`, `BACKEND`, `ENDPOINT`, `SAMPLE_RATE` |
-| `spans.py` | 语义常量，遵循 OTel GenAI SemConv | `SpanName`, `AttrKey`, `EventName` |
+| `spans.py` | 语义常量 + 图标映射，遵循 OTel GenAI SemConv | `SpanName`, `AttrKey`, `EventName`, `SPAN_ICONS` |
 | `provider.py` | 初始化 OTel SDK | `init_tracing()`, `get_tracer()`, `shutdown_tracing()` |
 | `exporters.py` | File + Rich 导出器 | `FileSpanExporter`, `RichConsoleExporter` |
-| `decorators.py` | 方法级声明式埋点 | `@traced()`, `@traced_llm_call`, `@traced_tool_call` |
+| `decorators.py` | 方法级声明式埋点 + 共享工具函数 | `@traced()`, `_truncate`, `_is_sensitive_key`, `_safe_set_attribute` |
 | `bridge.py` | 事件流转 Span 桥接 | `TracingBridge.on_event()` |
 | `server.py` | Web Viewer 服务 | `app` (FastAPI), `_build_span_tree()` |
 | `templates/` | Jinja2 模板 | 列表页 + 详情页（树形展示） |
@@ -536,50 +536,9 @@ async def transform(data: dict) -> dict:
     return {"normalized": True, "payload": data}
 ```
 
-### 7.2 `@traced_llm_call` — LLM 调用专用
+### 7.2 `TRACING_ENABLED=false` 时的行为
 
-```python
-from tracing import traced_llm_call
-
-class MyLLMWrapper:
-    model = "gpt-4"
-
-    @traced_llm_call
-    async def chat(self, messages, temperature=0.7, max_tokens=4096):
-        return {
-            "model": self.model,
-            "content": "hello from traced llm call",
-            "usage": {"input_tokens": 12, "output_tokens": 6},
-        }
-```
-
-自动记录：
-- `gen_ai.system`, `gen_ai.request.model`
-- `gen_ai.request.temperature`, `gen_ai.request.max_tokens`
-- `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`
-- `latency_ms`, 异常信息
-
-### 7.3 `@traced_tool_call` — 工具调用专用
-
-```python
-from tracing import traced_tool_call
-
-class MyTool:
-    name = "my_custom_tool"
-
-    @traced_tool_call
-    async def execute(self, query: str) -> str:
-        return f"processed query: {query}"
-```
-
-自动记录：
-- `tool.name`, `tool.parameters`（JSON 序列化）
-- `tool.success`, `tool.result_size`
-- `latency_ms`, `tool.error`
-
-### 7.4 `TRACING_ENABLED=false` 时的行为
-
-当 Tracing 关闭时，所有装饰器退化为 **透传模式**，不创建 Span、不记录属性、不产生任何性能开销：
+当 Tracing 关闭时，`@traced` 装饰器退化为 **透传模式**，不创建 Span、不记录属性、不产生任何性能开销：
 
 ```python
 # TRACING_ENABLED=false 时，traced 等价于：
@@ -588,6 +547,8 @@ def traced(span_name="", attributes=None):
         return func  # 原封不动返回原函数
     return decorator
 ```
+
+同样，`__init__.py` 中的 `init_tracing()`、`get_tracer()`、`shutdown_tracing()`、`TracingBridge` 也都替换为 no-op 桩，OpenTelemetry SDK 不会被加载。
 
 ---
 
@@ -986,13 +947,15 @@ def _create_exporter(backend):
 
 在 `tracing/bridge.py` 的 `TracingBridge` 类中：
 
-1. 在 `_EVENT_HANDLERS` 映射表中注册新事件
+1. 在 `__init__` 方法的 `self._event_handlers` 字典中注册新事件，将事件名映射到处理方法
 2. 实现对应的处理方法
 
 ```python
-_EVENT_HANDLERS = {
-    "task_start": "_on_task_start",
-    "my_new_event": "_on_my_new_event",
+# 在 __init__ 中添加条目
+self._event_handlers: dict[str, Any] = {
+    "task_start": self._on_task_start,
+    # ... 已有映射 ...
+    "my_new_event": self._on_my_new_event,
 }
 
 def _on_my_new_event(self, data):

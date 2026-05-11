@@ -692,3 +692,256 @@ class TestMulticastDispatch:
         # cb_ok should still be called
         assert len(calls) == 1
         assert calls[0] == ("ok", "test_event")
+
+
+# ======================================================================
+# DAG / Emergent Bridge Event Tests
+# DAG / 涌现模式 Bridge 事件测试
+# ======================================================================
+
+class TestBridgeDAGEvents:
+    """Test TracingBridge handling of DAG execution events."""
+
+    def test_dag_superstep_creates_spans(self, setup_tracing):
+        """superstep + node_running/completed should create correct span hierarchy."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from tracing.bridge import TracingBridge
+
+            exporter = setup_tracing
+            bridge = TracingBridge()
+
+            # Simulate DAG execution lifecycle
+            bridge.on_event("task_start", {"task": "dag test"})
+            bridge.on_event("phase", "Executing DAG (attempt 1)...")
+            bridge.on_event("superstep", {"step": 0, "nodes": ["n1", "n2"], "total_ready": 2})
+
+            # Node 1
+            node1 = MagicMock()
+            node1.id = "action_1"
+            node1.node_type = MagicMock(value="ACTION")
+            node1.description = "Search web"
+            bridge.on_event("node_running", {"node": node1})
+            bridge.on_event("node_completed", {"node": node1})
+
+            # Node 2
+            node2 = MagicMock()
+            node2.id = "action_2"
+            node2.node_type = MagicMock(value="ACTION")
+            node2.description = "Execute code"
+            bridge.on_event("node_running", {"node": node2})
+            bridge.on_event("node_completed", {"node": node2})
+
+            bridge.on_event("task_complete", {"answer": "done"})
+
+            spans = exporter.get_finished_spans()
+            span_names = [s.name for s in spans]
+
+            assert "dag.super_step.0" in span_names
+            assert "node.execute.action_1" in span_names
+            assert "node.execute.action_2" in span_names
+
+            # Verify parent-child: node spans should be children of superstep
+            node_span = [s for s in spans if s.name == "node.execute.action_1"][0]
+            assert node_span.parent is not None
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_node_failed_records_error(self, setup_tracing):
+        """node_failed should create a span with ERROR status."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from tracing.bridge import TracingBridge
+            from opentelemetry.trace import StatusCode
+
+            exporter = setup_tracing
+            bridge = TracingBridge()
+
+            bridge.on_event("task_start", {"task": "test"})
+            bridge.on_event("phase", "Executing DAG (attempt 1)...")
+            bridge.on_event("superstep", {"step": 0, "nodes": ["n1"], "total_ready": 1})
+
+            node = MagicMock()
+            node.id = "action_1"
+            node.node_type = MagicMock(value="ACTION")
+            node.description = "Failing step"
+            bridge.on_event("node_running", {"node": node})
+            bridge.on_event("node_failed", {"node": node, "reason": "timeout exceeded"})
+
+            bridge.on_event("task_complete", {"answer": "partial"})
+
+            spans = exporter.get_finished_spans()
+            node_spans = [s for s in spans if s.name == "node.execute.action_1"]
+            assert len(node_spans) == 1
+            assert node_spans[0].status.status_code == StatusCode.ERROR
+        finally:
+            config.TRACING_ENABLED = original
+
+
+class TestBridgeEmergentEvents:
+    """Test TracingBridge handling of emergent planning TODO events."""
+
+    def test_todo_lifecycle_spans(self, setup_tracing):
+        """todo_start + todo_complete should create and end TODO spans."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from tracing.bridge import TracingBridge
+
+            exporter = setup_tracing
+            bridge = TracingBridge()
+
+            bridge.on_event("task_start", {"task": "emergent test"})
+            bridge.on_event("phase", "Executing emergent plan...")
+            bridge.on_event("todo_list_initialized", {"items": ["todo1", "todo2"]})
+
+            # TODO 1: success
+            todo1 = MagicMock()
+            todo1.id = "todo_1"
+            todo1.description = "Research topic"
+            todo1.retry_count = 0
+            bridge.on_event("todo_start", {"todo": todo1})
+            bridge.on_event("todo_complete", {"todo": todo1})
+
+            # TODO 2: failed then blocked
+            todo2 = MagicMock()
+            todo2.id = "todo_2"
+            todo2.description = "Write report"
+            todo2.retry_count = 3
+            bridge.on_event("todo_start", {"todo": todo2})
+            bridge.on_event("todo_failed", {"todo": todo2, "result": MagicMock(output="error detail")})
+
+            bridge.on_event("task_complete", {"answer": "partial"})
+
+            spans = exporter.get_finished_spans()
+            span_names = [s.name for s in spans]
+
+            assert "todo.execute.todo_1" in span_names
+            assert "todo.execute.todo_2" in span_names
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_todo_blocked_records_error(self, setup_tracing):
+        """todo_blocked should mark the span as ERROR."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from tracing.bridge import TracingBridge
+            from opentelemetry.trace import StatusCode
+
+            exporter = setup_tracing
+            bridge = TracingBridge()
+
+            bridge.on_event("task_start", {"task": "test"})
+            bridge.on_event("phase", "Executing emergent plan...")
+
+            todo = MagicMock()
+            todo.id = "todo_1"
+            todo.description = "Blocked task"
+            todo.retry_count = 3
+            bridge.on_event("todo_start", {"todo": todo})
+            bridge.on_event("todo_blocked", {"todo": todo, "result": MagicMock(output="stuck")})
+
+            bridge.on_event("task_complete", {"answer": "incomplete"})
+
+            spans = exporter.get_finished_spans()
+            todo_spans = [s for s in spans if "todo.execute" in s.name]
+            assert len(todo_spans) == 1
+            assert todo_spans[0].status.status_code == StatusCode.ERROR
+        finally:
+            config.TRACING_ENABLED = original
+
+
+class TestBridgeDispatchTable:
+    """Test the dispatch table covers all known events."""
+
+    def test_dispatch_table_covers_all_events(self):
+        """All handled event names should have a handler in the dispatch table."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from tracing.bridge import TracingBridge
+
+            bridge = TracingBridge()
+            # Events that the bridge should handle
+            expected_events = [
+                "task_start", "task_complexity", "phase", "plan", "dag_created",
+                "todo_list_initialized", "todo_start", "todo_complete",
+                "todo_failed", "todo_blocked", "superstep", "node_running",
+                "node_completed", "node_failed", "step_start", "step_complete",
+                "step_failed", "reflection", "plan_adaptation", "adaptive_planning",
+                "token_usage_summary", "task_complete", "memory_stored",
+            ]
+            for event in expected_events:
+                assert event in bridge._event_handlers, f"Event '{event}' missing from dispatch table"
+                assert callable(bridge._event_handlers[event]), f"Handler for '{event}' is not callable"
+        finally:
+            config.TRACING_ENABLED = original
+        """Unknown events should be silently ignored."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from tracing.bridge import TracingBridge
+
+            bridge = TracingBridge()
+            # Should not raise for completely unknown events
+            bridge.on_event("totally_unknown_event", {"data": 123})
+            bridge.on_event("another_unknown", None)
+        finally:
+            config.TRACING_ENABLED = original
+
+
+class TestProviderShutdown:
+    """Test provider shutdown and cleanup."""
+
+    def test_shutdown_tracing(self):
+        """shutdown_tracing should not raise when called."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from tracing.provider import init_tracing, shutdown_tracing, _initialized, _provider
+
+            init_tracing()
+            # Should not raise
+            shutdown_tracing()
+
+            # After shutdown, provider should be cleaned up
+            from tracing.provider import _initialized as post_init, _provider as post_provider
+            assert post_init is False
+            assert post_provider is None
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_shutdown_when_not_initialized(self):
+        """shutdown_tracing should be safe to call when not initialized."""
+        from tracing.provider import shutdown_tracing
+        # Should not raise even if never initialized
+        shutdown_tracing()
+        shutdown_tracing()
+
+
+class TestSharedSpanIcons:
+    """Test that SPAN_ICONS is properly shared."""
+
+    def test_span_icons_in_spans_module(self):
+        """SPAN_ICONS should be defined in spans.py."""
+        from tracing.spans import SPAN_ICONS, DEFAULT_SPAN_ICON
+        assert isinstance(SPAN_ICONS, dict)
+        assert len(SPAN_ICONS) > 0
+        assert isinstance(DEFAULT_SPAN_ICON, str)
+
+    def test_span_icons_coverage(self):
+        """SPAN_ICONS should cover key span types."""
+        from tracing.spans import SPAN_ICONS
+        required_keys = ["task_execution", "llm", "tool", "execution", "reflector", "memory"]
+        for key in required_keys:
+            assert key in SPAN_ICONS, f"Missing icon key: {key}"

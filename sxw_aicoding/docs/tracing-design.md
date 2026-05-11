@@ -100,9 +100,9 @@ graph TB
     EMIT -->|subscribe| UI[main.py Rich UI]
     EMIT -->|subscribe| PROBE[EvaluationProbe]
 
-    %% 装饰器直接埋点
-    LC -.->|"@traced_llm_call"| DEC
-    BT -.->|"@traced_tool_call"| DEC
+    %% 内联埋点
+    LC -.->|"_start/_end_llm_span"| DEC
+    BT -.->|"traced_execute"| DEC
 
     %% 追踪层 → 导出层
     TB --> TP
@@ -121,7 +121,7 @@ graph TB
 | 通道 | 机制 | 覆盖范围 | 优势 |
 |------|------|---------|------|
 | **事件桥接（Bridge）** | 订阅 `_emit` 事件流 | 高层级 Span（Task、Phase、DAG Super-step） | 零侵入，自动获取所有现有事件 |
-| **装饰器（Decorators）** | `@traced_llm_call` / `@traced_tool_call` | 底层 Span（LLM 调用、工具调用） | 精确控制，记录详细属性 |
+| **内联埋点（Inline）** | `LLMClient._start/_end_llm_span` / `BaseTool.traced_execute` | 底层 Span（LLM 调用、工具调用） | 精确控制，记录详细属性 |
 
 两个通道生成的 Span 通过 OpenTelemetry 的 **Context Propagation** 自动建立父子关系：
 - Bridge 创建外层 Span（如 `dag.execution`）并设为当前 Context
@@ -257,7 +257,6 @@ class TracingBridge:
     
     def __init__(self):
         self._tracer = get_tracer("manus_demo.bridge")
-        self._span_stack: list[Span] = []
         self._root_span: Span | None = None
     
     def on_event(self, event: str, data: Any) -> None:
@@ -265,7 +264,7 @@ class TracingBridge:
         ...
 ```
 
-**事件到 Span 的映射规则**：
+**事件到 Span 的映射规则**（实现上使用 `self._event_handlers` 分发表路由，而非 if-elif 链）：
 
 | 事件 | 动作 | Span 名称 |
 |------|------|-----------|
@@ -282,32 +281,36 @@ class TracingBridge:
 | `reflection` | 结束反思 Span，记录属性 | — |
 | `task_complete` | 结束 Root Span | — |
 
-### 4.2 装饰器系统
+### 4.2 装饰器系统与内联埋点
 
 ```python
+# tracing/decorators.py — 通用装饰器 + 共享工具函数
 def traced(span_name: str = "", attributes: dict = None):
     """
     通用追踪装饰器，支持同步和异步函数。
-    
+
     当 TRACING_ENABLED=false 时退化为 no-op。
-    
+
     Usage:
         @traced("planner.classify")
         async def classify_task(self, task: str) -> str: ...
     """
-    
-def traced_llm_call(func):
-    """
-    LLM 调用专用装饰器。
-    自动记录: model, temperature, tokens, latency, retry_count
-    """
 
-def traced_tool_call(func):
-    """
-    工具调用专用装饰器。
-    自动记录: tool_name, parameters, result_size, success, latency
-    """
+# 共享工具函数，供 LLM / Tool 内联埋点使用：
+# _truncate(value, max_length)          — 截断长属性值
+# _safe_set_attribute(span, key, value) — 安全设置属性（截断 + 敏感词脱敏）
+# _is_sensitive_key(key)                — 检测 key/token/secret 等敏感键名
 ```
+
+> **LLM 调用追踪** 不使用装饰器，而是在 `LLMClient` 中通过内联方法实现：
+> - `_start_llm_span(call_type, messages, ...)` — 在 API 调用前创建 Span，设置请求属性
+> - `_end_llm_span(span_ctx, success, error)` — 在 API 调用后（成功或异常路径）结束 Span，记录 token 用量和延迟
+>
+> **工具调用追踪** 不使用装饰器，而是在 `BaseTool` 中通过 `traced_execute()` 方法实现：
+> - 当 `TRACING_ENABLED=true` 时，创建 `tool.execute.{name}` Span 包装 `execute()` 调用
+> - 当 `TRACING_ENABLED=false` 时，直接委托给 `execute()`，零开销
+>
+> 两者都复用 `tracing/decorators.py` 中的共享工具函数（`_truncate`、`_safe_set_attribute`、`_is_sensitive_key`）处理属性。
 
 ### 4.3 TracerProvider 工厂
 
@@ -470,39 +473,84 @@ class OrchestratorAgent:
 
 ### 6.2 对 LLMClient 的改动
 
+LLM 调用追踪使用内联的 `_start_llm_span` / `_end_llm_span` 方法，而非装饰器：
+
 ```python
 # llm/client.py
-from tracing.decorators import traced_llm_call
 
 class LLMClient:
-    @traced_llm_call
     async def chat(self, messages, temperature=0.7, max_tokens=4096, **kwargs):
-        ...  # 原有逻辑不变
-    
-    @traced_llm_call
-    async def chat_with_tools(self, messages, tools, ...):
-        ...  # 原有逻辑不变
-    
-    @traced_llm_call
-    async def chat_json(self, messages, ...):
-        ...  # 原有逻辑不变
+        # 在 API 调用前启动 Span
+        span_ctx = self._start_llm_span("chat", messages, temperature, max_tokens)
+        try:
+            for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
+                try:
+                    resp = await self._client.chat.completions.create(...)
+                    ...
+                    self._end_llm_span(span_ctx, success=True)  # 成功路径
+                    return result
+                except RETRYABLE_ERRORS as exc:
+                    ...  # retry logic
+            raise last_error or RuntimeError("LLM call failed")
+        except Exception as exc:
+            self._end_llm_span(span_ctx, success=False, error=exc)  # 异常路径
+            raise
+
+    def _start_llm_span(self, call_type, messages, temperature, max_tokens):
+        """如果 TRACING_ENABLED=true，创建 llm.{call_type} Span 并注入 Context。"""
+        ...
+        return {"span": span, "token": token, "start_time": ...}
+
+    def _end_llm_span(self, span_ctx, success=True, error=None):
+        """结束 Span，记录 latency、token 用量、错误信息。"""
+        ...
 ```
+
+> 每个公开方法（`chat`、`chat_with_tools`、`chat_json`）都遵循相同模式：
+> 调用前 `_start_llm_span` → try/except 包裹原逻辑 → 成功时 `_end_llm_span(success=True)` →
+> 异常时 `_end_llm_span(success=False, error=exc)`。
+> `chat_json` 的降级路径通过 `_skip_tracing=True` 参数避免重复创建 Span。
 
 ### 6.3 对 BaseTool 的改动
 
+工具调用追踪通过在 `BaseTool` 中新增 `traced_execute()` 方法实现，而非在抽象 `execute()` 上使用装饰器：
+
 ```python
 # tools/base.py
-from tracing.decorators import traced_tool_call
 
 class BaseTool(ABC):
-    @traced_tool_call
-    async def execute(self, **kwargs):
-        ...  # 原有逻辑不变（由子类实现）
+    @abstractmethod
+    async def execute(self, **kwargs) -> str:
+        """子类实现具体工具逻辑。"""
+        ...
+
+    async def traced_execute(self, **kwargs) -> str:
+        """
+        带追踪埋点的工具执行入口（v7 新增）。
+
+        当 TRACING_ENABLED=true 时，创建 tool.execute.{name} Span 包装执行。
+        当 TRACING_ENABLED=false 时，直接委托给 execute()，零开销。
+        """
+        if not config.TRACING_ENABLED:
+            return await self.execute(**kwargs)
+
+        tracer = trace.get_tracer("manus_demo.tool")
+        with tracer.start_as_current_span(f"tool.execute.{self.name}") as span:
+            span.set_attribute("tool.name", self.name)
+            span.set_attribute("tool.parameters", ... sanitized, truncated ...)
+            try:
+                result = await self.execute(**kwargs)
+                span.set_attribute("tool.success", True)
+                span.set_status(StatusCode.OK)
+                return result
+            except Exception as exc:
+                span.set_attribute("tool.success", False)
+                span.set_status(StatusCode.ERROR, ...)
+                raise
 ```
 
-> [!NOTE]
-> 由于 `BaseTool.execute` 是抽象方法，装饰器实际应用在调用层而非定义层。
-> 具体方案：在 `ExecutorAgent._call_tool()` 或 `ReActEngine._execute_tool()` 中包装调用。
+> 调用方（`ExecutorAgent`、`ReActEngine`）应调用 `traced_execute()` 而非 `execute()`，
+> 以获得自动追踪能力。`execute()` 保持不变，仍是子类的实现入口。
 
 ---
 
@@ -582,7 +630,7 @@ opentelemetry-exporter-otlp>=1.27.0  # OTLP 协议导出器
 | `tracing/config.py` | NEW | Tracing 配置常量 |
 | `tracing/provider.py` | NEW | TracerProvider 工厂 |
 | `tracing/spans.py` | NEW | Span 名称和 Attribute 键名常量 |
-| `tracing/decorators.py` | NEW | 声明式埋点装饰器 |
+| `tracing/decorators.py` | NEW | `@traced` 装饰器 + 共享工具函数（`_truncate`、`_safe_set_attribute`、`_is_sensitive_key`） |
 | `tracing/bridge.py` | NEW | 事件桥接器 |
 | `tracing/exporters.py` | NEW | 自定义导出器 |
 | `config.py` | MODIFY | 新增 Tracing 环境变量 |

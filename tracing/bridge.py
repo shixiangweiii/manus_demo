@@ -55,9 +55,6 @@ class TracingBridge:
         from tracing.provider import get_tracer
         self._tracer: Tracer = get_tracer("manus_demo.bridge")
 
-        # Span stack: maintains parent-child relationships
-        # Span 栈：维护父子关系
-        self._span_stack: list[tuple[Span, Any]] = []  # (span, context_token)
         self._root_span: Span | None = None
         self._root_token: Any = None
 
@@ -83,6 +80,34 @@ class TracingBridge:
         # Timing
         self._task_start_time: float = 0.0
 
+        # Event dispatch table: event name -> handler method
+        # 事件分发表：事件名 → 处理方法
+        self._event_handlers: dict[str, Any] = {
+            "task_start": self._on_task_start,
+            "task_complexity": self._on_task_complexity,
+            "phase": self._on_phase,
+            "plan": self._on_plan_created,
+            "dag_created": self._on_dag_created,
+            "todo_list_initialized": self._on_todo_list_initialized,
+            "todo_start": self._on_todo_start,
+            "todo_complete": self._on_todo_complete,
+            "todo_failed": self._on_todo_failed,
+            "todo_blocked": self._on_todo_blocked,
+            "superstep": self._on_superstep,
+            "node_running": self._on_node_running,
+            "node_completed": self._on_node_completed,
+            "node_failed": self._on_node_failed,
+            "step_start": self._on_step_start,
+            "step_complete": self._on_step_complete,
+            "step_failed": self._on_step_failed,
+            "reflection": self._on_reflection,
+            "plan_adaptation": self._on_adaptation,
+            "adaptive_planning": self._on_adaptation,
+            "token_usage_summary": self._on_token_usage,
+            "task_complete": self._on_task_complete,
+            "memory_stored": self._on_memory_stored,
+        }
+
     def on_event(self, event: str, data: Any = None) -> None:
         """
         Main event handler. Routes events to specific handlers.
@@ -103,53 +128,12 @@ class TracingBridge:
 
     def _handle_event(self, event: str, data: Any) -> None:
         """
-        Internal event routing logic.
-        内部事件路由逻辑。
+        Internal event routing via dispatch table.
+        内部事件路由，通过分发表分发。
         """
-        if event == "task_start":
-            self._on_task_start(data)
-        elif event == "task_complexity":
-            self._on_task_complexity(data)
-        elif event == "phase":
-            self._on_phase(data)
-        elif event == "plan":
-            self._on_plan_created(data)
-        elif event == "dag_created":
-            self._on_dag_created(data)
-        elif event == "todo_list_initialized":
-            self._on_todo_list_initialized(data)
-        elif event == "todo_start":
-            self._on_todo_start(data)
-        elif event == "todo_complete":
-            self._on_todo_complete(data)
-        elif event == "todo_failed":
-            self._on_todo_failed(data)
-        elif event == "todo_blocked":
-            self._on_todo_blocked(data)
-        elif event == "superstep":
-            self._on_superstep(data)
-        elif event == "node_running":
-            self._on_node_running(data)
-        elif event == "node_completed":
-            self._on_node_completed(data)
-        elif event == "node_failed":
-            self._on_node_failed(data)
-        elif event == "step_start":
-            self._on_step_start(data)
-        elif event == "step_complete":
-            self._on_step_complete(data)
-        elif event == "step_failed":
-            self._on_step_failed(data)
-        elif event == "reflection":
-            self._on_reflection(data)
-        elif event == "plan_adaptation" or event == "adaptive_planning":
-            self._on_adaptation(data)
-        elif event == "token_usage_summary":
-            self._on_token_usage(data)
-        elif event == "task_complete":
-            self._on_task_complete(data)
-        elif event == "memory_stored":
-            self._on_memory_stored(data)
+        handler = self._event_handlers.get(event)
+        if handler:
+            handler(data)
 
     # ------------------------------------------------------------------
     # Task Lifecycle

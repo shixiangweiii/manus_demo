@@ -4,7 +4,7 @@ Tracing Module - OpenTelemetry-based full-lifecycle tracing for Manus Demo.
 
 Provides:
 - TracingBridge: Event-to-Span bridge (subscribes to _emit events)
-- Decorators: @traced, @traced_llm_call, @traced_tool_call
+- Decorators: @traced (general-purpose method tracing)
 - Provider: TracerProvider factory with multi-backend support
 - Exporters: FileSpanExporter, RichConsoleExporter
 
@@ -29,7 +29,7 @@ import config as _config
 if _config.TRACING_ENABLED:
     from tracing.provider import init_tracing, get_tracer, shutdown_tracing
     from tracing.bridge import TracingBridge
-    from tracing.decorators import traced, traced_llm_call, traced_tool_call
+    from tracing.decorators import traced
 else:
     # No-op stubs when tracing is disabled
     # Tracing 关闭时的空实现桩
@@ -56,14 +56,6 @@ else:
             return func
         return decorator
 
-    def traced_llm_call(func):
-        """No-op decorator when tracing is disabled."""
-        return func
-
-    def traced_tool_call(func):
-        """No-op decorator when tracing is disabled."""
-        return func
-
 
 __all__ = [
     "init_tracing",
@@ -71,6 +63,4 @@ __all__ = [
     "shutdown_tracing",
     "TracingBridge",
     "traced",
-    "traced_llm_call",
-    "traced_tool_call",
 ]
