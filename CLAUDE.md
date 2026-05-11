@@ -57,8 +57,8 @@ manus_demo/
 │   ├── config.py              # Tracing-specific config (backend, sample rate, sensitive data patterns)
 │   ├── provider.py            # TracerProvider factory with multi-backend support (console/file/rich/otlp/phoenix)
 │   ├── bridge.py              # TracingBridge — subscribes to _emit events, creates parent-child OTel spans
-│   ├── decorators.py          # @traced, @traced_llm_call, @traced_tool_call decorators
-│   ├── spans.py               # SpanName, AttrKey, EventName constants
+│   ├── decorators.py          # @traced decorator + shared helpers (_truncate, _safe_set_attribute)
+│   ├── spans.py               # SpanName, AttrKey, EventName, SPAN_ICONS constants
 │   ├── exporters.py           # FileSpanExporter, RichConsoleExporter
 │   ├── server.py              # FastAPI web viewer for trace visualization (Jinja2 templates)
 │   └── __main__.py            # `python -m tracing` entry point for standalone viewer
@@ -111,7 +111,7 @@ OpenTelemetry-based tracing adds observability without modifying core execution 
 - **Zero overhead when disabled**: `tracing/__init__.py` uses conditional imports — when `TRACING_ENABLED=false`, all tracing symbols resolve to no-op stubs with no OpenTelemetry dependency loaded
 - **Multi-backend**: console, file (JSON), Rich console, OTLP HTTP, Phoenix
 - **Web viewer**: `python -m tracing` starts a FastAPI server for trace visualization
-- **Decorators**: `@traced`, `@traced_llm_call`, `@traced_tool_call` for manual span creation
+- **Inline tracing**: `LLMClient._start_llm_span`/`_end_llm_span` for LLM calls; `BaseTool.traced_execute` for tool calls; `@traced` decorator for general-purpose manual span creation
 - **Sensitive data**: `SENSITIVE_KEYS` set in `tracing/config.py` triggers automatic redaction of api_key, token, etc.
 
 ## Configuration (config.py)
