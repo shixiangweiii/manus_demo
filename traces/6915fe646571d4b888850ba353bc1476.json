@@ -1,0 +1,24 @@
+{
+  "trace_id": "6915fe646571d4b888850ba353bc1476",
+  "exported_at": "2026-05-12T06:32:01.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "9a4a996c374d0669",
+      "parent_span_id": null,
+      "name": "tool.execute.add",
+      "start_time": "2026-05-12T06:31:57.434Z",
+      "end_time": "2026-05-12T06:31:57.434Z",
+      "duration_ms": 0.08,
+      "attributes": {
+        "tool.name": "add",
+        "tool.parameters": "{\"a\": 25, \"b\": 17}",
+        "latency_ms": 0.05,
+        "tool.success": true,
+        "tool.result_size": 2
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "trace_id": "bf9aedc1beea984de095bdfdf76205c5",
+  "exported_at": "2026-05-12T06:31:51.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "5b97f2fffe3d47c2",
+      "parent_span_id": null,
+      "name": "llm.chat_json",
+      "start_time": "2026-05-12T06:31:46.387Z",
+      "end_time": "2026-05-12T06:31:48.083Z",
+      "duration_ms": 1696.35,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "deepseek-v4-flash",
+        "gen_ai.call_type": "chat_json",
+        "gen_ai.request.temperature": 0.3,
+        "gen_ai.request.max_tokens": 4096,
+        "gen_ai.prompt.content": "[user]\nReturn valid JSON: {\"status\": \"ok\", \"count\": 42, \"items\": [\"a\", \"b\"]}",
+        "latency_ms": 1696.31,
+        "gen_ai.usage.input_tokens": 50,
+        "gen_ai.usage.output_tokens": 63,
+        "gen_ai.usage.total_tokens": 113
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

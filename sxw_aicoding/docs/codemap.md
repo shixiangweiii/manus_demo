@@ -1,7 +1,7 @@
 # Manus Demo - 代码地图
 
-> **生成时间**: 2026-05-11
-> **版本**: v7（含全链路 Tracing + Web Viewer + LLM 重试机制 + ReActEngine + ShellTool + 评测模块）
+> **生成时间**: 2026-05-12
+> **版本**: v8（含目标驱动规划 GoalDrivenPlanner + 全链路 Tracing + Web Viewer + LLM 重试机制 + ReActEngine + ShellTool + 评测模块）
 > **目的**: 当前代码库的综合架构地图
 
 ## 目录
@@ -43,9 +43,13 @@ graph TB
     DAG --> DAGExecutor[DAGExecutor<br/>Super-step并行]
     DAGExecutor --> ReflectorV2[ReflectorV2<br/>reflect_dag]
     
-    EmergentPath --> EmergentPlanner[EmergentPlanner<br/>TODO列表管理]
+    EmergentPath --> EmergentOrGoalDriven{ENABLE_GOAL_DRIVEN?}
+    EmergentOrGoalDriven -->|否| EmergentPlanner[EmergentPlanner<br/>v5 TODO列表]
+    EmergentOrGoalDriven -->|是| GoalDriven[GoalDrivenPlanner<br/>v8 GoalDocument]
     EmergentPlanner --> ToolLoop[while tool_use循环]
+    GoalDriven --> GoalReflectLoop[GoalReflection<br/>+ 目标引导ReAct]
     ToolLoop --> Compile[编译结果]
+    GoalReflectLoop --> Compile
     
     ReflectorV1 --> ReflectCheck{反思验证}
     ReflectorV2 --> ReflectCheck
@@ -73,15 +77,17 @@ v4 → 两阶段混合分类器（规则 + LLM）+ 自动 v1/v2 路径选择
 v5 → Claude Code 风格隐式规划 + TODO 列表管理 + while(tool_use) 主循环（新增第三条执行路径）
 v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag + 评测模块（零侵入事件探针 + 四维度加权评分 + 12 基准任务）
 v7 → 全链路 Tracing（OpenTelemetry Span 树 + 多后端导出 + 声明式装饰器）+ 内置 Web Viewer（FastAPI 树形可视化）
+v8 → 目标驱动规划（ReflAct 风格「以终为始」+ GoalDocument 持久锚定 + 逆向里程碑规划 + 目标状态反思 + 周期性重锚定 + 停滞检测）
 ```
 
 ### 核心特性
 
-- **混合路由系统**：自动选择 Simple/Complex/Emergent 三条执行路径
+- **混合路由系统**：自动选择 Simple/Complex/Emergent 三条执行路径（Emergent 路径可选升级为 v8 GoalDriven）
 - **两阶段分类器**：规则快筛（零成本）+ LLM 兜底（高准确率）
 - **Super-step 并行**：借鉴 LangGraph Pregel 运行时，支持节点并行执行
 - **状态机管控**：严格节点生命周期管理，防止非法状态转移
 - **隐式规划**：Claude Code 风格，通过 TODO 列表动态涌现规划
+- **目标驱动规划**：v8 新增 ReflAct 风格「以终为始」，GoalDocument 持久锚定防止漂移
 - **LLM 重试**：v6 新增指数退避重试机制，提升稳定性
 - **评测模块**：零侵入事件探针 + 四维度加权评分（规划/执行/效率/反思）+ 12 基准任务 + 三模式对比报告
 - **全链路 Tracing**：基于 OpenTelemetry 标准的结构化 Span 树，覆盖任务全生命周期
@@ -100,7 +106,8 @@ manus_demo/
 │   ├── planner.py            # PlannerAgent 混合规划器 (933行)
 │   ├── executor.py           # ExecutorAgent ReAct执行器 (322行)
 │   ├── reflector.py          # ReflectorAgent 反思验证器 (254行)
-│   └── emergent_planner.py   # EmergentPlannerAgent 隐式规划器 (684行)
+│   ├── emergent_planner.py   # EmergentPlannerAgent 隐式规划器 (684行)
+│   └── goal_driven_planner.py # GoalDrivenPlannerAgent 目标驱动规划器 (v8, 894行)
 │
 ├── dag/                       # DAG 执行引擎
 │   ├── __init__.py
@@ -168,8 +175,8 @@ manus_demo/
 ├── sxw_aicoding/              # 文档目录
 │   └── docs/
 │
-├── config.py                  # 全局配置 (88行)
-├── schema.py                  # 数据模型定义 (612行)
+├── config.py                  # 全局配置 (109行)
+├── schema.py                  # 数据模型定义 (688行)
 ├── main.py                    # CLI 入口 (515行)
 └── requirements.txt           # Python 依赖
 ```
@@ -185,10 +192,11 @@ manus_demo/
 **主要职责**:
 - 检索相关记忆和知识
 - 使用两阶段混合分类器对任务复杂度进行分类
-- 路由到三种执行路径：simple/complex/emergent
+- 路由到三种执行路径：simple/complex/emergent(v5或v8)
 - 协调执行和反思过程
 - 处理重规划逻辑
 - 存储学习成果到长期记忆
+- v8 集成：当 ENABLE_GOAL_DRIVEN_PLANNER=true 时，emergent 路径升级为 GoalDrivenPlannerAgent
 
 **主要方法签名**:
 ```python
@@ -204,7 +212,7 @@ class OrchestratorAgent:
     async def _gather_context(self, task: str) -> str
     async def _execute_and_reflect_simple(self, task: str, plan: Plan, context: str) -> str
     async def _execute_dag_and_reflect(self, dag: TaskDAG) -> str
-    async def _execute_emergent(self, task: str, context: str) -> str
+    async def _execute_emergent(self, task: str, context: str) -> str  # v8: 优先使用 GoalDrivenPlannerAgent
 ```
 
 **架构流程**:
@@ -403,6 +411,62 @@ graph TD
     D --> E[更新TODO列表]
     E --> B
     B -->|否| F[编译最终答案]
+```
+
+### 5+1. GoalDrivenPlannerAgent (v8)
+
+**文件**: `agents/goal_driven_planner.py` (894行)
+
+**目的**: 目标驱动的隐式规划器，遵循「以终为始」设计哲学。受 ReflAct（EMNLP 2025）启发。
+
+**与 v5 EmergentPlanner 的关键区别**:
+- GoalDocument 跨迭代持久化（目标永不丢失）
+- 逆向规划从终态推导里程碑，而非从任务描述正向规划
+- 每次行动前进行目标反思（ReflAct 风格），对比当前状态与目标
+- 有界消息上下文（滑动窗口最多 24 条），而非 v5 的无界扁平历史
+- 反思驱动的主动 TODO 刷新，而非仅失败时被动刷新
+- 周期性目标重锚定 + 停滞检测
+
+**主要方法签名**:
+```python
+class GoalDrivenPlannerAgent(BaseAgent):
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        tools: list[BaseTool],
+        max_iterations: int | None = None,
+        context_manager: ContextManager | None = None,
+        tool_router: ToolRouter | None = None,
+        on_event: Callable[[str, Any], None] | None = None,
+    ) -> None
+
+    async def execute(self, task: str, context: str = "") -> str
+    async def _build_goal_document(self, task: str, context: str = "") -> GoalDocument
+    async def _backward_plan(self, goal_doc: GoalDocument) -> MilestonePlan
+    def _milestones_to_todos(self, plan: MilestonePlan, task: str) -> TodoList
+    async def _goal_reflect(self, goal_doc: GoalDocument, todo_list: TodoList, iteration: int) -> GoalReflection
+    def _select_todo_by_reflection(self, reflection: GoalReflection) -> TodoItem | None
+    async def _execute_todo_goal_guided(self, todo: TodoItem, goal_doc: GoalDocument, reflection: GoalReflection) -> StepResult
+    async def _reanchor_goal(self, goal_doc: GoalDocument, todo_list: TodoList, last_result: StepResult) -> GoalDocument
+    async def _refresh_todo_list(self, goal_doc: GoalDocument, todo_list: TodoList, last_result: StepResult) -> None
+    async def _compile_goal_anchored_answer(self, task: str, goal_doc: GoalDocument, results: list[StepResult]) -> str
+```
+
+**目标驱动规划流程**:
+```mermaid
+graph TD
+    A[构建GoalDocument] --> B[逆向规划里程碑]
+    B --> C[里程碑转TodoList]
+    C --> D{有待办项?}
+    D -->|是| E[目标反思:对比当前vs目标]
+    E --> F[选择TODO:由反思指导]
+    F --> G[执行TODO:目标引导ReAct]
+    G --> H[更新TODO状态]
+    H --> I{需要重锚定?}
+    I -->|是| J[目标重锚定]
+    J --> D
+    I -->|否| D
+    D -->|否| K[对照目标汇编答案]
 ```
 
 ### 6. BaseAgent
@@ -1019,6 +1083,7 @@ python -m evaluation.eval_cli [OPTIONS]
 - 订阅 Orchestrator 的 _emit 事件回调
 - 维护 Span 栈追踪父子层级
 - 使用事件到处理器的映射表，支持 task/phase/node/todo/step/reflection 等全量事件
+- v8 新增事件处理器：goal_anchor（记录初始目标文档）、goal_reflection（记录目标状态反思）、goal_reanchor（记录目标重锚定）
 - 异常安全，tracing 错误不影响主流程
 
 ### N+1. Trace Web Viewer
@@ -1148,6 +1213,37 @@ while has_pending_todos(todo_list):
     todo_list = await update_todo_list(todo_list, result)
 ```
 
+### 6+1. 目标驱动规划 (v8)
+
+**描述**: GoalDrivenPlanner 采用 ReflAct 风格的目标驱动规划，通过 GoalDocument 持久锚定防止目标漂移。
+
+**实现位置**: `agents/goal_driven_planner.py`: `GoalDrivenPlannerAgent` 类
+
+**优势**:
+- GoalDocument 跨迭代持久化，目标永不丢失
+- 逆向规划从终态推导里程碑，确保步骤与目标对齐
+- 每次行动前进行目标反思，对比当前状态 vs 目标
+- 有界消息上下文（滑动窗口），避免上下文爆炸
+- 反思驱动的主动 TODO 刷新，而非仅失败时被动刷新
+- 周期性目标重锚定 + drift 检测 + 停滞检测
+
+**核心循环**:
+```python
+goal_doc = build_goal_document(task)          # 定义「完成标准」
+milestones = backward_plan(goal_doc)          # 从终态逆向规划
+todo_list = milestones_to_todos(milestones)   # 里程碑 → TODO
+
+while has_pending(todo_list) and iteration < max:
+    reflection = goal_reflect(goal_doc, todo_list)  # ReflAct 风格反思
+    todo = select_todo_by_reflection(reflection)    # 反思指导选择
+    result = execute_todo_goal_guided(todo, goal_doc, reflection)  # 目标注入 ReAct
+    update_todo_status(todo, result)
+    if should_reanchor: reanchor_goal(goal_doc)     # 周期性重锚定
+    if should_refresh: refresh_todo_list(goal_doc)  # 主动 TODO 刷新
+
+answer = compile_goal_anchored_answer(task, goal_doc, results)  # 对照目标汇编
+```
+
 ### 7. 事件驱动 UI
 
 **描述**: 所有组件支持 `on_event` 回调，实现事件驱动的 UI 实时更新。
@@ -1174,11 +1270,12 @@ def on_event(event_type: str, data: Any):
 
 | 文件路径 | 行数 | 核心职责 | 关键类/方法 |
 |---------|------|---------|-----------|
-| `agents/orchestrator.py` | 523 | 中央协调者，三路由管理 | `OrchestratorAgent.run()` |
+| `agents/orchestrator.py` | 523 | 中央协调者，三路由管理（含v8） | `OrchestratorAgent.run()` |
 | `agents/planner.py` | 933 | 混合分类器 + 计划生成 | `PlannerAgent.classify_task()` |
 | `agents/executor.py` | 322 | ReAct 执行器 | `ExecutorAgent._react_loop()` |
 | `agents/reflector.py` | 254 | 质量验证与反馈 | `ReflectorAgent.reflect()` |
 | `agents/emergent_planner.py` | 684 | 隐式规划器 | `EmergentPlannerAgent.execute()` |
+| `agents/goal_driven_planner.py` | 894 | 目标驱动规划器 (v8) | `GoalDrivenPlannerAgent.execute()` |
 | `agents/base.py` | 182 | 智能体基类 | `BaseAgent.think()` |
 | `dag/executor.py` | 647 | Super-step 并行执行 | `DAGExecutor.execute()` |
 | `dag/graph.py` | 626 | DAG 数据结构 | `TaskDAG.get_ready_nodes()` |
@@ -1210,8 +1307,8 @@ def on_event(event_type: str, data: Any):
 | `tracing/decorators.py` | - | @traced / @traced_llm_call / @traced_tool_call | - |
 | `tracing/bridge.py` | - | TracingBridge 事件→Span 桥接器 | - |
 | `tracing/server.py` | - | Web Viewer FastAPI 应用 | - |
-| `schema.py` | 612 | 数据模型定义 | `Plan`, `TaskDAG`, `TaskNode` |
-| `config.py` | 88 | 全局配置 | `LLM_MODEL`, `MAX_PARALLEL_NODES` |
+| `schema.py` | 688 | 数据模型定义（含v8 GoalDocument等） | `Plan`, `TaskDAG`, `TaskNode`, `GoalDocument` |
+| `config.py` | 109 | 全局配置（含v8目标驱动配置） | `LLM_MODEL`, `MAX_PARALLEL_NODES`, `ENABLE_GOAL_DRIVEN_PLANNER` |
 | `main.py` | 515 | CLI 入口 | `main()` |
 
 ### 版本演进关键文件
@@ -1226,6 +1323,7 @@ def on_event(event_type: str, data: Any):
 | v6 | `llm/client.py`, `agents/executor.py`, `agents/emergent_planner.py`, `tools/shell_tool.py`, `react/engine.py` | LLM 重试 + ReActEngine + ShellTool + 统一 ReAct 引擎 |
 | v6 | `evaluation/metrics.py`, `evaluation/benchmark.py`, `evaluation/runner.py`, `evaluation/report.py`, `evaluation/eval_cli.py`, `tests/test_evaluation.py` | 评测模块：零侵入事件探针 + 四维度加权评分 + 12 基准任务 + 三模式对比报告 |
 | v7 | `tracing/bridge.py`, `tracing/exporters.py`, `tracing/decorators.py`, `tracing/provider.py`, `tracing/server.py`, `llm/client.py`, `tools/base.py` | 全链路 Tracing + Web Viewer |
+| v8 | `agents/goal_driven_planner.py`, `schema.py`, `config.py`, `agents/orchestrator.py`, `tracing/spans.py`, `tracing/bridge.py` | 目标驱动规划（GoalDocument + 逆向里程碑 + ReflAct 反思 + 重锚定 + 停滞检测） |
 
 ### 测试文件
 
@@ -1241,6 +1339,7 @@ def on_event(event_type: str, data: Any):
 | `tests/test_concurrent_execution.py` | 并发执行测试 |
 | `tests/test_cycle_detection.py` | 循环检测测试 |
 | `tests/test_tracing.py` | Tracing 模块测试（27 用例） |
+| `tests/test_goal_driven_planner.py` | v8 目标驱动规划测试（约 40 用例：数据模型、Agent核心逻辑、Orchestrator路由、事件发射、ReAct循环） |
 
 ### 文档文件
 
@@ -1266,13 +1365,14 @@ def on_event(event_type: str, data: Any):
 
 Manus Demo 是一个功能完整的多智能体任务执行系统，具有以下核心特点：
 
-1. **混合路由架构**：自动选择 Simple/Complex/Emergent 三条执行路径，适应不同复杂度的任务
+1. **混合路由架构**：自动选择 Simple/Complex/Emergent 三条执行路径，适应不同复杂度的任务；emergent 路径可选升级为 v8 GoalDriven
 2. **两阶段分类器**：规则快筛 + LLM 兜底，在效率和准确率之间取得平衡
 3. **Super-step 并行**：借鉴 LangGraph 的 Pregel 运行时，支持高效的并行执行
 4. **状态机管控**：严格节点生命周期管理，确保系统一致性
 5. **隐式规划**：Claude Code 风格的动态规划，适应不确定性任务
-6. **LLM 重试机制**：v6 新增的指数退避重试，提升系统稳定性
-7. **Shell 命令执行**：v6 新增 `ShellTool`，支持在沙箱中执行 bash 命令，增强真实环境交互能力
-8. **全链路 Tracing**：v7 新增基于 OpenTelemetry 的结构化 Span 树，覆盖 LLM 调用、工具执行、反思等全生命周期，支持 File/Rich/OTLP/Phoenix 多后端导出，并提供内置 Web Viewer 可视化查看器
+6. **目标驱动规划**：v8 新增 ReflAct 风格「以终为始」规划，GoalDocument 持久锚定防止漂移，逆向里程碑规划确保步骤与目标对齐
+7. **LLM 重试机制**：v6 新增的指数退避重试，提升系统稳定性
+8. **Shell 命令执行**：v6 新增 `ShellTool`，支持在沙箱中执行 bash 命令，增强真实环境交互能力
+9. **全链路 Tracing**：v7 新增基于 OpenTelemetry 的结构化 Span 树，覆盖 LLM 调用、工具执行、反思等全生命周期，支持 File/Rich/OTLP/Phoenix 多后端导出，并提供内置 Web Viewer 可视化查看器
 
-该系统展示了如何将多种先进技术（ReAct、DAG、状态机、混合路由等）整合为一个实用的多智能体系统，为复杂任务的自动化执行提供了完整的解决方案。
+该系统展示了如何将多种先进技术（ReAct、DAG、状态机、混合路由、目标驱动规划等）整合为一个实用的多智能体系统，为复杂任务的自动化执行提供了完整的解决方案。

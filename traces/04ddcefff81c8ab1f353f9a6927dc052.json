@@ -1,0 +1,24 @@
+{
+  "trace_id": "04ddcefff81c8ab1f353f9a6927dc052",
+  "exported_at": "2026-05-12T06:32:06.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "4264bb283244cda3",
+      "parent_span_id": null,
+      "name": "tool.execute.echo",
+      "start_time": "2026-05-12T06:32:01.409Z",
+      "end_time": "2026-05-12T06:32:01.409Z",
+      "duration_ms": 0.11,
+      "attributes": {
+        "tool.name": "echo",
+        "tool.parameters": "{\"text\": \"Hello! Welcome! 👋\"}",
+        "latency_ms": 0.08,
+        "tool.success": true,
+        "tool.result_size": 23
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

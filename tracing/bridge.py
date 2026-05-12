@@ -110,6 +110,8 @@ class TracingBridge:
             "goal_anchor": self._on_goal_anchor,
             "goal_reflection": self._on_goal_reflection,
             "goal_reanchor": self._on_goal_reanchor,
+            "goal_drift_alert": self._on_goal_drift_alert,
+            "stagnation_detected": self._on_stagnation_detected,
         }
 
     def on_event(self, event: str, data: Any = None) -> None:
@@ -717,6 +719,36 @@ class TracingBridge:
                     if isinstance(updated_doc, dict) else 0.0
                 ),
             })
+
+    def _on_goal_drift_alert(self, data: Any) -> None:
+        """Record goal drift detection event as a span event."""
+        if not isinstance(data, dict):
+            return
+        if self._phase_span:
+            event_attrs = {
+                "correction_applied": str(data.get("correction_applied", ""))[:200],
+                "original_criteria": str(data.get("original_criteria", ""))[:200],
+                "suggested_criteria": str(data.get("suggested_criteria", ""))[:200],
+            }
+            self._phase_span.add_event("goal.drift_alert", attributes=event_attrs)
+
+        # Also log on root span for visibility
+        if self._root_span:
+            self._root_span.add_event("goal.drift_alert", attributes={
+                "correction_applied": str(data.get("correction_applied", ""))[:100],
+            })
+
+    def _on_stagnation_detected(self, data: Any) -> None:
+        """Record stagnation detection event on the root span."""
+        if not isinstance(data, dict):
+            return
+        if self._root_span:
+            stagnation_attrs = {
+                "stagnation_rounds": int(data.get("stagnation_rounds", 0)),
+                "completed_count": int(data.get("completed_count", 0)),
+                "total_todos": int(data.get("total_todos", 0)),
+            }
+            self._root_span.add_event("stagnation.detected", attributes=stagnation_attrs)
 
     # ------------------------------------------------------------------
     # Helpers

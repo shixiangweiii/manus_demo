@@ -1,0 +1,23 @@
+{
+  "trace_id": "9829d14f3bc11607e5443b9d88b0f465",
+  "exported_at": "2026-05-12T06:32:16.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "568705401c3225d7",
+      "parent_span_id": null,
+      "name": "task_execution",
+      "start_time": "2026-05-12T06:32:16.842Z",
+      "end_time": "2026-05-12T06:32:16.842Z",
+      "duration_ms": 0.09,
+      "attributes": {
+        "task.input": "test",
+        "latency_ms": 0.14,
+        "task.success": true,
+        "task.output": "done"
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

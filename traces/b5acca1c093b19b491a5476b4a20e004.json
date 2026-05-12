@@ -1,0 +1,29 @@
+{
+  "trace_id": "b5acca1c093b19b491a5476b4a20e004",
+  "exported_at": "2026-05-12T06:31:41.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "425e0fb5eaeed134",
+      "parent_span_id": null,
+      "name": "llm.chat",
+      "start_time": "2026-05-12T06:31:36.969Z",
+      "end_time": "2026-05-12T06:31:38.150Z",
+      "duration_ms": 1181.59,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "deepseek-v4-flash",
+        "gen_ai.call_type": "chat",
+        "gen_ai.request.temperature": 1.0,
+        "gen_ai.request.max_tokens": 4096,
+        "gen_ai.prompt.content": "[user]\nGive me a random number between 1 and 10.",
+        "latency_ms": 1181.53,
+        "gen_ai.usage.input_tokens": 16,
+        "gen_ai.usage.output_tokens": 35,
+        "gen_ai.usage.total_tokens": 51
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

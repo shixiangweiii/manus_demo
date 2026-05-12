@@ -1,0 +1,29 @@
+{
+  "trace_id": "740cfa271d3d4919b5831d8700c4baff",
+  "exported_at": "2026-05-12T06:31:36.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "3b3c608b7d5bf351",
+      "parent_span_id": null,
+      "name": "llm.chat",
+      "start_time": "2026-05-12T06:31:32.146Z",
+      "end_time": "2026-05-12T06:31:34.352Z",
+      "duration_ms": 2205.55,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "deepseek-v4-flash",
+        "gen_ai.call_type": "chat",
+        "gen_ai.request.temperature": 0.7,
+        "gen_ai.request.max_tokens": 4096,
+        "gen_ai.prompt.content": "[system]\nYou are a helpful assistant that speaks like a pirate.\n\n[user]\nGreet me.",
+        "latency_ms": 2205.48,
+        "gen_ai.usage.input_tokens": 19,
+        "gen_ai.usage.output_tokens": 53,
+        "gen_ai.usage.total_tokens": 72
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

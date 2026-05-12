@@ -614,6 +614,20 @@ class GoalDocument(BaseModel):
     updated_at: float = Field(default_factory=time.time, description="Last update timestamp / 最后更新时间")
 
 
+class GoalAction(str, Enum):
+    """
+    Goal reflection suggested action types (v8).
+    目标反思建议动作类型（v8 新增）。
+
+    Enum-based normalization prevents LLM output variations
+    (e.g., "Replan"/"REPLAN"/"re-plan") from silently falling through.
+    枚举归一化防止 LLM 输出变体（如 "Replan"/"REPLAN"/"re-plan"）静默失效。
+    """
+    EXECUTE_TODO = "execute_todo"
+    REPLAN = "replan"
+    COMPLETE = "complete"
+
+
 class GoalReflection(BaseModel):
     """
     Result of goal-state comparison at each iteration (ReflAct style).
@@ -626,7 +640,7 @@ class GoalReflection(BaseModel):
     gap_analysis: str = Field(description="What remains between current and goal / 差距分析")
     next_milestone: str = Field(description="The specific sub-goal to pursue now / 下一步里程碑")
     progress_pct: float = Field(default=0.0, description="0-100 progress estimate / 进度百分比")
-    suggested_action: str = Field(default="execute_todo", description="execute_todo / replan / complete / 建议动作")
+    suggested_action: GoalAction = Field(default=GoalAction.EXECUTE_TODO, description="execute_todo / replan / complete / 建议动作")
     reasoning: str = Field(default="", description="Why this is the right next step / 推理依据")
 
 

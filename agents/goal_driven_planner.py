@@ -49,6 +49,7 @@ from agents.base import BaseAgent
 from context.manager import ContextManager
 from llm.client import LLMClient
 from schema import (
+    GoalAction,
     GoalDocument,
     GoalReflection,
     GoalReanchorResult,
@@ -108,6 +109,14 @@ _BACKWARD_PLAN_PROMPT = """\
 Starting from the GOAL STATE, plan backward to identify milestones.
 Work backward from the goal. What must be true just before the goal is met?
 And before that? List 2-5 milestones in REVERSE order (goal first, start last).
+
+Example (for task: "Make a cup of tea"):
+  milestones: [
+    {{\"description\": \"Tea is ready to drink\"}},             ← Goal (position 1, the final state)
+    {{\"description\": \"Hot water poured over tea leaves\"}},  ← Precondition
+    {{\"description\": \"Water is boiling\"}},                  ← Precondition
+    {{\"description\": \"Kettle filled with water\"}}            ← Start (position 4, the first action)
+  ]
 
 Goal State: {target_state}
 Success Criteria: {criteria}
@@ -261,6 +270,11 @@ class GoalDrivenPlannerAgent(BaseAgent):
           4. Goal-guided execution loop
           5. Compile answer against goal
         """
+        # Reset per-task state to ensure clean start on reused instances
+        self._reanchor_counter = 0
+        self._goal_doc = None
+        self._todo_list = None
+
         logger.info("[GoalDrivenPlanner] Starting execution: %s", task[:100])
         self._emit("phase", "Building goal document...")
 
@@ -303,6 +317,11 @@ class GoalDrivenPlannerAgent(BaseAgent):
                             "[GoalDrivenPlanner] Stagnation detected (%d rounds), breaking",
                             stagnation_rounds,
                         )
+                        self._emit("stagnation_detected", {
+                            "stagnation_rounds": stagnation_rounds,
+                            "completed_count": current_completed,
+                            "total_todos": len(self._todo_list.todos),
+                        })
                         break
                 else:
                     stagnation_rounds = 0
@@ -315,7 +334,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 goal_doc.progress_pct = last_reflection.progress_pct
                 self._emit("goal_reflection", last_reflection.model_dump())
 
-                if last_reflection.suggested_action == "complete" or last_reflection.progress_pct >= 100:
+                if last_reflection.suggested_action == GoalAction.COMPLETE or last_reflection.progress_pct >= 100:
                     logger.info("[GoalDrivenPlanner] Goal reflection indicates completion")
                     break
 
@@ -423,10 +442,21 @@ class GoalDrivenPlannerAgent(BaseAgent):
             }]
 
         # Reverse order: LLM returns goal-first, we need start-first
-        milestones = [
-            Milestone(id=i + 1, **ms)
-            for i, ms in enumerate(reversed(raw_milestones))
-        ]
+        # Build milestones with field-level fallback to handle malformed LLM output
+        milestones = []
+        for i, ms in enumerate(reversed(raw_milestones)):
+            ms.setdefault("description", f"Milestone {i + 1}")
+            ms.setdefault("completion_criteria", f"Milestone {i + 1} completed")
+            ms.setdefault("estimated_complexity", "medium")
+            try:
+                milestones.append(Milestone(id=i + 1, **ms))
+            except Exception as exc:
+                logger.warning("[GoalDrivenPlanner] Skipping malformed milestone: %s", exc)
+                milestones.append(Milestone(
+                    id=i + 1,
+                    description=ms.get("description", f"Milestone {i + 1}"),
+                    completion_criteria=ms.get("completion_criteria", f"Milestone {i + 1} completed"),
+                ))
         return MilestonePlan(
             goal_description=goal_doc.target_state_description,
             milestones=milestones,
@@ -471,17 +501,30 @@ class GoalDrivenPlannerAgent(BaseAgent):
         data = await self.think_json(prompt)
         self.reset()
 
+        # Normalize suggested_action: LLM may return variations like "Replan"/"REPLAN"/"re-plan"
+        raw_action = str(data.get("suggested_action", "execute_todo")).lower().strip().replace("-", "_")
+        action_map = {
+            "execute_todo": GoalAction.EXECUTE_TODO,
+            "execute": GoalAction.EXECUTE_TODO,
+            "replan": GoalAction.REPLAN,
+            "re_plan": GoalAction.REPLAN,
+            "complete": GoalAction.COMPLETE,
+            "done": GoalAction.COMPLETE,
+            "finish": GoalAction.COMPLETE,
+        }
+        suggested_action = action_map.get(raw_action, GoalAction.EXECUTE_TODO)
+
         return GoalReflection(
             current_state_summary=data.get("current_state_summary", ""),
             gap_analysis=data.get("gap_analysis", ""),
             next_milestone=data.get("next_milestone", ""),
             progress_pct=float(data.get("progress_pct", 0.0)),
-            suggested_action=data.get("suggested_action", "execute_todo"),
+            suggested_action=suggested_action,
             reasoning=data.get("reasoning", ""),
         )
 
     def _get_state_summary(self, todo_list: TodoList) -> str:
-        """Build a human-readable state summary of the TODO list."""
+        """Build a human-readable state summary of the TODO list, including execution results."""
         lines = []
         for todo in todo_list.todos.values():
             status_icon = {
@@ -490,7 +533,10 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 TodoStatus.COMPLETED: "[x]",
                 TodoStatus.BLOCKED: "[!]",
             }.get(todo.status, "[?]")
-            lines.append(f"  {status_icon} #{todo.id}: {todo.description} (retries: {todo.retry_count})")
+            line = f"  {status_icon} #{todo.id}: {todo.description} (retries: {todo.retry_count})"
+            if todo.status == TodoStatus.COMPLETED and todo.result:
+                line += f"\n      → Result: {todo.result[:200]}"
+            lines.append(line)
         return "\n".join(lines) if lines else "No TODOs yet."
 
     # ------------------------------------------------------------------
@@ -556,8 +602,10 @@ class GoalDrivenPlannerAgent(BaseAgent):
             if dep_results:
                 dep_context = "\n".join(dep_results)
 
-        # Initialize bounded message list
-        messages: list[dict[str, Any]] = []
+        # Initialize bounded message list with system prompt
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": V8_GOAL_DRIVEN_SYSTEM_PROMPT},
+        ]
         tool_calls_log: list[ToolCallRecord] = []
 
         goal_injection = self._format_goal_for_prompt(goal_doc)
@@ -574,20 +622,28 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 if reflection.reasoning:
                     user_msg += f"\n\nReasoning for this TODO: {reflection.reasoning}"
             else:
-                goal_reminder = f"Goal: {goal_doc.success_criteria}\nFocus: {goal_doc.current_focus or todo.description}"
-                user_msg = f"Continue. {goal_reminder}"
+                user_msg = f"Continue.\n\n{goal_injection}\n\nFocus: {goal_doc.current_focus or todo.description}"
                 router_hint = self.tool_router.get_hint(step_id)
                 if router_hint:
                     user_msg += f"\n\nIMPORTANT: {router_hint}"
 
             messages.append({"role": "user", "content": user_msg})
 
-            # Sliding window: keep system msgs + last 20 messages to prevent unbounded growth
+            # Sliding window: keep system msgs + last ~20 messages, preserving tool_calls pairing
             if len(messages) > 24:
                 system_msgs = [m for m in messages if m.get("role") == "system"]
                 non_system = [m for m in messages if m.get("role") != "system"]
-                messages = system_msgs + non_system[-20:]
-                logger.debug("[GoalDrivenPlanner] Trimmed messages from %d to %d", len(system_msgs) + len(non_system), len(messages))
+                kept = non_system[-20:]
+                # Protect tool_calls pairing: if first kept msg is a tool response
+                # whose parent assistant(tool_calls) was trimmed, include that assistant
+                if kept and kept[0].get("role") == "tool":
+                    for i in range(len(non_system) - 20 - 1, -1, -1):
+                        if non_system[i].get("role") == "assistant" and non_system[i].get("tool_calls"):
+                            kept = non_system[i:]
+                            if len(kept) > 24:
+                                kept = kept[-22:]
+                            break
+                messages = system_msgs + kept
 
             # Call LLM with tools
             try:
@@ -726,19 +782,24 @@ class GoalDrivenPlannerAgent(BaseAgent):
         drift_detected = data.get("goal_drift_detected", False)
         correction = data.get("correction_applied", "")
 
-        if drift_detected:
-            logger.warning("[GoalDrivenPlanner] Goal drift detected: %s", correction)
-
         updated_doc = GoalDocument(
             original_task=goal_doc.original_task,
-            success_criteria=data.get("success_criteria", goal_doc.success_criteria),
-            target_state_description=data.get("target_state_description", goal_doc.target_state_description),
-            key_deliverables=data.get("key_deliverables", goal_doc.key_deliverables),
-            constraints=data.get("constraints", goal_doc.constraints),
+            success_criteria=goal_doc.success_criteria,                   # 冻结：核心字段不可变
+            target_state_description=goal_doc.target_state_description,   # 冻结：核心字段不可变
+            key_deliverables=goal_doc.key_deliverables,                   # 冻结：核心字段不可变
+            constraints=goal_doc.constraints,                             # 冻结：核心字段不可变
             progress_pct=float(data.get("progress_pct", goal_doc.progress_pct)),
             completed_milestones_summary=data.get("completed_milestones_summary", goal_doc.completed_milestones_summary),
             current_focus=data.get("current_focus", goal_doc.current_focus),
         )
+
+        if drift_detected:
+            logger.warning("[GoalDrivenPlanner] Goal drift detected: %s", correction)
+            self._emit("goal_drift_alert", {
+                "correction_applied": correction,
+                "original_criteria": goal_doc.success_criteria,
+                "suggested_criteria": data.get("success_criteria", ""),
+            })
 
         reanchor_result = GoalReanchorResult(
             updated_goal_doc=updated_doc,
@@ -780,20 +841,19 @@ class GoalDrivenPlannerAgent(BaseAgent):
         data = await self.think_json(prompt)
         self.reset()
 
-        # Add new TODOs
+        # Add new TODOs (using add_todo to preserve cycle detection)
         for new_todo_data in data.get("new_todos", []):
             if len(todo_list.todos) >= config_module.MAX_TODO_ITEMS:
                 break
-            new_id = max(todo_list.todos.keys(), default=0) + 1
             deps = new_todo_data.get("dependencies", [])
-            # Validate dependency IDs
             valid_deps = [d for d in deps if d in todo_list.todos]
-            item = TodoItem(
-                id=new_id,
-                description=new_todo_data.get("description", f"New TODO #{new_id}"),
-                dependencies=valid_deps,
-            )
-            todo_list.todos[new_id] = item
+            try:
+                todo_list.add_todo(
+                    description=new_todo_data.get("description", f"New TODO"),
+                    dependencies=valid_deps,
+                )
+            except ValueError:
+                logger.warning("[GoalDrivenPlanner] Skipping new TODO that would create cycle")
 
         # Modify existing TODOs
         for mod in data.get("modify_todos", []):
@@ -820,7 +880,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
         """Determine whether to refresh the TODO list this iteration."""
         if not last_result.success:
             return True
-        if reflection.suggested_action == "replan":
+        if reflection.suggested_action == GoalAction.REPLAN:
             return True
         # Periodic refresh every 3 iterations
         if iteration % 3 == 0:

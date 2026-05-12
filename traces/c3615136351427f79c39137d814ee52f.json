@@ -1,0 +1,29 @@
+{
+  "trace_id": "c3615136351427f79c39137d814ee52f",
+  "exported_at": "2026-05-12T06:32:16.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "3c3c79215a2709c7",
+      "parent_span_id": null,
+      "name": "llm.chat",
+      "start_time": "2026-05-12T06:32:12.632Z",
+      "end_time": "2026-05-12T06:32:14.052Z",
+      "duration_ms": 1420.3,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "deepseek-v4-flash",
+        "gen_ai.call_type": "chat",
+        "gen_ai.request.temperature": 0.0,
+        "gen_ai.request.max_tokens": 4096,
+        "gen_ai.prompt.content": "[user]\nWhat is 100 divided by 4?\n\n[assistant]\n100 divided by 4 equals 25.\n\n[user]\nNow multiply that result by 10.",
+        "latency_ms": 1420.25,
+        "gen_ai.usage.input_tokens": 34,
+        "gen_ai.usage.output_tokens": 39,
+        "gen_ai.usage.total_tokens": 73
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

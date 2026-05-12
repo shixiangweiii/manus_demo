@@ -1,7 +1,7 @@
 # Manus Demo 更新日志
 
-> **更新日期**: 2026-05-11
-> **当前版本**: v7.0
+> **更新日期**: 2026-05-12
+> **当前版本**: v8.0
 
 ## 概述
 
@@ -17,7 +17,149 @@ v4 → 两阶段混合分类器（规则 + LLM）+ 自动 v1/v2 路径选择
 v5 → Claude Code 风格隐式规划 + TODO 列表管理 + while(tool_use) 主循环
 v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 v7 → 全链路 Tracing（OpenTelemetry 标准 Span 树）+ 内置 Web Viewer（FastAPI 树形可视化）
+v8 → 目标驱动规划（ReflAct 风格「以终为始」）+ GoalDocument 持久锚定 + 逆向里程碑规划 + 目标状态反思 + 周期性重锚定 + 停滞检测
 ```
+
+---
+
+## v8.0 (2026-05-12)
+
+### 核心特性：目标驱动规划 —— 「以终为始」
+
+受 ReflAct（EMNLP 2025）目标状态反思和逆向规划启发，v8 在 v5 隐式规划基础上引入 GoalDocument 持久锚定机制，防止长流程任务中的目标漂移。
+
+#### 1. GoalDrivenPlannerAgent（目标驱动规划器）
+
+**新增文件**:
+- `agents/goal_driven_planner.py`: GoalDrivenPlannerAgent — 「以终为始」执行引擎（894 行）
+
+**核心思想**:
+- **GoalDocument 持久锚定**：任务开始时定义「完成标准」，跨迭代持久化，目标永不丢失
+- **逆向规划**：从终态推导里程碑，而非从任务描述正向规划，确保每个步骤都与目标对齐
+- **目标状态反思（ReflAct 风格）**：每次行动前对比当前状态与目标文档，识别差距并指导下一步
+- **有界消息上下文**：滑动窗口管理消息历史（最多保留 20 条），而非 v5 的无界扁平历史
+- **反思驱动的主动 TODO 刷新**：基于目标反思结论主动调整 TODO，而非仅失败时被动刷新
+- **周期性目标重锚定**：每隔 N 次迭代重新评估目标文档，检测目标偏移并纠正
+- **停滞检测**：连续多轮无进度突破时提前终止，避免无限循环
+
+**核心循环**:
+```
+1. 构建 GoalDocument（定义「完成标准」）
+2. 逆向规划：从终态推导里程碑序列 → MilestonePlan
+3. 里程碑转 TodoList（有序依赖链）
+4. while has_pending and iteration < max:
+   A. GoalReflection: 对比当前状态 vs 目标文档
+   B. 选择 TODO（由反思的 next_milestone 指导）
+   C. 执行 TODO（目标引导的 ReAct 循环，注入 GoalDocument）
+   D. 更新 TODO 状态
+   E. 目标重锚定（周期性或失败时触发）
+   F. 主动 TODO 刷新（失败 / replan 建议 / 每 3 轮）
+5. 对照目标文档汇编最终答案
+```
+
+**主要方法签名**:
+```python
+class GoalDrivenPlannerAgent(BaseAgent):
+    async def execute(self, task: str, context: str = "") -> str
+    async def _build_goal_document(self, task: str, context: str = "") -> GoalDocument
+    async def _backward_plan(self, goal_doc: GoalDocument) -> MilestonePlan
+    def _milestones_to_todos(self, plan: MilestonePlan, task: str) -> TodoList
+    async def _goal_reflect(self, goal_doc: GoalDocument, todo_list: TodoList, iteration: int) -> GoalReflection
+    def _select_todo_by_reflection(self, reflection: GoalReflection) -> TodoItem | None
+    async def _execute_todo_goal_guided(self, todo: TodoItem, goal_doc: GoalDocument, reflection: GoalReflection) -> StepResult
+    async def _reanchor_goal(self, goal_doc: GoalDocument, todo_list: TodoList, last_result: StepResult) -> GoalDocument
+    async def _refresh_todo_list(self, goal_doc: GoalDocument, todo_list: TodoList, last_result: StepResult) -> None
+    async def _compile_goal_anchored_answer(self, task: str, goal_doc: GoalDocument, results: list[StepResult]) -> str
+```
+
+#### 2. 数据模型（schema.py 新增 v8 模型）
+
+| 模型 | 用途 |
+|------|------|
+| `Milestone` | 当前状态与目标之间的检查点（id, description, completion_criteria, estimated_complexity） |
+| `MilestonePlan` | 从目标到当前状态的逆向规划里程碑序列 |
+| `GoalDocument` | 持久化目标状态，锚定所有规划和执行（original_task, success_criteria, target_state_description, key_deliverables, constraints, progress_pct 等） |
+| `GoalReflection` | 每次迭代的目标状态对比结果（current_state_summary, gap_analysis, next_milestone, progress_pct, suggested_action） |
+| `GoalReanchorResult` | 周期性目标重锚定结果（updated_goal_doc, goal_drift_detected, correction_applied） |
+
+#### 3. Orchestrator 路由增强
+
+**文件**: `agents/orchestrator.py`
+
+**变更**:
+- 新增 v8 GoalDrivenPlannerAgent 初始化逻辑（`ENABLE_GOAL_DRIVEN_PLANNER=true` 时创建）
+- `_execute_emergent()` 方法变更：当 `self.goal_driven_planner` 存在时路由到 v8，否则回退到 v5
+- v8 路由的质量门控：检查是否有 BLOCKED TODO，若有则发出 Reflection 事件（score=0.4）
+
+**路由逻辑**:
+```python
+# 当 ENABLE_GOAL_DRIVEN_PLANNER=true 时，emergent 路径升级为 v8
+if self.goal_driven_planner:
+    final_answer = await self.goal_driven_planner.execute(task, context)
+else:
+    final_answer = await self.emergent_planner.execute(task, context)
+```
+
+#### 4. Tracing 集成（v8 Span 事件）
+
+**文件**: `tracing/spans.py`（新增常量）
+
+**Span 名称**:
+- `execution.goal_driven`: v8 目标驱动执行阶段
+- `goal.anchor`: 目标锚定
+- `goal.reflect`: 目标状态反思
+- `goal.reanchor`: 目标重锚定
+
+**Attribute 键名**:
+- `goal.success_criteria`, `goal.progress_pct`, `goal.current_milestone`
+- `goal.drift_detected`, `goal.target_state`
+- `goal.reflection.action`, `goal.reflection.gap`
+
+**文件**: `tracing/bridge.py`（新增事件处理器）
+
+**事件处理器**:
+- `goal_anchor`: 记录初始目标文档（success_criteria, progress_pct）
+- `goal_reflection`: 记录目标状态反思（progress_pct, suggested_action, gap_analysis, next_milestone）
+- `goal_reanchor`: 记录目标重锚定事件（goal_drift_detected, progress_pct）
+
+**阶段映射** (`_phase_to_span_name` 新增):
+- "goal-driven" / "v8" → `execution.goal_driven`
+- "building goal" / "backward planning" → `goal.anchor`
+- "compiling final answer against goal" → `goal.anchor`
+
+#### 5. 配置项
+
+| 参数名 | 默认值 | 说明 |
+|--------|--------|------|
+| ENABLE_GOAL_DRIVEN_PLANNER | false | v8 目标驱动规划总开关（默认关闭，向后兼容） |
+| GOAL_REANCHOR_INTERVAL | 5 | 每隔多少次外层迭代重新锚定目标文档 |
+| GOAL_REFLECTION_INTERVAL | 1 | 每隔多少次外层迭代执行目标反思（1=每次都反思） |
+| MAX_GOAL_DRIVEN_ITERATIONS | MAX_TODO_ITEMS × MAX_TODO_RETRIES | v8 主循环最大迭代数 |
+| GOAL_DRIVEN_STAGNATION_WINDOW | 3 | 连续多少轮无进度突破则提前终止 |
+
+#### 6. 与 v5 EmergentPlanner 的关键区别
+
+| 特性 | v5 EmergentPlanner | v8 GoalDrivenPlanner |
+|------|--------------------|-----------------------|
+| 目标锚定 | 无持久目标，容易漂移 | GoalDocument 跨迭代持久化 |
+| 规划方式 | 从任务描述正向规划 | 从终态逆向规划里程碑 |
+| 反思机制 | 通用"think"步骤 | ReflAct 风格结构化目标对比 |
+| 消息管理 | 无界扁平历史 | 滑动窗口（最多 24 条） |
+| TODO 刷新 | 仅失败时被动刷新 | 反思驱动的主动刷新 |
+| 目标偏移检测 | 无 | 周期性重锚定 + drift 检测 |
+| 停滞检测 | 无 | 连续 N 轮无进度突破时终止 |
+| 触发方式 | 自动分类（emergent 路径） | 特性开关覆盖 emergent 路径 |
+
+#### 7. 测试覆盖
+
+**文件**: `tests/test_goal_driven_planner.py`（约 40 个测试用例）
+
+**测试内容**:
+- 数据模型测试：GoalDocument、MilestonePlan、GoalReflection、GoalReanchorResult
+- Agent 核心逻辑测试：初始化、构建目标文档、逆向规划、目标反思、TODO 选择、停滞检测、重锚定、答案汇编
+- Orchestrator 路由测试：v8 启用时路由到 GoalDrivenPlannerAgent，禁用时回退到 v5
+- 事件测试：验证 v8 事件序列（goal_anchor、todo_list_initialized、goal_reflection 等）和 TracingBridge 兼容性
+- 目标引导 ReAct 循环测试：无工具调用完成、最大迭代限制、目标注入验证
 
 ---
 
@@ -672,31 +814,31 @@ Thought → Action → Observe
         │              │              │
         ▼              ▼              ▼
 ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│  PlannerAgent │ │ EmergentPlan │ │  (其他路径)  │
-│              │ │    nerAgent  │ │              │
-│  (v1/v2)     │ │    (v5)      │ │              │
-└──────┬───────┘ └──────┬───────┘ └──────────────┘
-       │                │
-       │                │
-       ▼                ▼
-┌──────────────┐ ┌──────────────┐
-│ ExecutorAgent│ │ EmergentPlan │
-│              │ │    nerAgent  │
-│ (v1/v2/v6)   │ │    (v5/v6)   │
-└──────────────┘ └──────────────┘
-       │                │
-       │                │
-       ▼                ▼
-┌──────────────────────────────────────┐
-│           ReActEngine                │
-│     (统一 ReAct 循环引擎 - v6)       │
-└──────────────────────────────────────┘
+│  PlannerAgent │ │ EmergentPlan │ │  GoalDriven  │
+│              │ │    nerAgent  │ │    Planner   │
+│  (v1/v2)     │ │    (v5)      │ │    (v8)      │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       │                │                │
+       ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ ExecutorAgent│ │ EmergentPlan │ │ GoalDriven   │
+│              │ │    nerAgent  │ │    Planner   │
+│ (v1/v2/v6)   │ │    (v5/v6)   │ │    (v8)      │
+└──────────────┘ └──────────────┘ └──────────────┘
+       │                │                │
+       │                │                │
+       ▼                ▼                ▼
+┌──────────────────────────────────────────────────────────┐
+│           ReActEngine / GoalGuidedReAct                  │
+│  (统一 ReAct 循环引擎 - v6 / 目标引导 ReAct - v8)       │
+└──────────────────────────────────────────────────────────┘
        │
        ▼
-┌──────────────────────────────────────┐
-│           Tools                      │
-│  (web_search, code_executor, etc.)   │
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│           Tools                                          │
+│  (web_search, code_executor, file_ops, shell, etc.)     │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### 路由决策流程
@@ -709,9 +851,13 @@ Orchestrator.classify_task()
     │
     ├─→ simple ──→ PlannerAgent (v1) ──→ ExecutorAgent (v1)
     │
-    ├─→ complex ──→ PlannerAgent (v2) ──→ ExecutorAgent (v2)
+    ├─→ complex ──→ PlannerAgent (v2) ──→ DAGExecutor (v2)
     │
-    ├─→ emergent ──→ EmergentPlannerAgent (v5)
+    ├─→ emergent ──→ { ENABLE_GOAL_DRIVEN_PLANNER? }
+    │                   │
+    │                   ├─→ true ──→ GoalDrivenPlannerAgent (v8)
+    │                   │
+    │                   └─→ false ─→ EmergentPlannerAgent (v5)
     │
     └─→ 其他路径 ──→ 相应处理
 ```
@@ -719,6 +865,16 @@ Orchestrator.classify_task()
 ---
 
 ## 配置项汇总
+
+### v8.0 新增配置
+
+| 参数名 | 默认值 | 版本 | 说明 |
+|--------|--------|------|------|
+| `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8.0 | v8 目标驱动规划总开关（默认关闭，向后兼容） |
+| `GOAL_REANCHOR_INTERVAL` | `5` | v8.0 | 每隔多少次外层迭代重新锚定目标文档 |
+| `GOAL_REFLECTION_INTERVAL` | `1` | v8.0 | 每隔多少次外层迭代执行目标反思（1=每次都反思） |
+| `MAX_GOAL_DRIVEN_ITERATIONS` | `MAX_TODO_ITEMS × MAX_TODO_RETRIES` | v8.0 | v8 主循环最大迭代数 |
+| `GOAL_DRIVEN_STAGNATION_WINDOW` | `3` | v8.0 | 连续多少轮无进度突破则提前终止 |
 
 ### v7.0 新增配置
 
@@ -791,6 +947,26 @@ Orchestrator.classify_task()
 ---
 
 ## 迁移指南
+
+### 从 v7.0 升级到 v8.0
+
+**新增功能**:
+- GoalDrivenPlannerAgent 目标驱动规划器（ReflAct 风格「以终为始」）
+- GoalDocument 持久锚定 + 逆向里程碑规划 + 目标状态反思 + 周期性重锚定 + 停滞检测
+
+**迁移步骤**:
+1. 安装新增依赖（无新增 Python 包依赖，使用现有 openai/pydantic/rich）
+2. 更新配置文件，添加 v8 配置项（可选）
+3. 启用 v8 目标驱动规划：设置 `ENABLE_GOAL_DRIVEN_PLANNER=true`
+4. 验证现有功能正常（v8 默认关闭，不影响现有 v5 隐式规划路径）
+5. 运行测试：`python -m pytest tests/test_goal_driven_planner.py -v`
+
+**注意事项**:
+- v8 功能默认关闭（`ENABLE_GOAL_DRIVEN_PLANNER=false`），零开销运行
+- 启用 v8 后，emergent 分类路由会自动使用 GoalDrivenPlannerAgent 替代 EmergentPlannerAgent
+- v8 与 v5 共享相同的事件格式（todo_start/todo_complete/todo_failed/todo_blocked），TracingBridge 兼容
+- 新增 v8 专用事件：goal_anchor、goal_reflection、goal_reanchor
+- v8 的消息管理采用滑动窗口（最多 24 条），与 v5 的无界历史不同
 
 ### 从 v6.0 升级到 v7.0
 
@@ -920,7 +1096,7 @@ Orchestrator.classify_task()
 
 ## 总结
 
-Manus Demo 从 v1.0 到 v7.0 的演进过程，展现了多智能体系统在规划能力、执行效率、健壮性、可观测性等方面的持续改进：
+Manus Demo 从 v1.0 到 v8.0 的演进过程，展现了多智能体系统在规划能力、执行效率、健壮性、可观测性等方面的持续改进：
 
 - **v1.0**: 奠定基础，实现简单的线性规划和顺序执行
 - **v2.0**: 引入 DAG 和并行执行，大幅提升复杂任务处理能力
@@ -929,5 +1105,6 @@ Manus Demo 从 v1.0 到 v7.0 的演进过程，展现了多智能体系统在规
 - **v5.0**: 引入隐式规划范式，拓展任务处理范围
 - **v6.0**: 增强系统健壮性，提高 LLM 调用的可靠性
 - **v7.0**: 建立全链路可观测性，提供 OpenTelemetry 标准 Tracing + 内置 Web 可视化查看器
+- **v8.0**: 引入目标驱动规划（ReflAct 风格），通过 GoalDocument 持久锚定防止目标漂移，逆向规划确保步骤与目标对齐
 
 每个版本都在前一个版本的基础上进行改进，同时保持向后兼容性，为用户提供平滑的升级体验。

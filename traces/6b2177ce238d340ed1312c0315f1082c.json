@@ -1,0 +1,24 @@
+{
+  "trace_id": "6b2177ce238d340ed1312c0315f1082c",
+  "exported_at": "2026-05-12T06:32:11.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "8dad9735194a49f1",
+      "parent_span_id": null,
+      "name": "tool.execute.echo",
+      "start_time": "2026-05-12T06:32:09.580Z",
+      "end_time": "2026-05-12T06:32:09.580Z",
+      "duration_ms": 0.12,
+      "attributes": {
+        "tool.name": "echo",
+        "tool.parameters": "{\"text\": \"The sum is 40\"}",
+        "latency_ms": 0.08,
+        "tool.success": true,
+        "tool.result_size": 19
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

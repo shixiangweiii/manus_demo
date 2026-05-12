@@ -1,0 +1,29 @@
+{
+  "trace_id": "6fc9a0d542df0009d53c85d05eb91d92",
+  "exported_at": "2026-05-12T06:32:11.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "b7f6c74c9efa8866",
+      "parent_span_id": null,
+      "name": "llm.chat_with_tools",
+      "start_time": "2026-05-12T06:32:09.580Z",
+      "end_time": "2026-05-12T06:32:11.059Z",
+      "duration_ms": 1478.76,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "deepseek-v4-flash",
+        "gen_ai.call_type": "chat_with_tools",
+        "gen_ai.request.temperature": 0.5,
+        "gen_ai.request.max_tokens": 4096,
+        "gen_ai.prompt.content": "[user]\nFirst, calculate 15 + 25 using the add tool. Then echo the sum.\n\n[tool]\n40\n\n[user]\nContinue executing based on the tool results above.\n\n[tool]\nEcho: The sum is 40\n\n[user]\nContinue executing based on the tool results above.",
+        "latency_ms": 1478.66,
+        "gen_ai.usage.input_tokens": 533,
+        "gen_ai.usage.output_tokens": 68,
+        "gen_ai.usage.total_tokens": 601
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}
