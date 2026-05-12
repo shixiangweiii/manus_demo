@@ -41,7 +41,7 @@ from evaluation.metrics import (
     compute_planning_score,
 )
 from llm.client import LLMClient
-from schema import Reflection, StepResult, TokenUsageSummary
+from schema import Reflection, TokenUsageSummary
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -76,12 +76,11 @@ class EvaluationProbe:
         self.plan_step_count: int = 0
         self.plan_generation_start: float = 0.0
         self.plan_generation_end: float = 0.0
-        self.plan_tokens_start: int = 0
 
         # Execution phase
         self.execution_start: float = 0.0
         self.execution_end: float = 0.0
-        self.execution_tokens_start: int = 0
+        self.task_start_time: float = 0.0
         self.steps_completed: int = 0
         self.steps_failed: int = 0
         self.steps_skipped: int = 0
@@ -91,14 +90,12 @@ class EvaluationProbe:
         self.failed_tool_calls: int = 0
         self.unique_tools: set[str] = set()
         self.total_react_iterations: int = 0
-        self.step_results: list[StepResult] = []
 
         # Reflection phase
         self.reflection_passed: bool = False
         self.reflection_score: float = 0.0
         self.reflection_start: float = 0.0
         self.reflection_end: float = 0.0
-        self.reflection_tokens_start: int = 0
         self.reflection_observed: bool = False
 
         # Replan tracking
@@ -154,8 +151,9 @@ class EvaluationProbe:
     def _handle_event(self, event: str, data: Any) -> None:
         # --- Task start ---
         if event == "task_start":
-            self.execution_start = time.time()
+            self.task_start_time = time.time()
             self._phase_started["task"] = time.time()
+            self.classification_forced = (config.PLAN_MODE != "auto")
 
         # --- Classification ---
         elif event == "task_complexity":
@@ -190,8 +188,7 @@ class EvaluationProbe:
 
         # --- Execution ---
         elif event == "phase" and "Executing" in str(data):
-            if self.execution_start == 0:
-                self.execution_start = time.time()
+            self.execution_start = time.time()
 
         elif event == "step_complete":
             self.steps_completed += 1
@@ -204,8 +201,7 @@ class EvaluationProbe:
                         self.failed_tool_calls += 1
                     else:
                         self.successful_tool_calls += 1
-                self.total_react_iterations += len(result.tool_calls_log)
-            self.step_results.append(result)
+                self.total_react_iterations += len(result.tool_calls_log) + 1  # +1 for final answer iteration
 
         elif event == "step_failed":
             self.steps_failed += 1
@@ -219,8 +215,7 @@ class EvaluationProbe:
                 for tc in result.tool_calls_log:
                     self.total_tool_calls += 1
                     self.failed_tool_calls += 1
-                self.total_react_iterations += len(result.tool_calls_log)
-            self.step_results.append(result)
+                self.total_react_iterations += len(result.tool_calls_log) + 1  # +1 for final answer iteration
 
         elif event == "step_skipped":
             self.steps_skipped += 1
@@ -237,8 +232,7 @@ class EvaluationProbe:
                             self.failed_tool_calls += 1
                         else:
                             self.successful_tool_calls += 1
-                    self.total_react_iterations += len(result.tool_calls_log)
-                self.step_results.append(result)
+                    self.total_react_iterations += len(result.tool_calls_log) + 1  # +1 for final answer iteration
 
         elif event == "node_failed":
             self.steps_failed += 1
@@ -272,7 +266,7 @@ class EvaluationProbe:
         elif event in ("plan_adaptation", "adaptive_planning"):
             self.replan_count += 1
         elif event == "phase" and any(
-            kw in str(data) for kw in ("Re-planning", "Partial replan", "plan_adaptation", "adaptive_planning")
+            kw in str(data) for kw in ("Re-planning", "Partial replan")
         ):
             self.replan_count += 1
 
@@ -319,12 +313,19 @@ class EvaluationProbe:
         # Step coverage against ground truth
         step_coverage = 1.0
         if gt.expected_subtasks:
-            # Keyword-based coverage check with multilingual split support
             answer_lower = self.final_answer.lower()
-            covered = sum(
-                1 for sub in gt.expected_subtasks
-                if any(kw in answer_lower for kw in re.split(r'[\s,，、;；]+', sub.lower()) if len(kw) > 1)
-            )
+            covered = 0
+            for sub in gt.expected_subtasks:
+                sub_lower = sub.lower()
+                # 英文分词匹配（按空白/标点切分后检查各 token）
+                tokens = [t for t in re.split(r'[\s,，、;；]+', sub_lower) if len(t) > 1]
+                if any(tok in answer_lower for tok in tokens):
+                    covered += 1
+                # 英文分词未匹配时，用中文 2-gram 滑动窗口匹配
+                elif len(sub_lower) >= 2:
+                    ngrams = [sub_lower[i:i+2] for i in range(len(sub_lower) - 1)]
+                    if any(ng in answer_lower for ng in ngrams):
+                        covered += 1
             step_coverage = covered / len(gt.expected_subtasks) if gt.expected_subtasks else 1.0
 
         planning = PlanningMetrics(
@@ -379,7 +380,7 @@ class EvaluationProbe:
 
         # Efficiency metrics
         replan_success = self.replan_count > 0 and task_success
-        trajectory_eff = self.reflection_score / max(self.total_react_iterations, 1)
+        trajectory_eff = step_sr / max(self.total_react_iterations / max(self.steps_completed, 1), 1)
 
         efficiency = EfficiencyMetrics(
             total_tokens=self.total_tokens,

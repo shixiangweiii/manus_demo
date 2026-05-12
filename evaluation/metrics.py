@@ -88,7 +88,6 @@ class PlanningMetrics(BaseModel):
     plan_structure_valid: bool = True           # 计划结构是否有效
 
     plan_generation_time_ms: float = 0.0        # 计划生成耗时（毫秒）
-    plan_generation_tokens: int = 0             # 计划生成消耗 tokens
 
     # Step/subgoal coverage (vs. ground truth)
     expected_step_count: int = 0                # 参考答案的步骤数
@@ -129,8 +128,6 @@ class EfficiencyMetrics(BaseModel):
     效率和成本指标。
     """
     total_tokens: int = 0                       # 总 token 消耗
-    tokens_by_phase: dict[str, int] = Field(default_factory=dict)  # 按阶段分解
-    cost_per_successful_task: float = 0.0       # 每成功任务的 token 成本
 
     total_time_ms: float = 0.0                  # 端到端总耗时
     trajectory_efficiency: float = 0.0          # 轨迹效率 = score / steps_taken
@@ -155,8 +152,6 @@ class ReflectionMetrics(BaseModel):
 
     is_false_positive: bool = False             # 反思通过但 GT 认为失败
     is_false_negative: bool = False             # 反思拒绝但 GT 认为成功
-
-    reflection_tokens: int = 0                  # 反思阶段 token 消耗
 
 
 class FailureRecord(BaseModel):

@@ -464,6 +464,51 @@ class TestProbeEventHandling:
         assert any("python" in t for t in tokens)
         assert any("javascript" in t for t in tokens)
 
+    def test_chinese_step_coverage_actual_match(self):
+        """Fix 1: Chinese subtasks should be matched via n-gram in build_result."""
+        probe = EvaluationProbe()
+        probe.final_answer = (
+            "Step 1 已完成。使用 execute_python 工具成功计算并输出了前 10 个斐波那契数，"
+            "结果为：[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]。"
+            "Step 2 已完成。使用 file_ops 工具将斐波那契数列保存至本地文件 fibonacci.txt 中。"
+        )
+        probe.task_success = True
+        task = BenchmarkTask(
+            task_id="test_zh_coverage",
+            task_description="计算斐波那契数并保存",
+            ground_truth=GroundTruth(
+                expected_complexity="simple",
+                expected_subtasks=[
+                    "计算斐波那契数列",
+                    "将结果保存到文件",
+                ],
+                must_include_keywords=["fibonacci"],
+            ),
+        )
+        result = probe.build_result(task=task, forced_mode=PlanMode.SIMPLE, llm_model="test")
+        # Both Chinese subtasks should be covered via n-gram matching
+        assert result.planning.step_coverage_ratio == 1.0
+
+    def test_chinese_step_coverage_partial(self):
+        """Fix 1: Only matched subtasks should be counted."""
+        probe = EvaluationProbe()
+        probe.final_answer = "成功计算了斐波那契数列，但未进行数据可视化展示。"
+        probe.task_success = True
+        task = BenchmarkTask(
+            task_id="test_zh_partial",
+            task_description="test",
+            ground_truth=GroundTruth(
+                expected_subtasks=[
+                    "计算斐波那契数列",
+                    "将结果上传到远程服务器",
+                ],
+                must_include_keywords=[],
+            ),
+        )
+        result = probe.build_result(task=task, forced_mode=PlanMode.SIMPLE, llm_model="test")
+        # Only first subtask matched; second has no n-gram overlap with answer
+        assert result.planning.step_coverage_ratio == 0.5
+
     def test_todo_count_extraction(self):
         """M4 fix: todo_list_initialized should extract count."""
         probe = EvaluationProbe()
