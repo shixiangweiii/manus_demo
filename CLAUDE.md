@@ -240,6 +240,8 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 - **Chinese + English bilingual comments** — most modules have dual-language docstrings
 - **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`)
 - **Token tracking centralized** — only `LLMClient` and `OrchestratorAgent` manage token usage; individual execution agents (Executor, EmergentPlanner, Reflector, Planner) have no token tracking code
+- **Replan edge pattern** — `_parse_dag()` may produce edges referencing nodes outside its parsed set (LLM references old DAG completed nodes); these are filtered and stored in `_filtered_edges`; `_merge_dags()` reconstructs valid ones after merge
+- **OTel detach convention** — all `otel_context.detach()` calls in `tracing/bridge.py` are unprotected by try/except (OTel library catches ValueError internally); logging suppression is handled centrally by `OtelDetachFilter` in `main.py`, not at each call site
 
 ## Important Design Decisions
 
@@ -252,6 +254,9 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 7. **Evaluation via event probe**: `EvaluationProbe` hooks into `on_event` callback without modifying core code; forced routing via `config.PLAN_MODE` override with `classification_forced` flag to correctly handle scoring weights
 8. **Tracing via event bridge**: `TracingBridge` hooks into the same `on_event` callback as the UI and evaluation; it creates OTel Spans with parent-child hierarchy matching the task execution flow; exception-safe — tracing errors never affect main execution
 9. **Context compression boundary safety**: `ContextManager._find_safe_split()` ensures the split between old and recent messages never breaks `tool_calls` structural groups (assistant+tool_responses must stay together), preventing orphaned tool messages that would cause LLM API 400 errors
+10. **DAG dataflow dependencies**: `PLANNER_SYSTEM_PROMPT` Rule 6 requires actions to express cross-subgoal dataflow dependencies (e.g., `act_2_1.dependencies = ["act_1_1"]`); `_parse_dag()` automatically infers subgoal-level dependencies from cross-subgoal action deps — no code restriction on dep_id scope
+11. **Replan robustness**: `_parse_dag()` filters orphan edges (source/target not in parsed nodes) and stores them in `TaskDAG._filtered_edges`; `_merge_dags()` reconstructs these cross-DAG edges after merge when both endpoints exist in the merged node set
+12. **OTel context detach handling**: `OtelDetachFilter` in `main.py` suppresses OTel `Failed to detach context` ERROR tracebacks by downgrading the log record to INFO in-place — avoids misleading stack traces during concurrent asyncio DAG execution
 
 ## Documentation
 
