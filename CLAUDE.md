@@ -158,7 +158,6 @@ All config via env vars / `.env` file. Key variables:
 | `LLM_RETRY_ENABLED` | `false` | Enable exponential-backoff retry |
 | `ENABLE_REACT_ENGINE_V2` | `false` | Use unified ReActEngine (v6 feature flag) |
 | `ADAPTIVE_PLANNING_ENABLED` | `true` | Enable runtime DAG adaptation |
-| `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5 emergent planning route |
 | `NODE_EXECUTION_TIMEOUT` | `300` | Per-node timeout in seconds |
 | `SANDBOX_DIR` | `~/.manus_demo/sandbox` | Sandboxed file/shell working directory |
 | `MAX_TODO_ITEMS` | `20` | v5 TODO list max size |
@@ -175,6 +174,9 @@ All config via env vars / `.env` file. Key variables:
 ```bash
 # Install
 pip install -r requirements.txt
+
+# Configure (copy and edit with your API key)
+cp .env.example .env
 
 # Run (interactive)
 python main.py
@@ -199,6 +201,8 @@ python -m pytest tests/ -v
 # Individual test suites
 python -m pytest tests/test_dag_capabilities.py -v      # DAG planning, parallel exec, conditional/rollback, adaptive
 python -m pytest tests/test_emergent_planning.py -v     # v5 TODO list management, EmergentPlanner
+python -m pytest tests/test_emergent_simple.py -v       # v5 emergent planning simple scenarios
+python -m pytest tests/test_goal_driven_planner.py -v   # v8 goal-driven planning, milestones, stagnation
 python -m pytest tests/test_tracing.py -v               # v7 OTel tracing bridge, spans, exporters
 python -m pytest tests/test_evaluation.py -v            # Evaluation metrics, scoring, probe
 python -m pytest tests/test_concurrent_execution.py -v  # asyncio.gather DAG parallelism
