@@ -127,6 +127,19 @@ class OrchestratorAgent:
             on_event=self._emit,
         )
 
+        # v8 Goal-Driven Planner (feature-flagged, default off)
+        # v8 目标驱动规划器（特性开关控制，默认关闭）
+        self.goal_driven_planner = None
+        if config.ENABLE_GOAL_DRIVEN_PLANNER:
+            from agents.goal_driven_planner import GoalDrivenPlannerAgent
+            self.goal_driven_planner = GoalDrivenPlannerAgent(
+                llm_client=self.llm_client,
+                tools=tools or [],
+                context_manager=self.context_manager,
+                on_event=self._emit,
+            )
+            logger.info("[Orchestrator] Goal-driven planner (v8) enabled")
+
         # Memory & knowledge（记忆和知识检索）
         self.short_term = ShortTermMemory()    # 短期记忆：当前会话上下文
         self.long_term = LongTermMemory()      # 长期记忆：跨会话持久化
@@ -359,10 +372,40 @@ class OrchestratorAgent:
         Execute task using emergent planning (Claude Code style).
         使用隐式规划执行任务（Claude Code 风格）。
 
-        This delegates to EmergentPlannerAgent which manages TODO list
-        dynamically during execution.
-        委托给 EmergentPlannerAgent，在执行过程中动态管理 TODO 列表。
+        When ENABLE_GOAL_DRIVEN_PLANNER=true, uses v8 goal-driven engine.
+        Otherwise falls back to v5 EmergentPlannerAgent.
+
+        当 ENABLE_GOAL_DRIVEN_PLANNER=true 时，使用 v8 目标驱动引擎。
+        否则回退到 v5 EmergentPlannerAgent。
         """
+        # v8 Goal-Driven path
+        if self.goal_driven_planner:
+            self._emit("phase", "Executing with goal-driven planning (v8)...")
+            final_answer = await self.goal_driven_planner.execute(task, context)
+
+            # Quality gate: check for blocked TODOs
+            blocked_todos = []
+            if self.goal_driven_planner._todo_list:
+                blocked_todos = [
+                    t for t in self.goal_driven_planner._todo_list.todos.values()
+                    if t.status == TodoStatus.BLOCKED
+                ]
+            if blocked_todos:
+                logger.warning(
+                    "[Orchestrator] Goal-driven planning completed with %d blocked TODOs",
+                    len(blocked_todos),
+                )
+                self._emit("reflection", Reflection(
+                    passed=False, score=0.4,
+                    feedback=f"Goal-driven planning completed but {len(blocked_todos)} TODOs were blocked: "
+                             + "; ".join(t.description[:80] for t in blocked_todos[:3]),
+                    suggestions=["Consider re-running with complex mode for structured planning"],
+                ))
+
+            self._emit("phase", "Goal-driven planning completed.")
+            return final_answer
+
+        # v5 Emergent Planning path (default)
         self._emit("phase", "Executing with emergent planning (TODO list)...")
         final_answer = await self.emergent_planner.execute(task, context)
 

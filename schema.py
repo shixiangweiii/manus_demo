@@ -8,10 +8,12 @@ v2: Added DAG-based planning models (TaskNode, TaskEdge, DAGState, etc.)
     inspired by LangGraph's centralized-state pattern.
 v3: Added adaptive planning models (AdaptAction, PlanAdaptation, AdaptationResult).
 v5: Added emergent planning models (TodoStatus, TodoItem, TodoList with cycle detection).
+v8: Added goal-driven planning models (Milestone, MilestonePlan, GoalDocument, GoalReflection).
 v2: 新增 DAG 规划模型（TaskNode、TaskEdge、DAGState 等），
     设计灵感来源于 LangGraph 的集中式状态管理模式。
 v3: 新增自适应规划模型（AdaptAction、PlanAdaptation、AdaptationResult）。
 v5: 新增隐式规划模型（TodoStatus、TodoItem、TodoList 及环检测）。
+v8: 新增目标驱动规划模型（Milestone、MilestonePlan、GoalDocument、GoalReflection）。
 """
 
 from __future__ import annotations
@@ -563,6 +565,79 @@ class TodoList(BaseModel):
             todo.status in (TodoStatus.PENDING, TodoStatus.IN_PROGRESS)
             for todo in self.todos.values()
         )
+
+
+# ======================================================================
+# Goal-Driven Planning (v8) - "Begin with the End in Mind"
+# 目标驱动规划模型（v8 新增）- 以终为始
+# ======================================================================
+
+class Milestone(BaseModel):
+    """
+    A checkpoint between current state and the goal.
+    当前状态与目标之间的检查点。
+    """
+    id: int = Field(description="Milestone sequence number / 序号")
+    description: str = Field(description="What this milestone achieves / 里程碑描述")
+    completion_criteria: str = Field(description="Observable condition for completion / 完成判定条件")
+    estimated_complexity: str = Field(default="medium", description="low / medium / high / 预估复杂度")
+
+
+class MilestonePlan(BaseModel):
+    """
+    Backward-planned milestone sequence from goal to current state.
+    从目标到当前状态的逆向规划里程碑序列。
+    """
+    goal_description: str = Field(description="The end-state description / 目标状态描述")
+    milestones: list[Milestone] = Field(default_factory=list, description="Ordered milestones / 有序里程碑")
+    backward_reasoning: str = Field(default="", description="Why this sequence leads to the goal / 逆向推理依据")
+
+
+class GoalDocument(BaseModel):
+    """
+    Persistent goal state that anchors all planning and execution.
+    持久化目标状态，锚定所有规划和执行。
+
+    Created once at task start, updated (never discarded) throughout execution.
+    Every ReAct iteration references this document to maintain goal alignment.
+    在任务开始时创建一次，执行期间持续更新（永不丢弃）。
+    每次工具循环迭代都参照此文档以保持目标对齐。
+    """
+    original_task: str = Field(description="Verbatim user task / 用户原始任务")
+    success_criteria: str = Field(description="What 'done' looks like / 成功标准")
+    target_state_description: str = Field(description="Final state as if task is already complete / 目标状态描述")
+    key_deliverables: list[str] = Field(default_factory=list, description="Concrete outputs expected / 预期交付物")
+    constraints: list[str] = Field(default_factory=list, description="Boundaries or non-goals / 约束和非目标")
+    progress_pct: float = Field(default=0.0, description="Estimated progress 0-100 / 预估进度百分比")
+    completed_milestones_summary: str = Field(default="", description="Compressed history of completed work / 已完成工作摘要")
+    current_focus: str = Field(default="", description="What we are working on right now / 当前工作焦点")
+    updated_at: float = Field(default_factory=time.time, description="Last update timestamp / 最后更新时间")
+
+
+class GoalReflection(BaseModel):
+    """
+    Result of goal-state comparison at each iteration (ReflAct style).
+    每次迭代的目标状态对比结果（ReflAct 风格）。
+
+    Replaces v5's generic "think" with structured comparison against the goal document.
+    用对目标文档的结构化对比取代 v5 的通用"思考"步骤。
+    """
+    current_state_summary: str = Field(description="What has been accomplished / 已完成内容摘要")
+    gap_analysis: str = Field(description="What remains between current and goal / 差距分析")
+    next_milestone: str = Field(description="The specific sub-goal to pursue now / 下一步里程碑")
+    progress_pct: float = Field(default=0.0, description="0-100 progress estimate / 进度百分比")
+    suggested_action: str = Field(default="execute_todo", description="execute_todo / replan / complete / 建议动作")
+    reasoning: str = Field(default="", description="Why this is the right next step / 推理依据")
+
+
+class GoalReanchorResult(BaseModel):
+    """
+    Result of periodic goal re-anchoring.
+    周期性目标重锚定结果。
+    """
+    updated_goal_doc: GoalDocument = Field(description="Refreshed goal document / 更新后的目标文档")
+    goal_drift_detected: bool = Field(default=False, description="Whether drift was detected / 是否检测到目标偏移")
+    correction_applied: str = Field(default="", description="Description of correction if drift detected / 纠正措施描述")
 
 
 # ======================================================================

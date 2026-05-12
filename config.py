@@ -87,6 +87,14 @@ LLM_RETRY_BACKOFF_FACTOR = float(os.getenv("LLM_RETRY_BACKOFF_FACTOR", "2.0"))  
 # --- Token Usage Tracking ---
 TOKEN_TRACKING_ENABLED = os.getenv("TOKEN_TRACKING_ENABLED", "true").lower() == "true"  # 是否启用 Token 消耗追踪
 
+# --- v8.0 Goal-Driven Planning Feature Flags ---
+# --- 目标驱动规划（v8 新增）---
+ENABLE_GOAL_DRIVEN_PLANNER = os.getenv("ENABLE_GOAL_DRIVEN_PLANNER", "false").lower() == "true"  # 是否启用 v8 目标驱动规划引擎（默认关闭，向后兼容）
+GOAL_REANCHOR_INTERVAL = int(os.getenv("GOAL_REANCHOR_INTERVAL", "5"))  # 每隔多少次外层迭代重新锚定目标文档
+GOAL_REFLECTION_INTERVAL = int(os.getenv("GOAL_REFLECTION_INTERVAL", "1"))  # 每隔多少次外层迭代执行目标反思（1=每次都反思）
+MAX_GOAL_DRIVEN_ITERATIONS = int(os.getenv("MAX_GOAL_DRIVEN_ITERATIONS", str(MAX_TODO_ITEMS * MAX_TODO_RETRIES)))  # v8 主循环最大迭代数
+GOAL_DRIVEN_STAGNATION_WINDOW = int(os.getenv("GOAL_DRIVEN_STAGNATION_WINDOW", "3"))  # 连续多少轮无进度突破则提前终止
+
 # ======================================================================
 # Tracing Configuration (v7)
 # 全链路追踪配置（v7 新增）

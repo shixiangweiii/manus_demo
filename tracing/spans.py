@@ -54,6 +54,12 @@ class SpanName:
     TODO_EXECUTE = "todo.execute"
     TODO_UPDATE_LIST = "todo.update_list"
 
+    # --- Goal-Driven (v8) ---
+    EXECUTION_GOAL_DRIVEN = "execution.goal_driven"
+    GOAL_ANCHOR = "goal.anchor"
+    GOAL_REFLECT = "goal.reflect"
+    GOAL_REANCHOR = "goal.reanchor"
+
     # --- ReAct Loop ---
     REACT_ITERATION = "react.iteration"
 
@@ -135,6 +141,15 @@ class AttrKey:
     TODO_STATUS = "todo.status"
     TODO_RETRY_COUNT = "todo.retry_count"
     TODO_LIST_SIZE = "todo.list_size"
+
+    # --- Goal-Driven (v8) ---
+    GOAL_SUCCESS_CRITERIA = "goal.success_criteria"
+    GOAL_PROGRESS_PCT = "goal.progress_pct"
+    GOAL_MILESTONE = "goal.current_milestone"
+    GOAL_DRIFT_DETECTED = "goal.drift_detected"
+    GOAL_TARGET_STATE = "goal.target_state"
+    GOAL_REFL_ACTION = "goal.reflection.action"
+    GOAL_REFL_GAP = "goal.reflection.gap"
 
     # --- ReAct ---
     REACT_ITERATION_INDEX = "react.iteration"

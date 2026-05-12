@@ -106,6 +106,10 @@ class TracingBridge:
             "token_usage_summary": self._on_token_usage,
             "task_complete": self._on_task_complete,
             "memory_stored": self._on_memory_stored,
+            # v8 Goal-Driven events
+            "goal_anchor": self._on_goal_anchor,
+            "goal_reflection": self._on_goal_reflection,
+            "goal_reanchor": self._on_goal_reanchor,
         }
 
     def on_event(self, event: str, data: Any = None) -> None:
@@ -269,6 +273,12 @@ class TracingBridge:
             return SpanName.EXECUTION_DAG
         elif "executing" in text_lower and "emergent" in text_lower:
             return SpanName.EXECUTION_EMERGENT
+        elif "executing" in text_lower and ("goal-driven" in text_lower or "v8" in text_lower):
+            return SpanName.EXECUTION_GOAL_DRIVEN
+        elif "building goal" in text_lower or ("backward" in text_lower and "planning" in text_lower):
+            return SpanName.GOAL_ANCHOR
+        elif "compiling" in text_lower:
+            return SpanName.GOAL_ANCHOR
         elif "reflecting" in text_lower:
             return SpanName.REFLECT
         elif "re-planning" in text_lower or "replan" in text_lower:
@@ -657,6 +667,56 @@ class TracingBridge:
                 "memory.stored",
                 attributes={"task_summary": str(getattr(data, "task", ""))[:200]},
             )
+
+    # ------------------------------------------------------------------
+    # Goal-Driven (v8) Events
+    # 目标驱动规划事件
+    # ------------------------------------------------------------------
+
+    def _on_goal_anchor(self, data: Any) -> None:
+        """Record initial goal document."""
+        if not isinstance(data, dict):
+            return
+        if self._phase_span:
+            self._safe_set_attr(
+                self._phase_span, AttrKey.GOAL_SUCCESS_CRITERIA,
+                data.get("success_criteria", ""),
+            )
+            self._phase_span.set_attribute(
+                AttrKey.GOAL_PROGRESS_PCT,
+                data.get("progress_pct", 0.0),
+            )
+
+    def _on_goal_reflection(self, data: Any) -> None:
+        """Record goal-state reflection as a span event."""
+        if not isinstance(data, dict):
+            return
+        if self._phase_span:
+            event_attrs = {
+                "progress_pct": float(data.get("progress_pct", 0.0)),
+                "suggested_action": str(data.get("suggested_action", "")),
+            }
+            gap = data.get("gap_analysis", "")
+            if gap:
+                event_attrs["gap_analysis"] = gap[:200]
+            next_ms = data.get("next_milestone", "")
+            if next_ms:
+                event_attrs["next_milestone"] = next_ms[:200]
+            self._phase_span.add_event("goal.reflection", attributes=event_attrs)
+
+    def _on_goal_reanchor(self, data: Any) -> None:
+        """Record goal re-anchoring events."""
+        if not isinstance(data, dict):
+            return
+        if self._phase_span:
+            updated_doc = data.get("updated_goal_doc", {})
+            self._phase_span.add_event("goal.reanchor", attributes={
+                "goal_drift_detected": bool(data.get("goal_drift_detected", False)),
+                "progress_pct": float(
+                    updated_doc.get("progress_pct", 0.0)
+                    if isinstance(updated_doc, dict) else 0.0
+                ),
+            })
 
     # ------------------------------------------------------------------
     # Helpers

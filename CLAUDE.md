@@ -189,17 +189,23 @@ PLAN_MODE=emergent python main.py "task"
 # Tracing viewer (v7)
 python -m tracing                    # Start web viewer on http://localhost:8000
 
-# Tests (no API key needed)
-python -m pytest tests/test_dag_capabilities.py -v
-python -m pytest tests/test_emergent_planning.py -v
-python -m pytest tests/test_tracing.py -v
+# All tests (no API key needed, mock-based)
 python -m pytest tests/ -v
+
+# Individual test suites
+python -m pytest tests/test_dag_capabilities.py -v      # DAG planning, parallel exec, conditional/rollback, adaptive
+python -m pytest tests/test_emergent_planning.py -v     # v5 TODO list management, EmergentPlanner
+python -m pytest tests/test_tracing.py -v               # v7 OTel tracing bridge, spans, exporters
+python -m pytest tests/test_evaluation.py -v            # Evaluation metrics, scoring, probe
+python -m pytest tests/test_concurrent_execution.py -v  # asyncio.gather DAG parallelism
+python -m pytest tests/test_cycle_detection.py -v       # DAG cycle detection
+python -m pytest tests/test_llm_integration.py -v       # LLMClient retry, token tracking
+python -m pytest tests/test_optimizations.py -v         # Performance optimizations
+python -m pytest tests/test_real_tools.py -v            # Real tool execution (sandbox)
+python -m pytest tests/test_shell_tool.py -v            # ShellTool blacklist, sandbox
 
 # Run a single test
 python -m pytest tests/test_dag_capabilities.py::test_topological_sort -v
-
-# Evaluation module tests (mock-based)
-python -m pytest tests/test_evaluation.py -v
 
 # Evaluation CLI (requires LLM_API_KEY)
 python -m evaluation.eval_cli --dry-run                    # Show benchmark tasks

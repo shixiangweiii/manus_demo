@@ -1,0 +1,24 @@
+{
+  "trace_id": "950746c1cfd57ebc402bd93943077b63",
+  "exported_at": "2026-05-12T03:02:12.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "d5ee1ba5adce04e6",
+      "parent_span_id": null,
+      "name": "tool.execute.web_search",
+      "start_time": "2026-05-12T03:02:12.703Z",
+      "end_time": "2026-05-12T03:02:12.703Z",
+      "duration_ms": 0.02,
+      "attributes": {
+        "tool.name": "web_search",
+        "tool.parameters": "{\"query\": \"test\"}",
+        "latency_ms": 0.01,
+        "tool.success": true,
+        "tool.result_size": 344
+      },
+      "events": [],
+      "status": "OK"
+    }
+  ]
+}

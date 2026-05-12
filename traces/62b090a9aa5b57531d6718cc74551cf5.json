@@ -1,0 +1,38 @@
+{
+  "trace_id": "62b090a9aa5b57531d6718cc74551cf5",
+  "exported_at": "2026-05-12T03:08:52.000Z",
+  "span_count": 1,
+  "spans": [
+    {
+      "span_id": "6a19a71def5201a3",
+      "parent_span_id": null,
+      "name": "llm.chat",
+      "start_time": "2026-05-12T03:08:49.842Z",
+      "end_time": "2026-05-12T03:08:49.973Z",
+      "duration_ms": 130.63,
+      "attributes": {
+        "gen_ai.system": "openai",
+        "gen_ai.request.model": "qwen3.6-plus",
+        "gen_ai.call_type": "chat",
+        "gen_ai.request.temperature": 0.0,
+        "gen_ai.request.max_tokens": 4096,
+        "latency_ms": 130.06,
+        "error.type": "AuthenticationError",
+        "error.message": "Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '660db41f-790a-9e40-81e6-a1db819b6bec'}"
+      },
+      "events": [
+        {
+          "name": "exception",
+          "timestamp": "2026-05-12T03:08:49.973Z",
+          "attributes": {
+            "exception.type": "openai.AuthenticationError",
+            "exception.message": "Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '660db41f-790a-9e40-81e6-a1db819b6bec'}",
+            "exception.stacktrace": "Traceback (most recent call last):\n  File \"/Users/shixiangweii/PycharmProjects/manus_learn_proj/manus_demo/llm/client.py\", line 95, in chat\n    resp = await self._client.chat.completions.create(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/openai/resources/chat/completions/completions.py\", line 2678, in create\n    return await self._post(\n           ^^^^^^^^^^^^^^^^^\n  File \"/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/openai/_base_client.py\", line 1881, in post\n    return await self.request(cast_to, opts, stream=stream, stream_cls=stream_cls)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/openai/_base_client.py\", line 1666, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '660db41f-790a-9e40-81e6-a1db819b6bec'}\n",
+            "exception.escaped": "False"
+          }
+        }
+      ],
+      "status": "ERROR"
+    }
+  ]
+}
