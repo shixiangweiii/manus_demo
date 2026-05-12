@@ -1,7 +1,7 @@
 # Manus Demo - 评测模块功能说明与使用指南
 
-> **版本**: v6.0（含 4 Blocker / 5 Major / 6 Minor 代码评审修复）
-> **更新日期**: 2026-05-11
+> **版本**: v7.0（含深度代码评审 7 项 Bug 修复）
+> **更新日期**: 2026-05-12
 > **目的**: 介绍评测模块的整体设计思路、架构、指标体系、使用方法和扩展指南，帮助新加入的开发人员快速上手
 
 ---
@@ -14,10 +14,10 @@
 - [4. 模块结构与文件说明](#4-模块结构与文件说明)
 - [5. 指标体系详解](#5-指标体系详解)
 - [6. 基准任务集](#6-基准任务集)
-- [7. 快速开始：运行评测](#7-快速开始运行评测)
+- [7. 快速开始：5 分钟上手](#7-快速开始5-分钟上手)
 - [8. 命令行参数详解](#8-命令行参数详解)
 - [9. 报告输出说明](#9-报告输出说明)
-- [10. 参考用例](#10-参考用例)
+- [10. 实战用例](#10-实战用例)
 - [11. 扩展指南](#11-扩展指南)
 - [12. 学术参考来源](#12-学术参考来源)
 
@@ -68,7 +68,7 @@ OrchestratorAgent 已有事件机制：
 - 评测模块可以随时启用/禁用
 - 事件数据是只读的（probe 不修改 data）
 
-### 2.2 强制路由模式
+### 2.2 强制路由与动态分类检测
 
 评测需要控制变量——让同一个任务分别以三种模式运行，才能做公平对比。
 
@@ -84,7 +84,9 @@ finally:
     config.PLAN_MODE = original_plan_mode     # 恢复原配置
 ```
 
-注意：强制模式下分类准确率失去意义（因为分类被跳过），因此评测模块通过 `classification_forced` 标志区分，在评分时将分类权重重新分配给其他维度。
+`classification_forced` 标志在 `task_start` 事件中根据当前 `config.PLAN_MODE` 动态设置：
+- `PLAN_MODE != "auto"` → `classification_forced = True`（评测时使用，分类权重重新分配）
+- `PLAN_MODE == "auto"` → `classification_forced = False`（正常自动分类，分类权重参与评分）
 
 ### 2.3 四维度加权评分
 
@@ -152,15 +154,15 @@ graph TB
 
 ```
 evaluation/
-├── __init__.py        # 模块入口，列出学术参考来源（17 行）
-├── metrics.py         # 核心指标模型 + 评分函数（479 行）
+├── __init__.py        # 模块入口，列出学术参考来源
+├── metrics.py         # 核心指标模型 + 评分函数（474 行）
 ├── benchmark.py       # 12 个基准任务定义（310 行）
-├── runner.py          # EvaluationProbe + EvaluationRunner（568 行）
+├── runner.py          # EvaluationProbe + EvaluationRunner（569 行）
 ├── report.py          # Rich 控制台报告 + JSON 导出（308 行）
 └── eval_cli.py        # CLI 命令行入口（185 行）
 
 tests/
-└── test_evaluation.py # 49 个单元测试，全部基于 mock（无需 API Key）
+└── test_evaluation.py # 51 个单元测试，全部基于 mock（无需 API Key）
 ```
 
 ### 各文件核心内容
@@ -203,7 +205,9 @@ tests/
 | 步骤覆盖率 | 35% |
 | 生成速度 | 15% |
 
-相关源码：`evaluation/metrics.py` → `compute_planning_score()`
+**步骤覆盖率的中英文匹配**：先按空白/标点分词做英文 token 匹配，未命中时再用中文 2-gram 滑动窗口匹配（解决中文不分词导致覆盖率恒为 0 的问题）。
+
+相关源码：`evaluation/metrics.py` → `compute_planning_score()`，`evaluation/runner.py` → `build_result()` 中的 step_coverage 计算
 
 ### 5.2 执行质量（Execution Score）
 
@@ -219,10 +223,14 @@ tests/
 
 | 子指标 | 权重 | 说明 |
 |--------|------|------|
-| 轨迹效率 | 40% | 每完成一个步骤需要多少 ReAct 迭代（理想值=1） |
+| 轨迹效率 | 40% | `step_success_rate / avg_iterations_per_step`（每步成功率除以平均迭代数，理想值=1） |
 | Token 效率 | 30% | 对数归一化：1000 token 优秀，50000+ 较差 |
 | 时间效率 | 20% | <5s 优秀，>120s 较差 |
 | 重规划惩罚 | 10% | 0 次满分，每次扣 33%，最多扣完 |
+
+**ReAct 迭代计数**：每步完成时计入 `tool_calls_log 数 + 1`（+1 是最终 answer-only 迭代），确保不同模式的迭代计数语义一致。
+
+**执行耗时测量**：`execution_time_ms` 仅测量从 "Executing" 阶段到任务完成的时间，不含 context gathering、classification、planning 等准备阶段。
 
 相关源码：`evaluation/metrics.py` → `compute_efficiency_score()`
 
@@ -303,12 +311,12 @@ class GroundTruth(BaseModel):
 
 1. **`must_include_keywords`**：答案中必须包含所有指定关键词（不区分大小写）
 2. **`must_not_include`**：答案中不得包含任何禁止关键词
-3. **`expected_subtasks`**：用于计算步骤覆盖率，支持中英文分割
+3. **`expected_subtasks`**：用于计算步骤覆盖率，英文按空白/标点分词匹配，中文用 2-gram 滑动窗口匹配
 4. **任务成功判定** = `final_answer 非空` + `不含"无法完成"` + `通过 must_include 检查` + `通过 must_not_include 检查`
 
 ---
 
-## 7. 快速开始：运行评测
+## 7. 快速开始：5 分钟上手
 
 ### 前提条件
 
@@ -317,10 +325,28 @@ class GroundTruth(BaseModel):
 pip install -r requirements.txt
 
 # 2. 配置 LLM API Key（评测需要真实 LLM 调用）
+#    方式 A: 环境变量
 export LLM_API_KEY="your-api-key"
-# 可选：修改 LLM_BASE_URL 和 LLM_MODEL
-export LLM_BASE_URL="https://api.deepseek.com/v1"
-export LLM_MODEL="deepseek-chat"
+#    方式 B: 编辑 .env 文件
+```
+
+`.env` 配置示例（支持任何 OpenAI 兼容 API）：
+
+```env
+# DeepSeek
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_API_KEY=sk-your-key-here
+LLM_MODEL=deepseek-chat
+
+# 或 通义千问
+# LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# LLM_API_KEY=your-api-key-here
+# LLM_MODEL=qwen-turbo
+
+# 或 Ollama (本地)
+# LLM_BASE_URL=http://localhost:11434/v1
+# LLM_API_KEY=ollama
+# LLM_MODEL=llama3
 ```
 
 ### 第一步：查看基准任务（不需要 API Key）
@@ -348,8 +374,29 @@ python -m evaluation.eval_cli --output results.json
 ### 第四步：查看测试（不需要 API Key）
 
 ```bash
-# 运行全部 49 个单元测试（mock-based，无需 LLM）
+# 运行全部 51 个单元测试（mock-based，无需 LLM）
 python -m pytest tests/test_evaluation.py -v
+```
+
+### 不需要 API Key 的开发操作
+
+以下操作完全离线，不需要 LLM API：
+
+```bash
+# 查看基准任务列表
+python -m evaluation.eval_cli --dry-run
+
+# 运行全部 51 个 mock-based 单元测试
+python -m pytest tests/test_evaluation.py -v
+
+# 只跑评分计算测试
+python -m pytest tests/test_evaluation.py -v -k "TestPlanningScore or TestExecutionScore"
+
+# 只跑事件探针测试
+python -m pytest tests/test_evaluation.py -v -k "TestProbe"
+
+# 语法检查
+python3 -m py_compile evaluation/runner.py evaluation/metrics.py
 ```
 
 ---
@@ -410,7 +457,7 @@ python -m evaluation.eval_cli [OPTIONS]
 
 ```json
 {
-  "timestamp": "2026-05-11T15:30:00",
+  "timestamp": "2026-05-12T15:30:00",
   "modes": {
     "simple": {
       "planning_mode": "simple",
@@ -434,7 +481,7 @@ python -m evaluation.eval_cli [OPTIONS]
 
 ---
 
-## 10. 参考用例
+## 10. 实战用例
 
 ### 用例 1：快速验证开发改动
 
@@ -495,6 +542,9 @@ python -m pytest tests/test_evaluation.py -v -k "TestProbe"
 
 # 只跑评分计算的测试
 python -m pytest tests/test_evaluation.py -v -k "TestPlanningScore or TestExecutionScore"
+
+# 只跑中文步骤覆盖率测试
+python -m pytest tests/test_evaluation.py -v -k "chinese_step_coverage"
 ```
 
 ---
@@ -529,7 +579,7 @@ BenchmarkTask(
 **注意事项**：
 - `task_id` 不能与现有任务重复
 - `must_include_keywords` 必须填写（测试 `test_all_tasks_have_must_include` 会验证）
-- `expected_subtasks` 的关键词应能从 Agent 输出中匹配到
+- `expected_subtasks` 支持中英文匹配——英文按空格/标点分词，中文用 2-gram 滑动窗口
 - 添加后运行 `python -m evaluation.eval_cli --dry-run` 确认加载正常
 
 ### 11.2 添加新的事件监听
@@ -542,6 +592,8 @@ elif event == "custom_plan_adaptation":
     self.replan_count += 1
     # 解析 data 中的信息
 ```
+
+**注意**：避免在 `event == "phase"` 文本匹配和同名事件中重复计数同一件事。
 
 ### 11.3 添加新的失败类别
 
