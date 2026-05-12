@@ -22,7 +22,17 @@ All paths → Token usage summary → Long-term memory store
 All paths → TracingBridge (event-to-span, v7 OpenTelemetry)
 ```
 
-## Source Layout
+### Event Multicast Pattern (Central to the System)
+
+OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which fans out to multiple subscribers via `on_event` callback:
+
+1. **UI renderer** (`main.py`) — Rich console output (tables, panels, trees)
+2. **TracingBridge** (`tracing/bridge.py`) — Translates events into OTel Spans with parent-child hierarchy
+3. **EvaluationProbe** (`evaluation/runner.py`) — Collects metrics per-phase for benchmark scoring
+
+ExecutorAgent and ReflectorAgent do **not** emit events directly — they return results to their caller which then emits.
+
+### Source Layout
 
 ```
 manus_demo/
@@ -45,7 +55,7 @@ manus_demo/
 ├── llm/
 │   └── client.py              # LLMClient — OpenAI-compatible async wrapper with retry + per-call token tracking
 ├── tools/
-│   ├── base.py                # BaseTool ABC — name, description, parameters_schema, execute()
+│   ├── base.py                # BaseTool ABC — name, description, parameters_schema, execute(), traced_execute()
 │   ├── web_search.py          # WebSearchTool — mock search results
 │   ├── code_executor.py       # CodeExecutorTool — subprocess sandbox Python execution
 │   ├── file_ops.py            # FileOpsTool — sandboxed file read/write/list
@@ -59,7 +69,7 @@ manus_demo/
 │   ├── bridge.py              # TracingBridge — subscribes to _emit events, creates parent-child OTel spans
 │   ├── decorators.py          # @traced decorator + shared helpers (_truncate, _safe_set_attribute)
 │   ├── spans.py               # SpanName, AttrKey, EventName, SPAN_ICONS constants
-│   ├── exporters.py           # FileSpanExporter, RichConsoleExporter
+│   ├── exporters.py           # FileSpanExporter (JSON), RichConsoleExporter (tree)
 │   ├── server.py              # FastAPI web viewer for trace visualization (Jinja2 templates)
 │   └── __main__.py            # `python -m tracing` entry point for standalone viewer
 ├── memory/
@@ -71,7 +81,7 @@ manus_demo/
 │   ├── retriever.py           # KnowledgeRetriever — TF-IDF + cosine similarity document retrieval
 │   └── docs/                  # Knowledge base text files
 ├── evaluation/                # Evaluation module — benchmark 3 plan-and-execute paradigms
-│   ├── metrics.py             # Core metric models + scoring functions (4-dimension weighted)
+│   ├── metrics.py             # Core metric models + 4-dimension weighted scoring functions
 │   ├── benchmark.py           # 12 benchmark tasks with ground truth
 │   ├── runner.py              # EvaluationProbe (event listener) + EvaluationRunner
 │   ├── report.py              # Rich console comparison report + JSON export
@@ -113,6 +123,19 @@ OpenTelemetry-based tracing adds observability without modifying core execution 
 - **Web viewer**: `python -m tracing` starts a FastAPI server for trace visualization
 - **Inline tracing**: `LLMClient._start_llm_span`/`_end_llm_span` for LLM calls; `BaseTool.traced_execute` for tool calls; `@traced` decorator for general-purpose manual span creation
 - **Sensitive data**: `SENSITIVE_KEYS` set in `tracing/config.py` triggers automatic redaction of api_key, token, etc.
+- **LLM span lifecycle gotcha**: `_end_llm_span` reads token usage from `_call_records[-1]`, so `_record_call()` must be called before `_end_llm_span`. This is safe because in the single-threaded asyncio event loop there is no `await` between them.
+
+## Evaluation Module
+
+Benchmarks all three planning paradigms (simple/complex/emergent) against 12 tasks (4 easy, 4 medium, 4 hard).
+
+**4-Dimension Weighted Scoring**:
+- Planning (30%) — classification accuracy, plan structure validity, step coverage ratio, generation speed
+- Execution (40%) — task success, step success rate, tool accuracy
+- Efficiency (20%) — trajectory efficiency (step_success_rate / avg_iterations_per_step), token efficiency, time efficiency, replan penalty
+- Reflection Accuracy (10%) — whether Reflector's pass/fail verdict matches ground truth
+
+**Event Probe Pattern**: `EvaluationProbe` hooks into `on_event` callback without modifying core code. `EvaluationRunner` forces routing via `config.PLAN_MODE` override and sets `classification_forced` dynamically (`True` when forced, `False` when auto). Forced mode redistributes classification weight to other planning dimensions in scoring.
 
 ## Configuration (config.py)
 
