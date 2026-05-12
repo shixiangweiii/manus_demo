@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Manus Demo is a multi-agent AI system demonstrating autonomous task execution through hybrid plan routing. The system classifies tasks by complexity and routes them to one of three execution paradigms: simple flat planning (v1), DAG-based parallel execution (v2), or emergent TODO-list planning (v5). A v7 tracing module provides OpenTelemetry-based full-lifecycle observability.
+Manus Demo is a multi-agent AI system demonstrating autonomous task execution through hybrid plan routing. The system classifies tasks by complexity and routes them to one of four execution engines: simple flat planning (v1), DAG-based parallel execution (v2), emergent TODO-list planning (v5), or goal-driven planning (v8). A v7 tracing module provides OpenTelemetry-based full-lifecycle observability.
 
 - **Language**: Python 3.11+ (async/await throughout)
 - **LLM**: OpenAI-compatible API (DeepSeek default, supports Ollama/Qwen/etc.)
 - **UI**: Rich console with event-driven rendering
-- **Current version**: v7.0
+- **Current version**: v8.0
 
 ## Architecture
 
@@ -17,7 +17,8 @@ Manus Demo is a multi-agent AI system demonstrating autonomous task execution th
 User Task → Orchestrator → [classify_task] → simple / complex / emergent
   simple:    Planner.create_plan()     → Executor (sequential ReAct)  → Reflector
   complex:   Planner.create_dag()      → DAGExecutor (parallel super-steps) → Reflector
-  emergent:  EmergentPlanner.execute() → while has_pending_todos (outer scheduling) → per-TODO ReAct (inner tool_use)
+  emergent:  ENABLE_GOAL_DRIVEN_PLANNER=false → EmergentPlanner (TODO scheduling + per-TODO ReAct)
+             ENABLE_GOAL_DRIVEN_PLANNER=true  → GoalDrivenPlanner (goal anchoring + dynamic TODO + goal reflection)
 All paths → Token usage summary → Long-term memory store
 All paths → TracingBridge (event-to-span, v7 OpenTelemetry)
 ```
@@ -45,7 +46,8 @@ manus_demo/
 │   ├── planner.py             # PlannerAgent — two-stage classifier + plan/DAG generation + adaptive planning
 │   ├── executor.py            # ExecutorAgent — ReAct loop per step/node (legacy or ReActEngine)
 │   ├── reflector.py           # ReflectorAgent — exit criteria validation + quality assessment
-│   └── emergent_planner.py    # EmergentPlannerAgent — Claude Code style TODO-driven planning
+│   ├── emergent_planner.py    # EmergentPlannerAgent — Claude Code style TODO-driven planning (v5)
+│   └── goal_driven_planner.py # GoalDrivenPlannerAgent — goal anchoring + dynamic TODO + goal reflection (v8)
 ├── dag/
 │   ├── graph.py               # TaskDAG — graph structure, topological sort, ready-node detection, dynamic mutation
 │   ├── executor.py            # DAGExecutor — super-step parallel execution loop
@@ -147,6 +149,8 @@ All config via env vars / `.env` file. Key variables:
 | `LLM_API_KEY` | — | API key (required) |
 | `LLM_MODEL` | `deepseek-chat` | Model name |
 | `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
+| `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 goal-driven engine within emergent path |
+| `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5/v8 emergent planning route |
 | `MAX_REACT_ITERATIONS` | `10` | ReAct loop cap per node |
 | `MAX_PARALLEL_NODES` | `3` | Super-step parallelism cap |
 | `MAX_REPLAN_ATTEMPTS` | `3` | Max reflect-fail replan cycles |
@@ -239,7 +243,7 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 
 ## Important Design Decisions
 
-1. **Three routing paths**: Tasks classified by a two-stage hybrid classifier (rules fast-filter ~60-70% of tasks, LLM fallback for ambiguous ones); unknown classifications fall back to the complex DAG path
+1. **Four routing paths**: Tasks classified by a two-stage hybrid classifier (rules fast-filter ~60-70% of tasks, LLM fallback for ambiguous ones); unknown classifications fall back to the complex DAG path; emergent path further splits into v5 (TODO-driven) or v8 (goal-driven) based on `ENABLE_GOAL_DRIVEN_PLANNER`
 2. **DAG concurrency**: `asyncio.gather` runs ready nodes in parallel within each super-step; `DAGState.node_results` uses per-node dict keys to avoid write conflicts
 3. **State machine enforcement**: `NodeStateMachine.transition()` validates all status changes against `VALID_TRANSITIONS` table; raises on illegal transitions
 4. **Centralized LLM client**: All agents share one `LLMClient` instance; token tracking is accumulated there, not in individual agents
@@ -247,6 +251,7 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 6. **Checkpoint**: `TaskDAG.save_checkpoint()` snapshots full DAG state at key milestones (each super-step, after adaptive planning) for debugging
 7. **Evaluation via event probe**: `EvaluationProbe` hooks into `on_event` callback without modifying core code; forced routing via `config.PLAN_MODE` override with `classification_forced` flag to correctly handle scoring weights
 8. **Tracing via event bridge**: `TracingBridge` hooks into the same `on_event` callback as the UI and evaluation; it creates OTel Spans with parent-child hierarchy matching the task execution flow; exception-safe — tracing errors never affect main execution
+9. **Context compression boundary safety**: `ContextManager._find_safe_split()` ensures the split between old and recent messages never breaks `tool_calls` structural groups (assistant+tool_responses must stay together), preventing orphaned tool messages that would cause LLM API 400 errors
 
 ## Documentation
 
@@ -262,3 +267,6 @@ Detailed design docs live in `sxw_aicoding/docs/`:
 - `evaluation-guide.md` — Evaluation module design, metrics system, usage guide, and extension instructions
 - `tracing-design.md` — v7 tracing architecture and design rationale
 - `tracing-guide.md` — v7 tracing usage guide and extension instructions
+- `推理引擎类型环境变量配置.md` — Complete guide on PLAN_MODE / ENABLE_GOAL_DRIVEN_PLANNER routing and env var configuration per engine type
+- `related-papers.md` — Research papers referenced in system design
+- `planning-gap-analysis.md` — Gap analysis for planning paradigms

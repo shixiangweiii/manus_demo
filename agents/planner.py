@@ -105,35 +105,109 @@ Rules:
    - exit_criteria: what defines "done" for this node
    - confidence: 0.0-1.0 how likely this will succeed
    - risk_level: "low" / "medium" / "high"
-6. Specify dependencies between subgoals and between actions.
-   Dependencies reference IDs within the SAME level.
-7. If a step might fail, you can add:
+6. DEPENDENCIES express DATAFLOW — an action's "dependencies" must list ALL
+   prior actions whose OUTPUT this action needs, even if they are in a
+   DIFFERENT subgoal. Cross-subgoal action dependencies are expected and correct.
+   Example: If act_2_1 needs the city name from act_1_1, then
+   act_2_1.dependencies MUST include "act_1_1".
+   Also set subgoal-level dependencies to reflect ordering (sub_2 depends on sub_1).
+7. IMPORTANT: When an action has a "condition" (it's a fallback path), downstream
+   actions should list the PRIMARY action (not the fallback) in their "dependencies".
+   For example, if act_1_2 is a fallback that runs only when act_1_1 fails, then
+   act_2_1 should depend on act_1_1, NOT on act_1_2.
+8. If a step might fail, you can add:
    - condition: a keyword that must appear in a prior result for this action to run
    - rollback: description of how to undo this action
    - fallback_strategy: alternative approach if this fails
+9. DATAFLOW-FIRST: Before assigning actions to subgoals, trace what data
+   flows between steps:
+   - What information does each step NEED as input?
+   - What information does each step PRODUCE as output?
+   - Which prior step produces the input this step needs?
+   Then organize into subgoals for clarity, but keep cross-subgoal
+   dependencies on the actions that actually exchange data.
+10. IMPLICIT DATA: If a task requires information not directly provided in
+    the user's message (e.g., "today's date", "current location", "user's
+    language preference"), create a dedicated action to obtain it. Do NOT
+    assume the executor already has this data.
 
 You MUST respond with a valid JSON object in this exact format:
 {
-  "goal": "Overall goal description",
-  "goal_exit_criteria": "What defines complete success",
+  "goal": "查询今天用户所在城市的天气并给出建议",
+  "goal_exit_criteria": "输出包含天气数据和穿衣建议的自然语言回复",
   "subgoals": [
     {
       "id": "sub_1",
-      "description": "Subgoal description",
-      "exit_criteria": "What defines success for this subgoal",
-      "confidence": 0.8,
+      "description": "获取基础信息",
+      "exit_criteria": "获得日期和城市信息",
+      "confidence": 0.9,
       "risk_level": "low",
       "fallback_strategy": "",
       "dependencies": [],
       "actions": [
         {
           "id": "act_1_1",
-          "description": "Concrete action description",
-          "exit_criteria": "What defines success for this action",
-          "confidence": 0.9,
+          "description": "获取今天的日期",
+          "exit_criteria": "成功获取当前日期",
+          "confidence": 0.95,
           "risk_level": "low",
           "fallback_strategy": "",
           "dependencies": [],
+          "condition": null,
+          "rollback": null
+        },
+        {
+          "id": "act_1_2",
+          "description": "确认用户所在城市",
+          "exit_criteria": "成功获取城市名称",
+          "confidence": 0.8,
+          "risk_level": "medium",
+          "fallback_strategy": "使用IP定位或默认城市",
+          "dependencies": [],
+          "condition": null,
+          "rollback": null
+        }
+      ]
+    },
+    {
+      "id": "sub_2",
+      "description": "查询天气数据",
+      "exit_criteria": "获取到有效的天气数据",
+      "confidence": 0.85,
+      "risk_level": "low",
+      "fallback_strategy": "",
+      "dependencies": ["sub_1"],
+      "actions": [
+        {
+          "id": "act_2_1",
+          "description": "根据城市和日期调用天气API获取数据",
+          "exit_criteria": "API返回有效的天气JSON数据",
+          "confidence": 0.85,
+          "risk_level": "low",
+          "fallback_strategy": "使用网络搜索作为备选",
+          "dependencies": ["act_1_1", "act_1_2"],
+          "condition": null,
+          "rollback": null
+        }
+      ]
+    },
+    {
+      "id": "sub_3",
+      "description": "生成并呈现结果",
+      "exit_criteria": "输出用户可读的天气报告",
+      "confidence": 0.9,
+      "risk_level": "low",
+      "fallback_strategy": "",
+      "dependencies": ["sub_2"],
+      "actions": [
+        {
+          "id": "act_3_1",
+          "description": "基于天气数据生成自然语言描述和建议",
+          "exit_criteria": "生成完整的天气描述和穿衣建议",
+          "confidence": 0.9,
+          "risk_level": "low",
+          "fallback_strategy": "",
+          "dependencies": ["act_2_1"],
           "condition": null,
           "rollback": null
         }
@@ -554,6 +628,8 @@ class PlannerAgent(BaseAgent):
         prompt += (
             "Create a NEW plan for ONLY the remaining work under this subtask. "
             "Do not repeat already-completed work. "
+            "IMPORTANT: In your plan's \"dependencies\" fields, only reference node IDs "
+            "that you define in THIS new plan. Do not reference IDs from the completed work list. "
             "Respond in the same JSON format as before."
         )
 
@@ -833,7 +909,7 @@ class PlannerAgent(BaseAgent):
                     # 其次指向跨子目标的上一个 ACTION，最后回退到 subgoal 自身
                     cond_source = (
                         subgoal_action_ids[-2] if len(subgoal_action_ids) >= 2
-                        else all_action_ids[-1] if all_action_ids and all_action_ids[-1] != act_id
+                        else all_action_ids[-2] if len(all_action_ids) >= 2
                         else sg_id
                     )
                     edges.append(TaskEdge(
@@ -844,7 +920,8 @@ class PlannerAgent(BaseAgent):
 
                 # 修复 High #6: 当 action 有 rollback_action 时，生成 ROLLBACK 边
                 rollback_desc = act.get("rollback")
-                if rollback_desc:
+                # 过滤 LLM 输出的"无"占位符（中英文常见 null 替代词）
+                if rollback_desc and rollback_desc.strip().lower() not in ('无', 'none', 'n/a', 'null', 'na', '-'):
                     rollback_id = f"rb_{act_id}"
                     rollback_node = TaskNode(
                         id=rollback_id,
@@ -858,6 +935,65 @@ class PlannerAgent(BaseAgent):
                         edge_type=EdgeType.ROLLBACK,
                     ))
 
+        # === Infer subgoal-level dependencies from cross-subgoal action dependencies ===
+        # 如果 act_2_1 (parent=sub_2) 依赖 act_1_1 (parent=sub_1)，
+        # 则自动推断 sub_2 依赖 sub_1（如果 LLM 未显式设置）
+        inferred_sg_deps: set[tuple[str, str]] = set()
+        for e in edges:
+            if e.edge_type == EdgeType.DEPENDENCY:
+                src = nodes.get(e.source)
+                tgt = nodes.get(e.target)
+                if (src and tgt
+                        and src.parent_id and tgt.parent_id
+                        and src.parent_id != tgt.parent_id):
+                    inferred_sg_deps.add((src.parent_id, tgt.parent_id))
+
+        existing_sg_deps = {
+            (e.source, e.target) for e in edges
+            if e.edge_type == EdgeType.DEPENDENCY
+            and e.source in nodes and e.target in nodes
+            and nodes[e.source].node_type == NodeType.SUBGOAL
+            and nodes[e.target].node_type == NodeType.SUBGOAL
+        }
+        for src_sg, tgt_sg in inferred_sg_deps:
+            if (src_sg, tgt_sg) not in existing_sg_deps:
+                edges.append(TaskEdge(
+                    source=src_sg, target=tgt_sg,
+                    edge_type=EdgeType.DEPENDENCY,
+                ))
+                existing_sg_deps.add((src_sg, tgt_sg))
+                logger.debug(
+                    "[Planner] Inferred subgoal dependency: %s -> %s (from action-level deps)",
+                    src_sg, tgt_sg,
+                )
+
+        # === Fallback dependency rewiring ===
+        # 当 fallback 节点（CONDITIONAL 边的 target）作为下游 DEPENDENCY 边的 source 时，
+        # 将 DEPENDENCY 边的 source 重定向为 primary 路径节点（CONDITIONAL 边的 source）。
+        # 这避免 fallback 被跳过时级联跳过其下游节点。
+        fallback_to_primary: dict[str, str] = {}
+        for e in edges:
+            if e.edge_type == EdgeType.CONDITIONAL:
+                fallback_to_primary[e.target] = e.source
+
+        rewired_edges: list[TaskEdge] = []
+        for e in edges:
+            if e.edge_type == EdgeType.DEPENDENCY and e.source in fallback_to_primary:
+                primary = fallback_to_primary[e.source]
+                rewired = TaskEdge(
+                    source=primary, target=e.target,
+                    edge_type=EdgeType.DEPENDENCY,
+                )
+                rewired_edges.append(rewired)
+                logger.debug(
+                    "[Planner] Rewiring fallback dependency: %s -> %s => %s -> %s",
+                    e.source, e.target, primary, e.target,
+                )
+            else:
+                rewired_edges.append(e)
+
+        edges = rewired_edges
+
         # Deduplicate edges（去重，避免重复边导致计算错误）
         seen: set[tuple] = set()
         unique_edges: list[TaskEdge] = []
@@ -867,7 +1003,26 @@ class PlannerAgent(BaseAgent):
                 seen.add(key)
                 unique_edges.append(e)
 
-        return TaskDAG(task=task, nodes=nodes, edges=unique_edges, context=context)
+        # Filter orphan edges — edges whose source/target don't exist in nodes.
+        # Occurs during replan when LLM references completed node IDs from the old DAG
+        # in its dependency specifications. These edges become valid again after _merge_dags().
+        valid_node_ids = set(nodes.keys())
+        valid_edges: list[TaskEdge] = []
+        filtered_edges: list[TaskEdge] = []
+        for e in unique_edges:
+            if e.source not in valid_node_ids or e.target not in valid_node_ids:
+                logger.warning(
+                    "[Planner] Filtering orphan edge %s (%s -> %s): "
+                    "endpoint not in parsed nodes (likely reference to old DAG completed node)",
+                    e.edge_type.value, e.source, e.target,
+                )
+                filtered_edges.append(e)
+            else:
+                valid_edges.append(e)
+
+        dag = TaskDAG(task=task, nodes=nodes, edges=valid_edges, context=context)
+        dag._filtered_edges = filtered_edges  # 保存供 _merge_dags() 重建
+        return dag
 
     # ------------------------------------------------------------------
     # DAG merging for partial replan
@@ -911,6 +1066,36 @@ class PlannerAgent(BaseAgent):
             if edge_key not in seen_edges:
                 merged_edges.append(edge)
                 seen_edges.add(edge_key)
+
+        # Rebuild dependency edges from new nodes to old completed nodes.
+        # During _parse_dag(), the LLM may reference completed nodes from the old DAG
+        # (e.g., "dependencies": ["act_2_2"]) which got filtered as orphan edges.
+        # After merge, both endpoints exist — reconstruct these cross-DAG dependency edges.
+        merged_node_ids = set(merged_nodes.keys())
+        if hasattr(new_dag, '_filtered_edges'):
+            for edge in new_dag._filtered_edges:
+                if edge.source in merged_node_ids and edge.target in merged_node_ids:
+                    edge_key = (edge.source, edge.target, edge.edge_type.value)
+                    if edge_key not in seen_edges:
+                        merged_edges.append(edge)
+                        seen_edges.add(edge_key)
+                        logger.debug(
+                            "[Planner] Reconstructed cross-DAG edge: %s (%s -> %s)",
+                            edge.edge_type.value, edge.source, edge.target,
+                        )
+
+        # Ensure structural edges: parent -> new node (fallback for missing parent in new DAG)
+        new_node_ids = set(new_dag.nodes.keys())
+        for node_id in new_node_ids:
+            node_obj = new_dag.nodes.get(node_id)
+            if node_obj and node_obj.parent_id and node_obj.parent_id in merged_node_ids:
+                structural_key = (node_obj.parent_id, node_id, EdgeType.DEPENDENCY.value)
+                if structural_key not in seen_edges:
+                    merged_edges.append(TaskEdge(
+                        source=node_obj.parent_id, target=node_id,
+                        edge_type=EdgeType.DEPENDENCY,
+                    ))
+                    seen_edges.add(structural_key)
 
         result_dag = TaskDAG(
             task=old_dag.state.task,

@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import config
 from dag.graph import TaskDAG
 from dag.state_machine import NodeStateMachine
-from schema import NodeStatus, NodeType, StepResult, TaskNode
+from schema import EdgeType, NodeStatus, NodeType, StepResult, TaskNode
 
 if TYPE_CHECKING:
     from agents.executor import ExecutorAgent
@@ -441,25 +441,62 @@ class DAGExecutor:
                     # 条件不满足：通过状态机跳过目标节点及其整个下游子树
                     self._sm.transition(target, NodeStatus.SKIPPED)
                     dag.mark_subtree_skipped(target.id)
-                    logger.info(
-                        "[DAGExecutor] Condition '%s' not met -> skipping %s",
-                        edge.condition, target.id,
+                    is_fallback = any(
+                        e.edge_type == EdgeType.CONDITIONAL and e.target == target.id
+                        for e in dag.edges
                     )
+                    if is_fallback:
+                        logger.info(
+                            "[DAGExecutor] Fallback '%s' skipped (primary path succeeded) -> skipping %s",
+                            edge.condition, target.id,
+                        )
+                    else:
+                        logger.info(
+                            "[DAGExecutor] Condition '%s' not met -> skipping %s",
+                            edge.condition, target.id,
+                        )
 
     @staticmethod
     def _evaluate_condition(edge, dag: TaskDAG) -> bool:
         """
-        Condition evaluation with smart matching strategy:
-        - CJK text: substring matching (word boundaries don't work without spaces)
-        - Latin text: word-boundary regex matching (avoids false positives)
+        Condition evaluation with dual-mode strategy:
+        1. Meta-condition: if condition references a node ID (e.g. "act_1_1成功"),
+           check the referenced node's execution status directly.
+        2. Content-keyword: if condition is a keyword expected in result text,
+           perform substring/regex matching against the source node's output.
 
-        条件评估使用智能匹配策略：
-        - 中日韩文本：子串匹配（CJK 无空格分词，\b 不可靠）
-        - 拉丁文本：词边界正则匹配（避免 "error" 匹配 "terror" 等误判）
+        条件评估使用双模式策略：
+        1. 元条件：条件引用了节点 ID（如 "act_1_1成功"），直接检查被引用节点的执行状态。
+        2. 内容关键词：条件是期望出现在结果文本中的关键词，对源节点输出做子串/正则匹配。
         """
         import re
         if not edge.condition:
             return True
+
+        # 1. 元条件检测：条件中引用了节点 ID（如 "act_1_1成功"、"sub_2 completed"）
+        # 元条件应检查被引用节点的执行状态，而非在源节点结果中做子串匹配
+        node_id_pattern = re.compile(r'(act_\d+_\d+|sub_\d+|goal_\d+)')
+        meta_match = node_id_pattern.search(edge.condition)
+        if meta_match:
+            referenced_id = meta_match.group(1)
+            referenced_node = dag.nodes.get(referenced_id)
+            if referenced_node:
+                cond_lower = edge.condition.lower()
+                # 正向关键词：成功、完成、通过、succeeded/completed/passed/ok
+                is_positive = any(kw in cond_lower for kw in
+                    ['成功', '完成', '通过', 'succeeded', 'completed', 'passed', 'ok'])
+                if is_positive:
+                    return referenced_node.status == NodeStatus.COMPLETED
+                # 反向关键词：失败、failed/error/not
+                is_negative = any(kw in cond_lower for kw in
+                    ['失败', 'failed', 'error', 'not'])
+                if is_negative:
+                    return referenced_node.status in (NodeStatus.FAILED, NodeStatus.SKIPPED)
+                # 默认：引用了节点 ID 但无明确正向/反向关键词 → 检查是否完成
+                return referenced_node.status == NodeStatus.COMPLETED
+            # 引用的节点 ID 不存在于 DAG 中 → 降级到子串匹配
+
+        # 2. 内容关键词匹配：原有逻辑（条件是期望出现在结果文本中的关键词）
         source_result = dag.state.node_results.get(edge.source, "")
         if not source_result:
             return False

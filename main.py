@@ -40,6 +40,24 @@ from tools.file_ops import FileOpsTool
 from tools.shell_tool import ShellTool
 from tools.web_search import WebSearchTool
 
+logger = logging.getLogger(__name__)
+
+
+class OtelDetachFilter(logging.Filter):
+    """Suppress OTel 'Failed to detach context' ERROR traceback,
+    replace with a concise INFO-level explanation."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "opentelemetry.context" and "Failed to detach context" in record.getMessage():
+            record.levelno = logging.INFO
+            record.levelname = "INFO"
+            record.msg = "[Tracing] Context detach skipped (asyncio concurrent Task — harmless, span already ended)"
+            record.args = ()
+            record.exc_info = None
+            return True
+        return True
+
+
 console = Console()
 
 # Status -> Rich style mapping
@@ -410,6 +428,10 @@ def setup_logging(verbose: bool = False) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # OTel context-detach errors are expected in concurrent asyncio DAG execution
+    # (token created in forked Task context, detached in main Task context)
+    # 降级为 INFO 说明，避免误导性 ERROR 堆栈
+    logging.getLogger("opentelemetry.context").addFilter(OtelDetachFilter())
 
 
 async def run_interactive() -> None:

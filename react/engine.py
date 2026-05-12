@@ -183,7 +183,7 @@ class ReActEngine:
                 func_name = tool_call.function.name
                 try:
                     func_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
                     func_args = {}
 
                 logger.info("[ReActEngine] Tool call: %s(%s)", func_name, func_args)

@@ -236,6 +236,7 @@ class EvaluationProbe:
 
         elif event == "node_failed":
             self.steps_failed += 1
+            node = data.get("node")
             reason = str(data.get("reason", "execution")).lower()
             if "timeout" in reason:
                 cat = FailureCategory.NODE_TIMEOUT
@@ -249,7 +250,7 @@ class EvaluationProbe:
                 cat = FailureCategory.TOOL_EXECUTION_ERROR
             self.failures.append(FailureRecord(
                 category=cat,
-                step_id=data.get("node", {}).get("id", "") if hasattr(data.get("node", ""), 'id') else "",
+                step_id=node.id if hasattr(node, "id") else str(node) if node else "",
                 detail=f"Node failed: {data.get('reason', 'execution')}",
             ))
 

@@ -112,8 +112,15 @@ class ContextManager:
         if len(non_system) <= self.reserve_recent:
             return messages  # 消息数量不够多，无法压缩
 
-        old_msgs = non_system[:-self.reserve_recent]     # 需要压缩的旧消息
-        recent_msgs = non_system[-self.reserve_recent:]  # 保留的最近消息
+        # Find a structurally safe split that preserves tool_calls groups
+        # 找到不切割 tool_calls 组的安全切分点
+        split_idx = self._find_safe_split(non_system, self.reserve_recent)
+
+        if split_idx == 0:
+            return messages  # 无法安全切分，放弃压缩
+
+        old_msgs = non_system[:split_idx]       # 需要压缩的旧消息
+        recent_msgs = non_system[split_idx:]    # 保留的最近消息
 
         # Build text to summarize（构建待摘要的文本）
         old_text = self._messages_to_text(old_msgs)
@@ -139,6 +146,47 @@ class ContextManager:
     # Internal helpers
     # 内部辅助方法
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_safe_split(messages: list[dict[str, Any]], reserve: int) -> int:
+        """Find a split index that doesn't break tool_calls structural groups.
+        找到不切割 tool_calls 组的安全切分点。
+
+        A tool_calls group is: assistant{tool_calls} followed by tool{tool_call_id} messages.
+        The split must not separate any tool message from its assistant parent.
+        tool_calls 组由 assistant{tool_calls} 及其后的 tool{tool_call_id} 消息构成，
+        切分时不可将 tool 消息与其 assistant 父消息分离。
+        """
+        split_idx = len(messages) - reserve
+        if split_idx <= 0:
+            return 0
+
+        while split_idx > 0:
+            prev_msg = messages[split_idx - 1]
+            prev_role = prev_msg.get("role", "")
+
+            # If prev is a tool message, the split is inside a tool_calls group
+            # Scan backwards past all tool messages to find their assistant parent
+            if prev_role == "tool":
+                j = split_idx - 1
+                while j >= 0 and messages[j].get("role") == "tool":
+                    j -= 1
+                if j >= 0 and messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
+                    split_idx = j
+                    continue
+                else:
+                    break
+
+            # If prev is an assistant with tool_calls, its tool responses start at split_idx
+            # Moving split before the assistant keeps the entire group intact in recent_msgs
+            if prev_role == "assistant" and prev_msg.get("tool_calls"):
+                split_idx = split_idx - 1
+                continue
+
+            # Safe boundary: user, assistant without tool_calls, etc.
+            break
+
+        return max(split_idx, 0)
 
     @staticmethod
     def _messages_to_text(messages: list[dict[str, Any]]) -> str:

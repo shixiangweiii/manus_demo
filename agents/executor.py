@@ -269,12 +269,12 @@ class ExecutorAgent(BaseAgent):
                 )
 
             # LLM 发起了工具调用，依次执行并记录结果（Observe 步骤）
-            has_error = False
             for tool_call in response_msg.tool_calls:
+                has_error = False  # 每个 tool call 独立跟踪错误状态
                 func_name = tool_call.function.name
                 try:
                     func_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
                     func_args = {}
 
                 logger.info("[Executor] Tool call: %s(%s)", func_name, func_args)

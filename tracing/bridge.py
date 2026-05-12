@@ -188,6 +188,8 @@ class TracingBridge:
             self._root_span.end()
 
             # Detach context
+            # ValueError from cross-Task context detach is caught internally by OTel library
+            # and logged as ERROR. Suppressed via OtelDetachFilter in main.py setup_logging().
             if self._root_token:
                 otel_context.detach(self._root_token)
 
@@ -245,6 +247,8 @@ class TracingBridge:
         if self._phase_span:
             self._phase_span.set_status(StatusCode.OK)
             self._phase_span.end()
+            # ValueError from cross-Task context detach is caught internally by OTel library
+            # and logged as ERROR. Suppressed via OtelDetachFilter in main.py setup_logging().
             if self._phase_token:
                 otel_context.detach(self._phase_token)
             self._phase_span = None
@@ -415,6 +419,8 @@ class TracingBridge:
             span, token = self._todo_spans.pop(todo_id)
             span.set_status(status_code)
             span.end()
+            # ValueError from cross-Task context detach is caught internally by OTel library
+            # and logged as ERROR. Suppressed via OtelDetachFilter in main.py setup_logging().
             otel_context.detach(token)
 
     # ------------------------------------------------------------------
@@ -460,6 +466,8 @@ class TracingBridge:
         if self._superstep_span:
             self._superstep_span.set_status(StatusCode.OK)
             self._superstep_span.end()
+            # ValueError from cross-Task context detach is caught internally by OTel library
+            # and logged as ERROR. Suppressed via OtelDetachFilter in main.py setup_logging().
             if self._superstep_token:
                 otel_context.detach(self._superstep_token)
             self._superstep_span = None
@@ -531,6 +539,8 @@ class TracingBridge:
             span, token = self._node_spans.pop(node_id)
             span.set_status(status_code)
             span.end()
+            # ValueError from cross-Task context detach is caught internally by OTel library
+            # and logged as ERROR. Suppressed via OtelDetachFilter in main.py setup_logging().
             otel_context.detach(token)
 
     # ------------------------------------------------------------------

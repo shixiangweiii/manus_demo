@@ -478,15 +478,15 @@ class OrchestratorAgent:
             if reflection.passed:
                 return final_output  # 反思通过，直接返回结果
 
-            # 找出失败节点，准备局部重规划
-            # 动态性 5：局部重规划（仅重建失败子树），Orchestrator 在反思失败后，不是重新规划整个任务，而是只重建失败的那个子树
-            failed_nodes = [
+            # 找出问题节点（FAILED 或 SKIPPED），准备局部重规划
+            # SKIPPED 节点代表因条件不满足而跳过的子任务，同样需要重规划
+            problematic_nodes = [
                 n for n in dag.nodes.values()
-                if n.status == NodeStatus.FAILED
+                if n.status in (NodeStatus.FAILED, NodeStatus.SKIPPED)
             ]
 
-            if attempt < self.max_replan and failed_nodes:
-                failed_node = failed_nodes[0]
+            if attempt < self.max_replan and problematic_nodes:
+                failed_node = problematic_nodes[0]
                 self._emit("phase", f"Partial replan: replanning subtree from {failed_node.id}...")
 
                 # 只重规划失败节点的子树，保留其余已完成工作
@@ -502,7 +502,8 @@ class OrchestratorAgent:
                 dag._sm = dag_executor._sm
                 self._emit("dag_created", dag)
             else:
-                logger.warning("Max re-plan attempts reached. Returning best effort.")
+                logger.warning("No replan triggered (attempt %d/%d, %d problematic nodes). Returning best effort.",
+                    attempt+1, self.max_replan+1, len(problematic_nodes))
                 return final_output  # 达到最大重规划次数，返回当前最佳结果
 
         return "Task could not be completed after maximum attempts."

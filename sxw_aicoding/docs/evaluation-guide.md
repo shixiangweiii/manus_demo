@@ -155,11 +155,11 @@ graph TB
 ```
 evaluation/
 ├── __init__.py        # 模块入口，列出学术参考来源
-├── metrics.py         # 核心指标模型 + 评分函数（474 行）
-├── benchmark.py       # 12 个基准任务定义（310 行）
-├── runner.py          # EvaluationProbe + EvaluationRunner（569 行）
-├── report.py          # Rich 控制台报告 + JSON 导出（308 行）
-└── eval_cli.py        # CLI 命令行入口（185 行）
+├── metrics.py         # 核心指标模型 + 评分函数（475 行）
+├── benchmark.py       # 12 个基准任务定义（311 行）
+├── runner.py          # EvaluationProbe + EvaluationRunner（570 行）
+├── report.py          # Rich 控制台报告 + JSON 导出（309 行）
+└── eval_cli.py        # CLI 命令行入口（186 行）
 
 tests/
 └── test_evaluation.py # 51 个单元测试，全部基于 mock（无需 API Key）
@@ -195,7 +195,7 @@ tests/
 | 分类准确性 | 40% | 任务被路由到正确的范式（simple/complex/emergent） |
 | 计划结构有效性 | 30% | DAG 无环 / 步骤结构完整 |
 | 步骤覆盖率 | 20% | 计划覆盖了 benchmark 预期的子任务比例 |
-| 生成速度 | 10% | <2s 满分，>10s 零分 |
+| 生成速度 | 10% | 线性衰减：0 ms 满分，≥10 s 零分 |
 
 **强制模式**（`classification_forced=True`，评测时使用）下的权重（分类权重重新分配）：
 
@@ -223,7 +223,7 @@ tests/
 
 | 子指标 | 权重 | 说明 |
 |--------|------|------|
-| 轨迹效率 | 40% | `step_success_rate / avg_iterations_per_step`（每步成功率除以平均迭代数，理想值=1） |
+| 轨迹效率 | 40% | 基于每步平均 ReAct 迭代次数（`iters_per_step`）与理想值 1 的偏离程度，公式 `max(0, 1 - (iters_per_step - 1) / 9)` |
 | Token 效率 | 30% | 对数归一化：1000 token 优秀，50000+ 较差 |
 | 时间效率 | 20% | <5s 优秀，>120s 较差 |
 | 重规划惩罚 | 10% | 0 次满分，每次扣 33%，最多扣完 |
@@ -318,7 +318,7 @@ class GroundTruth(BaseModel):
 
 ## 7. 快速开始：5 分钟上手
 
-### 前提条件
+### 7.1 前提条件
 
 ```bash
 # 1. 安装依赖
@@ -349,47 +349,18 @@ LLM_MODEL=deepseek-chat
 # LLM_MODEL=llama3
 ```
 
-### 第一步：查看基准任务（不需要 API Key）
+### 7.2 不需要 API Key 的开发操作
+
+以下操作完全离线，适合熟悉模块结构和验证代码：
 
 ```bash
-python -m evaluation.eval_cli --dry-run
-```
-
-输出一个 Rich 表格展示所有 12 个基准任务的元数据（Task ID、难度、标签、期望工具等）。
-
-### 第二步：跑一个最简单的评测
-
-```bash
-# 只跑 easy 难度 + simple 模式（最快，4 个任务 × 1 种模式）
-python -m evaluation.eval_cli --difficulty easy --modes simple
-```
-
-### 第三步：完整评测
-
-```bash
-# 跑全部任务 × 全部模式（12 × 3 = 36 次任务执行）
-python -m evaluation.eval_cli --output results.json
-```
-
-### 第四步：查看测试（不需要 API Key）
-
-```bash
-# 运行全部 51 个单元测试（mock-based，无需 LLM）
-python -m pytest tests/test_evaluation.py -v
-```
-
-### 不需要 API Key 的开发操作
-
-以下操作完全离线，不需要 LLM API：
-
-```bash
-# 查看基准任务列表
+# 查看基准任务列表（确认任务加载正常）
 python -m evaluation.eval_cli --dry-run
 
 # 运行全部 51 个 mock-based 单元测试
 python -m pytest tests/test_evaluation.py -v
 
-# 只跑评分计算测试
+# 只跑评分计算测试（验证评分逻辑正确性）
 python -m pytest tests/test_evaluation.py -v -k "TestPlanningScore or TestExecutionScore"
 
 # 只跑事件探针测试
@@ -398,6 +369,220 @@ python -m pytest tests/test_evaluation.py -v -k "TestProbe"
 # 语法检查
 python3 -m py_compile evaluation/runner.py evaluation/metrics.py
 ```
+
+### 7.3 新手评测路径（由浅入深）
+
+#### 路径一：快速验证环境（1 分钟）
+
+```bash
+# 先跑一个最简单的任务（easy_001 + simple 模式）
+# 只有 1 个任务 × 1 种模式 = 1 次执行，快速验证 API 和配置正确
+python -m evaluation.eval_cli --tasks easy_001 --modes simple --verbose
+```
+
+**预期结果**：
+- 如果看到 `Task easy_001 (simple): score=...` 说明环境配置成功
+- `--verbose` 会输出详细的调试信息（如 LLM 调用日志、事件流）
+- 耗时约 10-30 秒（取决于 LLM 响应速度）
+
+**常见问题**：
+- `401 Unauthorized` → API Key 无效或过期
+- `Connection refused` → `LLM_BASE_URL` 配置错误
+- `ModuleNotFoundError` → 未执行 `pip install -r requirements.txt`
+
+#### 路径二：单模式全量评测（5 分钟）
+
+```bash
+# 只跑 simple 模式，所有 12 个任务
+python -m evaluation.eval_cli --modes simple --output simple_mode.json
+```
+
+**适用场景**：
+- 验证 `simple` 模式在各类任务上的整体表现
+- 收集基线数据，用于后续对比
+
+**结果解读**：
+```
+对比总表中关注：
+  - Task Success Rate → 整体成功率
+  - Avg Overall Score → 平均综合评分
+  - Classification Accuracy → 自动分类准确率（simple 模式强制时 N/A）
+```
+
+#### 路径三：双模式对比评测（10 分钟）
+
+```bash
+# 对比 simple 和 complex 两种模式在所有任务上的表现
+python -m evaluation.eval_cli --modes simple complex --output compare_sc.json
+```
+
+**输出重点**：
+- 对比总表中会高亮更优的值（绿色 + ★）
+- 各难度成功率表显示 easy/medium/hard 的差异
+- 失败分布表揭示两种模式的失败模式差异
+
+#### 路径四：完整评测（15-20 分钟）
+
+```bash
+# 全部 12 个任务 × 3 种模式 = 36 次执行
+python -m evaluation.eval_cli --output full_eval_$(date +%Y%m%d_%H%M).json
+```
+
+**输出文件**：
+- 控制台：Rich 格式的对比报告
+- JSON：`full_eval_20260115_1430.json`（包含所有原始数据，可二次分析）
+
+### 7.4 按场景分类的评测命令
+
+#### 场景 1：开发调试 —— 验证 DAG 并行执行改动
+
+```bash
+# 开发修改了 dag/executor.py 后，快速验证 complex 模式在 easy 任务上的表现
+python -m evaluation.eval_cli --modes complex --difficulty easy --verbose
+
+# 只跑单个复杂任务，观察节点并行执行效果
+python -m evaluation.eval_cli --modes complex --tasks medium_003 --verbose
+```
+
+#### 场景 2：性能对比 —— 评估新模型效果
+
+```bash
+# 先用当前模型跑一轮，保存结果
+python -m evaluation.eval_cli --output baseline.json
+
+# 切换模型后（修改 LLM_MODEL）再跑一轮
+# export LLM_MODEL="qwen-turbo"
+python -m evaluation.eval_cli --output new_model.json
+
+# 手动对比两个 JSON 文件的差异（后续可写脚本自动对比）
+```
+
+#### 场景 3：聚焦高难度 —— 探索 emergent 模式优势
+
+```bash
+# hard 难度任务最能体现 emergent 模式的价值
+python -m evaluation.eval_cli --difficulty hard --modes complex emergent --output emergent_vs_complex.json
+```
+
+#### 场景 4：回归测试 —— 验证 Planner 分类器改动
+
+```bash
+# 将 PLAN_MODE 设为 auto，测试自动分类准确率
+# 在 .env 中设置：PLAN_MODE=auto
+python -m evaluation.eval_cli --output auto_routing.json
+# 关注对比表中的 "Classification Accuracy" 列
+```
+
+#### 场景 5：快速冒烟测试 —— CI/CD 集成
+
+```bash
+# 在 CI 中只跑 easy 难度（最快）
+python -m evaluation.eval_cli --difficulty easy --modes simple --output smoke_test.json
+
+# 或只跑单个任务作为基本可用性验证
+python -m evaluation.eval_cli --tasks easy_002 --modes simple
+```
+
+### 7.5 结果解读速查
+
+评测完成后，控制台会输出以下报告。以下是对各报告的快速解读指南：
+
+**对比总表**：
+```
+Metric                          SIMPLE    COMPLEX   EMERGENT
+Task Success Rate / 任务成功率   75.0%     66.7%     58.3%    ← 看哪个模式更稳
+Overall Score / 综合评分          0.682     0.645     0.610    ← 综合表现
+Planning Score / 规划评分         0.850     0.800     0.750    ← 分类+计划质量
+Execution Score / 执行评分        0.720     0.680     0.650    ← 任务执行能力
+Efficiency Score / 效率评分       0.450     0.420     0.380    ← 资源消耗效率
+```
+
+**各难度成功率表**：
+```
+Difficulty / 难度   SIMPLE    COMPLEX   EMERGENT
+easy                 100.0%    100.0%    75.0%    ← easy 任务通常全部成功
+medium                75.0%     50.0%     50.0%    ← medium 开始出现差异
+hard                  50.0%     50.0%     50.0%    ← hard 最能体现模式差异
+```
+
+**失败分布表**：
+```
+Failure Category / 失败类别      SIMPLE    COMPLEX   EMERGENT
+tool_execution_error                   2         3         4    ← 工具执行错误最多
+parse_failure                          0         1         2    ← 解析失败
+max_iteration_exceeded                 1         0         1    ← 超过最大迭代次数
+```
+
+### 7.6 进阶技巧
+
+#### 技巧 1：结合 `PLAN_MODE` 环境变量强制路由
+
+```bash
+# 强制以 simple 模式运行（忽略分类器决策）
+PLAN_MODE=simple python -m evaluation.eval_cli --tasks hard_001
+
+# 强制以 auto 模式运行（测试分类器准确性）
+PLAN_MODE=auto python -m evaluation.eval_cli --difficulty medium
+```
+
+#### 技巧 2：使用 `timeout` 防止评测挂死
+
+```bash
+# 限制单次评测在 10 分钟内完成
+timeout 600 python -m evaluation.eval_cli --output results.json
+```
+
+#### 技巧 3：重定向日志到文件
+
+```bash
+# 将 verbose 日志输出到文件，便于排查问题
+python -m evaluation.eval_cli --verbose --output results.json 2>&1 | tee eval.log
+```
+
+#### 技巧 4：筛选特定失败类别的任务
+
+```bash
+# 先导出 JSON，然后用 jq 筛选出包含 tool_execution_error 的任务
+python -m evaluation.eval_cli --output results.json
+# jq ' .modes.simple.per_task_results[] | select(any(.failures[]?; .category == "tool_execution_error")) | .task_id ' results.json
+```
+
+#### 技巧 5：多次评测取平均值
+
+```bash
+# 运行 3 次取平均（消除随机性）
+for i in {1..3}; do
+    python -m evaluation.eval_cli --output run_${i}.json
+done
+# 后续可写脚本从 3 个 JSON 中计算平均值和标准差
+```
+
+### 7.7 常见错误排查
+
+| 错误现象 | 可能原因 | 解决方案 |
+|---------|---------|---------|
+| `ModuleNotFoundError: No module named 'evaluation'` | 未安装依赖或未在正确目录执行 | 确认在项目根目录执行 `pip install -r requirements.txt` |
+| `401 Unauthorized` | API Key 无效或过期 | 检查 `LLM_API_KEY` 是否正确 |
+| `Connection refused` | LLM 服务不可用 | 检查 `LLM_BASE_URL` 和网络连接 |
+| 评测结果全为 0 分 | 事件探针未正确挂载 | 确认 `config.PLAN_MODE` 未在运行中被意外修改 |
+| 某个模式评测极慢 | 任务复杂度高或 LLM 响应慢 | 用 `--difficulty easy` 缩小范围，或检查 LLM 服务状态 |
+| JSON 文件为空 | 输出路径权限问题 | 检查 `--output` 指定的目录是否有写入权限 |
+| 评分异常偏高/偏低 | `classification_forced` 标志未正确设置 | 确认 `config.PLAN_MODE` 在评测前已正确覆盖 |
+
+### 7.8 快速开始检查清单
+
+首次使用评测模块时，建议按以下顺序执行：
+
+- [ ] 1. 安装依赖：`pip install -r requirements.txt`
+- [ ] 2. 配置 API Key：在 `.env` 中填写 `LLM_API_KEY`
+- [ ] 3. 验证离线操作：`python -m evaluation.eval_cli --dry-run`
+- [ ] 4. 运行单元测试：`python -m pytest tests/test_evaluation.py -v`
+- [ ] 5. 单任务快速验证：`python -m evaluation.eval_cli --tasks easy_001 --modes simple`
+- [ ] 6. 单模式全量评测：`python -m evaluation.eval_cli --modes simple --output baseline.json`
+- [ ] 7. 完整评测对比：`python -m evaluation.eval_cli --output full_eval.json`
+- [ ] 8. 查看报告并分析结果
+
+---
 
 ---
 
