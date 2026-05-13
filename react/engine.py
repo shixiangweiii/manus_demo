@@ -32,6 +32,7 @@ import logging
 from typing import Any
 
 import config
+from context.manager import ContextManager
 from llm.client import LLMClient
 from schema import StepResult, ToolCallRecord
 from tools.base import BaseTool
@@ -67,8 +68,10 @@ class ReActEngine:
         tools: list[BaseTool] | dict[str, BaseTool],
         max_iterations: int | None = None,
         tool_router: ToolRouter | None = None,
+        context_manager: ContextManager | None = None,
     ):
         self.llm_client = llm_client
+        self.context_manager = context_manager
         self.max_iterations = max_iterations or getattr(config, 'MAX_REACT_ITERATIONS', 10)
 
         if isinstance(tools, dict):
@@ -133,6 +136,11 @@ class ReActEngine:
 
                 messages.append({"role": "user", "content": user_input})
 
+                if self.context_manager is not None:
+                    messages = await self.context_manager.compress_if_needed(
+                        messages, self.llm_client
+                    )
+
                 response_msg = await self.llm_client.chat_with_tools(
                     messages,
                     tools=self.tool_schemas,
@@ -179,7 +187,6 @@ class ReActEngine:
             tool_messages: list[dict[str, Any]] = []
 
             for tool_call in response_msg.tool_calls:
-                has_error = False
                 func_name = tool_call.function.name
                 try:
                     func_args = json.loads(tool_call.function.arguments)
@@ -205,7 +212,6 @@ class ReActEngine:
 
                 if isinstance(result, str) and result.startswith("Error:"):
                     is_error = True
-                has_error = has_error or is_error
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
@@ -214,7 +220,7 @@ class ReActEngine:
                     result=result if is_error else result[:1000],
                 ))
 
-                if has_error:
+                if is_error:
                     result_with_marker = (
                         f"[TOOL ERROR] {result}\n\n"
                         "IMPORTANT: The tool returned an error. Please analyze "

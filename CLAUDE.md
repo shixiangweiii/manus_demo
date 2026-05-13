@@ -148,19 +148,29 @@ All config via env vars / `.env` file. Key variables:
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API endpoint |
 | `LLM_API_KEY` | — | API key (required) |
 | `LLM_MODEL` | `deepseek-chat` | Model name |
+| `MAX_CONTEXT_TOKENS` | `8000` | Context token limit before compression |
 | `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
 | `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 goal-driven engine within emergent path |
+| `GOAL_REANCHOR_INTERVAL` | `5` | Iterations between goal re-anchoring |
+| `GOAL_REFLECTION_INTERVAL` | `1` | Iterations between goal reflection |
+| `MAX_GOAL_DRIVEN_ITERATIONS` | `60` | v8 main loop iteration cap |
+| `GOAL_DRIVEN_STAGNATION_WINDOW` | `3` | Consecutive no-progress rounds before early stop |
 | `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5/v8 emergent planning route |
 | `MAX_REACT_ITERATIONS` | `10` | ReAct loop cap per node |
 | `MAX_PARALLEL_NODES` | `3` | Super-step parallelism cap |
+| `DAG_SERIAL_EXECUTION` | `true` | 串行执行 DAG 节点（默认开启；设 `false` 恢复并行，并行模式通过 `create_for_node()` 实例隔离保证安全） |
 | `MAX_REPLAN_ATTEMPTS` | `3` | Max reflect-fail replan cycles |
 | `TOKEN_TRACKING_ENABLED` | `true` | Enable per-call token tracking |
 | `LLM_RETRY_ENABLED` | `false` | Enable exponential-backoff retry |
 | `ENABLE_REACT_ENGINE_V2` | `false` | Use unified ReActEngine (v6 feature flag) |
 | `ADAPTIVE_PLANNING_ENABLED` | `true` | Enable runtime DAG adaptation |
+| `ADAPT_PLAN_INTERVAL` | `1` | Super-steps between adaptive checks |
+| `ADAPT_PLAN_MIN_COMPLETED` | `1` | Min completed actions before adaptive |
 | `NODE_EXECUTION_TIMEOUT` | `300` | Per-node timeout in seconds |
 | `SANDBOX_DIR` | `~/.manus_demo/sandbox` | Sandboxed file/shell working directory |
 | `MAX_TODO_ITEMS` | `20` | v5 TODO list max size |
+| `MAX_TODO_RETRIES` | `3` | Max retries per TODO item |
+| `TODO_COMPRESSION_THRESHOLD` | `0.8` | Context usage ratio triggering TODO compression |
 | `MAX_EMERGENT_OUTER_ITERATIONS` | `60` | v5 emergent main loop iteration cap |
 | `TOOL_FAILURE_THRESHOLD` | `2` | v3 consecutive failures before suggesting tool switch |
 | `TRACING_ENABLED` | `false` | Master switch for v7 tracing |
@@ -250,7 +260,7 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 ## Important Design Decisions
 
 1. **Four routing paths**: Tasks classified by a two-stage hybrid classifier (rules fast-filter ~60-70% of tasks, LLM fallback for ambiguous ones); unknown classifications fall back to the complex DAG path; emergent path further splits into v5 (TODO-driven) or v8 (goal-driven) based on `ENABLE_GOAL_DRIVEN_PLANNER`
-2. **DAG concurrency**: `asyncio.gather` runs ready nodes in parallel within each super-step; `DAGState.node_results` uses per-node dict keys to avoid write conflicts
+2. **DAG concurrency**: `asyncio.gather` runs ready nodes in parallel within each super-step (when `DAG_SERIAL_EXECUTION=false`); each parallel node gets an independent `ExecutorAgent` instance via `create_for_node()` to avoid `_messages` race conditions; `DAGState.node_results` uses per-node dict keys to avoid write conflicts
 3. **State machine enforcement**: `NodeStateMachine.transition()` validates all status changes against `VALID_TRANSITIONS` table; raises on illegal transitions
 4. **Centralized LLM client**: All agents share one `LLMClient` instance; token tracking is accumulated there, not in individual agents
 5. **Sandbox security**: `ShellTool` runs in `SANDBOX_DIR` with command blacklists and stripped env vars; `CodeExecutorTool` uses subprocess with timeout and output size limits; both share `subprocess_utils.run_with_limits()`

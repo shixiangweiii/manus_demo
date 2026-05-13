@@ -42,6 +42,7 @@ PLAN_MODE = os.getenv("PLAN_MODE", "auto")  # "auto"=两阶段混合分类 | "si
 # --- DAG Execution ---
 # --- DAG 执行参数 ---
 MAX_PARALLEL_NODES = int(os.getenv("MAX_PARALLEL_NODES", "3"))  # 每个 Super-step 最多并行执行的节点数
+DAG_SERIAL_EXECUTION = os.getenv("DAG_SERIAL_EXECUTION", "true").lower() == "true"  # 串行执行 DAG 节点（默认开启，修复并发串话 bug；设 false 恢复并行）
 
 # --- Adaptive Planning (v3) ---
 # --- 自适应规划（v3 新增）---

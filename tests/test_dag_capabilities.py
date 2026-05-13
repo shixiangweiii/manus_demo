@@ -240,6 +240,7 @@ class TestParallelExecutionWithTools:
 
         # --- Mock: 模拟 ExecutorAgent 的 ReAct 工具调用 ---
         mock_executor_agent = AsyncMock()
+        mock_executor_agent.create_for_node = lambda node_id: mock_executor_agent
 
         async def fake_execute_node(node: TaskNode, context: str = "") -> StepResult:
             """根据节点 ID 返回不同的工具调用结果，模拟 ReAct 循环."""
@@ -319,12 +320,15 @@ class TestParallelExecutionWithTools:
         assert "act_2_1" in dag.state.node_results
         assert "report.md" in dag.state.node_results["act_2_1"]
 
-        # --- 验证 4: 并行执行 — act_1_1 和 act_1_2 应在同一个 super-step ---
+        # --- 验证 4: 串行执行 — act_1_1 和 act_1_2 在各自独立的 super-step 中执行 ---
         superstep_events = [e for e in events if e[0] == "superstep"]
         assert len(superstep_events) >= 1, "至少有 1 个 superstep 事件"
-        first_batch_nodes = superstep_events[0][1]["nodes"]
-        assert "act_1_1" in first_batch_nodes and "act_1_2" in first_batch_nodes, (
-            "act_1_1 和 act_1_2 应在同一个 super-step 中并行执行"
+        # 串行模式下，每个 super-step 只运行 1 个节点，但两个节点都应被执行
+        all_superstep_nodes = []
+        for evt in superstep_events:
+            all_superstep_nodes.extend(evt[1]["nodes"])
+        assert "act_1_1" in all_superstep_nodes and "act_1_2" in all_superstep_nodes, (
+            "act_1_1 和 act_1_2 都应被执行"
         )
 
         # --- 验证 5: Checkpoint 已保存（P2 优化后的行为）---
@@ -435,6 +439,7 @@ class TestConditionalBranchAndRollback:
 
         # --- Mock ExecutorAgent ---
         mock_executor = AsyncMock()
+        mock_executor.create_for_node = lambda node_id: mock_executor
 
         async def fake_execute(node: TaskNode, context: str = "") -> StepResult:
             results = {
@@ -746,6 +751,7 @@ class TestAdaptivePlanningIntegration:
         dag.nodes["sub_2"].status = NodeStatus.COMPLETED
 
         mock_executor_agent = AsyncMock()
+        mock_executor_agent.create_for_node = lambda node_id: mock_executor_agent
 
         call_count = 0
 
@@ -842,14 +848,15 @@ class TestBugFixesVerification:
 
     def test_executor_instance_isolation_exists(self):
         """
-        验证 Critical #1 修复：dag/executor.py 中存在并行节点异常隔离逻辑。
-        return_exceptions=True 确保 asyncio.gather 不因单节点异常取消整个批次。
+        验证 Critical #1 修复：dag/executor.py 默认串行执行，避免共享 ExecutorAgent
+        实例的 reset() 串话问题。并行模式下仍保留 return_exceptions=True 异常隔离。
         """
         import inspect
         from dag.executor import DAGExecutor
 
         source = inspect.getsource(DAGExecutor)
-        assert "return_exceptions=True" in source, "DAGExecutor 应在 asyncio.gather 中使用 return_exceptions=True 实现异常隔离"
+        assert "DAG_SERIAL_EXECUTION" in source, "DAGExecutor 应使用 DAG_SERIAL_EXECUTION 配置项"
+        assert "return_exceptions=True" in source, "DAGExecutor 并行路径应保留 return_exceptions=True 异常隔离"
 
     # ------------------------------------------------------------------
     # Critical #2: 统一工具错误语义
@@ -1067,6 +1074,7 @@ class TestBugFixVerification2026:
         )
 
         mock_executor = AsyncMock()
+        mock_executor.create_for_node = lambda node_id: mock_executor
 
         async def fake_execute(node, context=""):
             if node.id == "a":
@@ -1109,8 +1117,10 @@ class TestBugFixVerification2026:
         dag = TaskDAG(task="test", nodes=nodes, edges=edges)
         dag.state.node_results["source"] = "Result without the keyword"
 
+        mock_exec = AsyncMock()
+        mock_exec.create_for_node = lambda node_id: mock_exec
         executor = DAGExecutor(
-            executor_agent=AsyncMock(),
+            executor_agent=mock_exec,
             reflector_agent=AsyncMock(),
         )
         executor._process_conditions(dag)
@@ -1160,6 +1170,7 @@ class TestBugFixVerification2026:
         dag = TaskDAG(task="test rollback timeout", nodes=nodes, edges=edges)
 
         mock_executor = AsyncMock()
+        mock_executor.create_for_node = lambda node_id: mock_executor
 
         async def fake_execute(node, context=""):
             if node.id == "act_risky":
@@ -1199,8 +1210,10 @@ class TestBugFixVerification2026:
         dag = TaskDAG(task="test", nodes=nodes, edges=edges)
         dag.state.node_results["source"] = "Contains the keyword"
 
+        mock_exec2 = AsyncMock()
+        mock_exec2.create_for_node = lambda node_id: mock_exec2
         executor = DAGExecutor(
-            executor_agent=AsyncMock(),
+            executor_agent=mock_exec2,
             reflector_agent=AsyncMock(),
         )
         # First call should evaluate and memoize

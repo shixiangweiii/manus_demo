@@ -20,7 +20,7 @@ in the original orchestrator. Inspired by LangGraph's Pregel runtime:
 
   Our simplified version:
     1. Find all READY/PENDING nodes whose deps are COMPLETED
-    2. Execute them in parallel via asyncio.gather
+    2. Execute them (serial by default, or parallel via asyncio.gather if DAG_SERIAL_EXECUTION=false)
     3. Merge results into DAGState (simple dict write)
     4. Validate exit criteria per node
     5. Handle failures (rollback, skip subtree)
@@ -29,7 +29,7 @@ in the original orchestrator. Inspired by LangGraph's Pregel runtime:
 
   我们的简化版本：
     1. 找出所有依赖已满足的 READY/PENDING 节点
-    2. 通过 asyncio.gather 并行执行
+    2. 逐个串行执行（默认，DAG_SERIAL_EXECUTION=false 时并行）
     3. 将结果合并到 DAGState（简单 dict 写入）
     4. 逐节点验证 exit criteria（完成判据）
     5. 处理失败（回滚 + 跳过下游子树）
@@ -66,7 +66,7 @@ class DAGExecutor:
 
     Each 'super-step' (term borrowed from LangGraph/Pregel):
       1. Find all ready nodes
-      2. Execute them in parallel via asyncio.gather
+      2. Execute them (serial by default; parallel via asyncio.gather if DAG_SERIAL_EXECUTION=false)
       3. Merge results into centralized DAGState
       4. Validate exit criteria
       5. Handle failures + evaluate conditions
@@ -74,7 +74,7 @@ class DAGExecutor:
 
     每个「Super-step」（借用 LangGraph/Pregel 术语）：
       1. 找出所有就绪节点
-      2. 通过 asyncio.gather 并行执行
+      2. 逐个串行执行（默认；DAG_SERIAL_EXECUTION=false 时并行）
       3. 将结果合并到集中式 DAGState
       4. 验证每个节点的完成判据（exit criteria）
       5. 处理失败节点 + 评估条件边
@@ -156,9 +156,12 @@ class DAGExecutor:
                 dag.refresh_ready_states()
                 continue
 
-            # Cap parallelism to MAX_PARALLEL_NODES
-            # 限制每轮并行节点数，避免资源竞争
-            batch = actionable[:self._max_parallel]
+            # Cap parallelism: serial mode limits to 1 node per super-step
+            # 限制每轮节点数：串行模式下始终为 1，避免共享 ExecutorAgent 的 reset() 串话问题
+            if config.DAG_SERIAL_EXECUTION:
+                batch = actionable[:1]
+            else:
+                batch = actionable[:self._max_parallel]
 
             self._emit("superstep", {
                 "step": step,
@@ -166,20 +169,28 @@ class DAGExecutor:
                 "total_ready": len(actionable),
             })
 
-            # --- Super-step: parallel execution with timeout ---
-            # --- Super-step：带超时控制的并行执行当前批次节点 ---
-            # 动态性 2：并行执行（同一 Super-step 内多节点并发）
-            # v1 是严格串行：Step 1 → Step 2 → Step 3。v2 中发现多个就绪节点后，直接并行执行：
-            # --- Super-step: parallel execution with timeout ---
-            # --- Super-step：带超时控制的并行执行当前批次节点 ---
-            # 动态性 2：并行执行（同一 Super-step 内多节点并发）
-            # v1 是严格串行：Step 1 → Step 2 → Step 3。v2 中发现多个就绪节点后，直接并行执行：
-            # return_exceptions=True: prevent one node's exception from cancelling siblings
-            # return_exceptions=True：防止单节点异常取消其他并行节点
-            results = await asyncio.gather(*[
-                # asyncio.gather 同时发起多个 _run_node_with_timeout 协程
-                self._run_node_with_timeout(node, dag) for node in batch
-            ], return_exceptions=True)
+            # --- Super-step: serial or parallel execution with timeout ---
+            # --- Super-step：带超时控制的串行或并行执行当前批次节点 ---
+            if config.DAG_SERIAL_EXECUTION:
+                # 串行执行：逐个运行节点，避免共享 ExecutorAgent 的消息历史竞态
+                # Serial execution: run nodes one at a time to avoid shared
+                # ExecutorAgent state corruption (reset() cross-contamination)
+                results = []
+                for node in batch:
+                    try:
+                        result = await self._run_node_with_timeout(node, dag)
+                        results.append(result)
+                    except Exception as exc:
+                        # 与 asyncio.gather(return_exceptions=True) 行为一致：将异常作为结果收集
+                        logger.error("[DAGExecutor] Unexpected exception for node %s: %s", node.id, exc)
+                        results.append(exc)
+            else:
+                # 并行执行：每个节点通过 create_for_node() 获得独立 ExecutorAgent 实例，
+                # 避免 _messages 共享导致的竞态条件
+                # return_exceptions=True: prevent one node's exception from cancelling siblings
+                results = await asyncio.gather(*[
+                    self._run_node_with_timeout(node, dag) for node in batch
+                ], return_exceptions=True)
 
             # --- Merge results + validate + handle failures ---
             # --- 合并结果 + 验证完成判据 + 处理失败 ---
@@ -286,7 +297,14 @@ class DAGExecutor:
         self._sm.transition(node, NodeStatus.RUNNING)
         self._emit("node_running", {"node": node})
 
-        return await self._executor_agent.execute_node(node, context)
+        # 并行模式下为每个节点创建独立 ExecutorAgent 实例，避免 _messages 竞态
+        # 串行模式直接使用共享实例（无并发，无竞态）
+        if config.DAG_SERIAL_EXECUTION:
+            executor = self._executor_agent
+        else:
+            executor = self._executor_agent.create_for_node(node.id)
+
+        return await executor.execute_node(node, context)
 
     async def _run_node_with_timeout(self, node: TaskNode, dag: TaskDAG) -> StepResult:
         """

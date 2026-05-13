@@ -121,6 +121,7 @@ class EmergentPlannerAgent(BaseAgent):
                 tools=self.tools,
                 max_iterations=self.max_iterations,
                 tool_router=self.tool_router,
+                context_manager=self.context_manager,
             )
             logger.info("[EmergentPlanner] Using unified ReActEngine (v6.0)")
         else:
@@ -498,6 +499,11 @@ class EmergentPlannerAgent(BaseAgent):
         self._todo_list.mark_in_progress(todo.id)
 
         if self._react_engine:
+            # KNOWN LIMITATION: ReActEngine creates a fresh messages list for each
+            # _execute_todo call, so cross-TODO context is lost. The legacy path
+            # preserves flat message history across TODOs by NOT calling self.reset().
+            # A future fix could populate the `context` parameter with prior TODO
+            # results before calling ReActEngine.execute().
             result = await self._react_engine.execute(
                 prompt=prompt,
                 context="",
@@ -561,16 +567,28 @@ class EmergentPlannerAgent(BaseAgent):
                         result = await tool.traced_execute(**func_args)
                         self.tool_router.record_success(str(todo.id), func_name)
                     except Exception as exc:
-                        result = f"Tool execution error: {exc}"
+                        result = f"Error: Tool execution error: {exc}"
                         self.tool_router.record_failure(str(todo.id), func_name)
                         is_error = True
+
+                if isinstance(result, str) and result.startswith("Error:"):
+                    is_error = True
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
                     result=result if is_error else result[:1000],
                 ))
-                self.add_tool_result(tool_call.id, result)
+                if is_error:
+                    result_with_marker = (
+                        f"[TOOL ERROR] {result}\n\n"
+                        "IMPORTANT: The tool returned an error. Please analyze "
+                        "the error and decide whether to retry with different "
+                        "parameters or report the failure."
+                    )
+                else:
+                    result_with_marker = result
+                self.add_tool_result(tool_call.id, result_with_marker)
 
         logger.warning("[EmergentPlanner] TODO %d hit max iterations (%d)", todo.id, self.max_iterations)
         return StepResult(

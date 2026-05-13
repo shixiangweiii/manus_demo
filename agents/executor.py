@@ -118,10 +118,34 @@ class ExecutorAgent(BaseAgent):
                 tools=self.tools,
                 max_iterations=self.max_iterations,
                 tool_router=self.tool_router,
+                context_manager=self.context_manager,
             )
             logger.info("[Executor] Using unified ReActEngine (v6.0)")
         else:
             logger.info("[Executor] Using legacy _react_loop implementation")
+
+    def create_for_node(self, node_id: str) -> ExecutorAgent:
+        """
+        Create a fresh ExecutorAgent instance for parallel node execution.
+        Shares immutable resources (LLMClient, tools, schemas, ContextManager,
+        ToolRouter, ReActEngine) but has an independent _messages list.
+
+        为并行节点执行创建独立的 ExecutorAgent 实例。
+        共享不可变资源（LLMClient、工具、Schema、ContextManager、ToolRouter、ReActEngine），
+        但拥有独立的 _messages 消息历史列表，从根本上隔离并发竞态。
+        """
+        new_executor = ExecutorAgent.__new__(ExecutorAgent)
+        new_executor.name = f"Executor-{node_id}"
+        new_executor.system_prompt = self.system_prompt
+        new_executor.llm_client = self.llm_client
+        new_executor.context_manager = self.context_manager
+        new_executor._messages = [{"role": "system", "content": self.system_prompt}]
+        new_executor.tools = self.tools
+        new_executor.tool_schemas = self.tool_schemas
+        new_executor.max_iterations = self.max_iterations
+        new_executor.tool_router = self.tool_router
+        new_executor._react_engine = self._react_engine
+        return new_executor
 
     # ------------------------------------------------------------------
     # DAG execution entry point (v2)
