@@ -102,7 +102,8 @@ class LLMClient:
                     if config.TOKEN_TRACKING_ENABLED:
                         self._record_call(resp.usage, "chat", messages)
                     result = resp.choices[0].message.content or ""
-                    self._end_llm_span(span_ctx, success=True)
+                    response_data = self._extract_response_data(resp, "chat")
+                    self._end_llm_span(span_ctx, success=True, response_data=response_data)
                     return result
                 except RETRYABLE_ERRORS as exc:
                     last_error = exc
@@ -160,7 +161,8 @@ class LLMClient:
                     if config.TOKEN_TRACKING_ENABLED:
                         self._record_call(resp.usage, "chat_with_tools", messages)
                     result = resp.choices[0].message
-                    self._end_llm_span(span_ctx, success=True)
+                    response_data = self._extract_response_data(resp, "chat_with_tools")
+                    self._end_llm_span(span_ctx, success=True, response_data=response_data)
                     return result
                 except RETRYABLE_ERRORS as exc:
                     last_error = exc
@@ -199,6 +201,7 @@ class LLMClient:
         v7.0: Tracing integration — creates llm.chat_json span when TRACING_ENABLED=true.
         """
         span_ctx = self._start_llm_span("chat_json", messages, temperature, max_tokens)
+        response_data: dict[str, Any] | None = None
         try:
             try:
                 # 优先使用 JSON mode（强制 LLM 输出合法 JSON）
@@ -214,14 +217,16 @@ class LLMClient:
                     self._record_call(resp.usage, "chat_json", messages)
                 text = resp.choices[0].message.content or "{}"
                 logger.debug("[chat_json] Raw response: %.500s", text)
+                response_data = self._extract_response_data(resp, "chat_json")
             except Exception:
                 # 部分模型/服务不支持 response_format，降级为普通文本模式
                 logger.warning("JSON mode not supported, falling back to plain text")
                 text = await self.chat(messages, temperature=temperature, max_tokens=max_tokens, _skip_tracing=True)
                 logger.debug("[chat_json] Fallback response: %.500s", text)
+                response_data = {"response_content": text, "tool_calls": None, "finish_reason": "fallback"}
 
             result = self.parse_json(text)
-            self._end_llm_span(span_ctx, success=True)
+            self._end_llm_span(span_ctx, success=True, response_data=response_data)
             return result
         except Exception as exc:
             self._end_llm_span(span_ctx, success=False, error=exc)
@@ -351,8 +356,8 @@ class LLMClient:
             if max_tokens is not None:
                 span.set_attribute("gen_ai.request.max_tokens", max_tokens)
 
-            # Optionally record prompt content (full, no truncation for debuggability)
-            if config.TRACING_LOG_PROMPTS and messages:
+            # Record prompt content (full, unconditional, no truncation — demo/tutorial use)
+            if messages:
                 parts = []
                 for msg in messages:
                     role = msg.get("role", "")
@@ -368,7 +373,7 @@ class LLMClient:
             logger.debug("[LLMClient] Failed to start tracing span", exc_info=True)
             return None
 
-    def _end_llm_span(self, span_ctx: Any, success: bool = True, error: Exception | None = None) -> None:
+    def _end_llm_span(self, span_ctx: Any, success: bool = True, error: Exception | None = None, response_data: dict[str, Any] | None = None) -> None:
         """
         End a tracing span for an LLM call.
         结束 LLM 调用的追踪 Span。
@@ -400,6 +405,18 @@ class LLMClient:
                 if last_record.total_tokens > 0:
                     span.set_attribute("gen_ai.usage.total_tokens", last_record.total_tokens)
 
+            # Record full response data (unconditional, no truncation, no sanitization — demo/tutorial use)
+            if response_data:
+                content = response_data.get("response_content", "")
+                if content:
+                    span.set_attribute("gen_ai.response.content", content)
+                tool_calls = response_data.get("tool_calls")
+                if tool_calls:
+                    span.set_attribute("gen_ai.response.tool_calls", json.dumps(tool_calls, ensure_ascii=False))
+                finish_reason = response_data.get("finish_reason", "")
+                if finish_reason:
+                    span.set_attribute("gen_ai.response.finish_reason", finish_reason)
+
             if success:
                 span.set_status(StatusCode.OK)
             else:
@@ -417,3 +434,47 @@ class LLMClient:
                 otel_context.detach(token)
         except Exception:
             logger.debug("[LLMClient] Failed to end tracing span", exc_info=True)
+
+    def _extract_response_data(self, resp: Any, call_type: str) -> dict[str, Any]:
+        """
+        Extract response content, tool_calls, and finish_reason from an LLM API response.
+        从 LLM API 响应中提取 response content、tool_calls 和 finish_reason。
+
+        Returns a dict suitable for passing to _end_llm_span as response_data.
+        此提取在 _end_llm_span 之前完成，以便 resp 在 span 结束后可释放。
+        """
+        try:
+            if not resp or not resp.choices:
+                return {"response_content": "", "tool_calls": None, "finish_reason": ""}
+
+            choice = resp.choices[0]
+            message = choice.message
+
+            # Response content (text the LLM returned)
+            content = getattr(message, "content", None) or ""
+
+            # Finish reason (e.g., "stop", "tool_calls", "length")
+            finish_reason = getattr(choice, "finish_reason", "") or ""
+
+            # Tool calls (only present in chat_with_tools responses)
+            tool_calls = None
+            if hasattr(message, "tool_calls") and message.tool_calls:
+                tool_calls = []
+                for tc in message.tool_calls:
+                    tool_calls.append({
+                        "id": getattr(tc, "id", ""),
+                        "type": getattr(tc, "type", "function"),
+                        "function": {
+                            "name": getattr(tc.function, "name", ""),
+                            "arguments": getattr(tc.function, "arguments", ""),
+                        },
+                    })
+
+            return {
+                "response_content": content,
+                "tool_calls": tool_calls,
+                "finish_reason": finish_reason,
+            }
+        except Exception:
+            logger.debug("[LLMClient] Failed to extract response data for tracing", exc_info=True)
+            return {"response_content": "", "tool_calls": None, "finish_reason": ""}

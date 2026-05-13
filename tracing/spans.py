@@ -104,6 +104,8 @@ class AttrKey:
     GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
     GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
     GEN_AI_RESPONSE_CONTENT = "gen_ai.response.content"
+    GEN_AI_RESPONSE_TOOL_CALLS = "gen_ai.response.tool_calls"
+    GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reason"
     GEN_AI_PROMPT_CONTENT = "gen_ai.prompt.content"
     GEN_AI_CALL_TYPE = "gen_ai.call_type"
     GEN_AI_RETRY_COUNT = "gen_ai.retry_count"

@@ -119,6 +119,9 @@ class TestSpanConstants:
             AttrKey.GEN_AI_USAGE_INPUT_TOKENS,
             AttrKey.GEN_AI_USAGE_OUTPUT_TOKENS,
             AttrKey.GEN_AI_USAGE_TOTAL_TOKENS,
+            AttrKey.GEN_AI_RESPONSE_CONTENT,
+            AttrKey.GEN_AI_RESPONSE_TOOL_CALLS,
+            AttrKey.GEN_AI_RESPONSE_FINISH_REASON,
         ]
         for attr in genai_attrs:
             assert attr.startswith("gen_ai."), f"Attribute '{attr}' doesn't follow gen_ai.* convention"
@@ -560,6 +563,144 @@ class TestLLMClientTracing:
                 client._end_llm_span(ctx, success=True)
         finally:
             config.TRACING_ENABLED = original
+
+    def test_end_span_records_response_data(self, setup_tracing):
+        """_end_llm_span should set response attributes when response_data is provided."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from llm.client import LLMClient
+            with patch("openai.AsyncOpenAI"):
+                client = LLMClient(api_key="test", base_url="http://fake")
+
+            exporter = setup_tracing
+
+            ctx = client._start_llm_span("chat", [{"role": "user", "content": "hello"}], 0.7, 4096)
+            response_data = {
+                "response_content": "Hello! How can I help?",
+                "tool_calls": None,
+                "finish_reason": "stop",
+            }
+            client._end_llm_span(ctx, success=True, response_data=response_data)
+
+            spans = exporter.get_finished_spans()
+            llm_spans = [s for s in spans if s.name == "llm.chat"]
+            assert len(llm_spans) == 1
+            assert llm_spans[0].attributes.get("gen_ai.response.content") == "Hello! How can I help?"
+            assert llm_spans[0].attributes.get("gen_ai.response.finish_reason") == "stop"
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_end_span_records_tool_calls(self, setup_tracing):
+        """_end_llm_span should set tool_calls attribute when present."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from llm.client import LLMClient
+            with patch("openai.AsyncOpenAI"):
+                client = LLMClient(api_key="test", base_url="http://fake")
+
+            exporter = setup_tracing
+
+            ctx = client._start_llm_span("chat_with_tools", [{"role": "user", "content": "search"}], 0.7, 4096)
+            tool_calls_data = [
+                {"id": "call_1", "type": "function", "function": {"name": "web_search", "arguments": '{"query":"test"}'}},
+            ]
+            response_data = {
+                "response_content": "",
+                "tool_calls": tool_calls_data,
+                "finish_reason": "tool_calls",
+            }
+            client._end_llm_span(ctx, success=True, response_data=response_data)
+
+            spans = exporter.get_finished_spans()
+            llm_spans = [s for s in spans if s.name == "llm.chat_with_tools"]
+            assert len(llm_spans) == 1
+            tc_attr = llm_spans[0].attributes.get("gen_ai.response.tool_calls")
+            assert tc_attr is not None
+            parsed = json.loads(tc_attr)
+            assert parsed[0]["function"]["name"] == "web_search"
+            assert llm_spans[0].attributes.get("gen_ai.response.finish_reason") == "tool_calls"
+        finally:
+            config.TRACING_ENABLED = original
+
+
+# ======================================================================
+# Extract Response Data Tests
+# 提取响应数据测试
+# ======================================================================
+
+class TestExtractResponseData:
+    """Test LLMClient._extract_response_data method."""
+
+    def test_extract_from_chat_response(self):
+        """Should extract content and finish_reason from a chat response."""
+        from llm.client import LLMClient
+        with patch("openai.AsyncOpenAI"):
+            client = LLMClient(api_key="test", base_url="http://fake")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "Hello, I am an AI assistant."
+        mock_resp.choices[0].message.tool_calls = None
+        mock_resp.choices[0].finish_reason = "stop"
+
+        data = client._extract_response_data(mock_resp, "chat")
+        assert data["response_content"] == "Hello, I am an AI assistant."
+        assert data["tool_calls"] is None
+        assert data["finish_reason"] == "stop"
+
+    def test_extract_from_chat_with_tools_response(self):
+        """Should extract content, tool_calls, and finish_reason."""
+        from llm.client import LLMClient
+        with patch("openai.AsyncOpenAI"):
+            client = LLMClient(api_key="test", base_url="http://fake")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = None
+        mock_resp.choices[0].finish_reason = "tool_calls"
+
+        tc = MagicMock()
+        tc.id = "call_abc123"
+        tc.type = "function"
+        tc.function.name = "web_search"
+        tc.function.arguments = '{"query": "python asyncio"}'
+        mock_resp.choices[0].message.tool_calls = [tc]
+
+        data = client._extract_response_data(mock_resp, "chat_with_tools")
+        assert data["response_content"] == ""
+        assert data["tool_calls"] is not None
+        assert len(data["tool_calls"]) == 1
+        assert data["tool_calls"][0]["function"]["name"] == "web_search"
+        assert data["finish_reason"] == "tool_calls"
+
+    def test_extract_handles_empty_response(self):
+        """Should return empty data when response has no choices."""
+        from llm.client import LLMClient
+        with patch("openai.AsyncOpenAI"):
+            client = LLMClient(api_key="test", base_url="http://fake")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = []
+
+        data = client._extract_response_data(mock_resp, "chat")
+        assert data["response_content"] == ""
+        assert data["tool_calls"] is None
+        assert data["finish_reason"] == ""
+
+    def test_extract_handles_none_resp(self):
+        """Should return empty data when resp is None."""
+        from llm.client import LLMClient
+        with patch("openai.AsyncOpenAI"):
+            client = LLMClient(api_key="test", base_url="http://fake")
+
+        data = client._extract_response_data(None, "chat")
+        assert data["response_content"] == ""
+        assert data["tool_calls"] is None
+        assert data["finish_reason"] == ""
 
 
 # ======================================================================

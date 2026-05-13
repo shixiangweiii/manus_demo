@@ -73,6 +73,10 @@ manus_demo/
 │   ├── spans.py               # SpanName, AttrKey, EventName, SPAN_ICONS constants
 │   ├── exporters.py           # FileSpanExporter (JSON), RichConsoleExporter (tree)
 │   ├── server.py              # FastAPI web viewer for trace visualization (Jinja2 templates)
+│   ├── templates/             # Jinja2 HTML templates for web viewer
+│   │   ├── base.html          # Dark theme base layout (header, content, CSS variables)
+│   │   ├── trace_list.html    # Trace list page (table of traces)
+│   │   └── trace_detail.html  # Trace detail page (left-right split: tree + detail panel)
 │   └── __main__.py            # `python -m tracing` entry point for standalone viewer
 ├── memory/
 │   ├── short_term.py          # ShortTermMemory — sliding-window message buffer
@@ -122,9 +126,10 @@ OpenTelemetry-based tracing adds observability without modifying core execution 
 - **TracingBridge** subscribes to the same `_emit` event callback used by the UI and evaluation probe; it translates events into OTel Spans with parent-child hierarchy
 - **Zero overhead when disabled**: `tracing/__init__.py` uses conditional imports — when `TRACING_ENABLED=false`, all tracing symbols resolve to no-op stubs with no OpenTelemetry dependency loaded
 - **Multi-backend**: console, file (JSON), Rich console, OTLP HTTP, Phoenix
-- **Web viewer**: `python -m tracing` starts a FastAPI server for trace visualization
+- **Web viewer**: `python -m tracing` starts a FastAPI server for trace visualization; detail page uses a left-right split layout (span tree on left ~380px fixed, detail panel on right fills remaining width) with independent scrolling per panel and responsive fallback to vertical on narrow screens
 - **Inline tracing**: `LLMClient._start_llm_span`/`_end_llm_span` for LLM calls; `BaseTool.traced_execute` for tool calls; `@traced` decorator for general-purpose manual span creation
 - **Sensitive data**: `SENSITIVE_KEYS` set in `tracing/config.py` triggers automatic redaction of api_key, token, etc.
+- **Unconditional full request/response recording**: LLM span attributes (`gen_ai.prompt.content`, `gen_ai.response.content`, `gen_ai.response.tool_calls`, `gen_ai.response.finish_reason`) are always recorded when tracing is enabled — no truncation, no sanitization, not gated by `TRACING_LOG_PROMPTS`. This is a demo/tutorial project; full raw data is required for observability. Response data is extracted by `_extract_response_data()` before `_end_llm_span()` to keep `_end_llm_span` free of OpenAI SDK type assumptions.
 - **LLM span lifecycle gotcha**: `_end_llm_span` reads token usage from `_call_records[-1]`, so `_record_call()` must be called before `_end_llm_span`. This is safe because in the single-threaded asyncio event loop there is no `await` between them.
 
 ## Evaluation Module
@@ -177,7 +182,7 @@ All config via env vars / `.env` file. Key variables:
 | `TRACING_BACKEND` | `console` | `console` / `file` / `rich` / `otlp` / `phoenix` |
 | `TRACING_ENDPOINT` | `http://localhost:4318` | OTLP HTTP endpoint |
 | `TRACING_SAMPLE_RATE` | `1.0` | Sampling rate (0.0–1.0) |
-| `TRACING_LOG_PROMPTS` | `false` | Record full prompt/response in spans |
+| `TRACING_LOG_PROMPTS` | `false` | Legacy flag (no longer gates prompt recording — prompts are always recorded when tracing enabled; kept for config backward compat) |
 
 ## Common Commands
 
