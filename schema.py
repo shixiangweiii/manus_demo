@@ -358,6 +358,7 @@ class StepResult(BaseModel):
     success: bool                       # 是否执行成功
     output: str = ""                    # 最终输出文本
     tool_calls_log: list[ToolCallRecord] = Field(default_factory=list)  # 本次执行中所有工具调用记录
+    iterations_completed: int = Field(default=0, description="Actual ReAct iterations completed / 实际 ReAct 迭代次数")
 
 
 # ======================================================================
@@ -652,6 +653,53 @@ class GoalReanchorResult(BaseModel):
     updated_goal_doc: GoalDocument = Field(description="Refreshed goal document / 更新后的目标文档")
     goal_drift_detected: bool = Field(default=False, description="Whether drift was detected / 是否检测到目标偏移")
     correction_applied: str = Field(default="", description="Description of correction if drift detected / 纠正措施描述")
+
+
+# ======================================================================
+# SubAgent (v9) - Claude Code Subagent Pattern
+# 子智能体模型（v9 新增）- Claude Code 子智能体模式
+# ======================================================================
+
+class SubAgentStatus(str, Enum):
+    """SubAgent execution lifecycle states / SubAgent 执行生命周期状态"""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+
+
+class SubAgentSummary(BaseModel):
+    """
+    Structured summary from a SubAgent — anti-pattern #6 defense:
+    enforced key fields reduce information loss vs free-text summary.
+    结构化摘要 —— 反模式 #6 防御：强制关键字段，减少信息丢失。
+    """
+    accomplished: str = Field(default="", description="What was completed / 已完成的事项")
+    findings: str = Field(default="", description="Key findings and results / 关键发现和结果")
+    issues: str = Field(default="", description="Problems encountered or incomplete items / 遇到的问题或未完成的事项")
+    artifacts: list[str] = Field(default_factory=list, description="Output file paths in subagent work dir / 产出文件路径")
+    tool_calls_summary: str = Field(default="", description="Which tools were used and what they did / 工具调用摘要")
+
+
+class SubAgentResult(BaseModel):
+    """
+    Result from a SubAgent execution. Summary-only return design:
+    the parent agent receives only the structured summary, not the
+    full conversation history.
+    SubAgent 执行结果。纯摘要返回设计：父智能体仅接收结构化摘要，
+    不获取完整对话历史。完整 tool_calls_log 保留用于调试和 tracing。
+    """
+    subagent_id: str = Field(description="Unique SubAgent identifier")
+    task_description: str = Field(description="The subtask assigned to this SubAgent")
+    status: SubAgentStatus = Field(description="Final execution status")
+    summary: SubAgentSummary = Field(default_factory=SubAgentSummary, description="Structured summary / 结构化摘要")
+    summary_text: str = Field(default="", description="JSON-serialized summary returned to parent / 返回给父 Agent 的 JSON")
+    tool_calls_count: int = Field(default=0, description="Total tool calls made / 工具调用总次数")
+    iterations_used: int = Field(default=0, description="ReAct iterations consumed / 消耗的 ReAct 迭代次数")
+    duration_ms: float = Field(default=0.0, description="Wall-clock execution time / 执行耗时（毫秒）")
+    tokens_used: int = Field(default=0, description="Token budget consumed / 消耗的 Token 数")
+    tool_calls_log: list[ToolCallRecord] = Field(default_factory=list, description="Full trace for debugging / 完整调用记录")
 
 
 # ======================================================================

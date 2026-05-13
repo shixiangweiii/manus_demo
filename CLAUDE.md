@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Manus Demo is a multi-agent AI system demonstrating autonomous task execution through hybrid plan routing. The system classifies tasks by complexity and routes them to one of four execution engines: simple flat planning (v1), DAG-based parallel execution (v2), emergent TODO-list planning (v5), or goal-driven planning (v8). A v7 tracing module provides OpenTelemetry-based full-lifecycle observability.
+Manus Demo is a multi-agent AI system demonstrating autonomous task execution through hybrid plan routing. The system classifies tasks by complexity and routes them to one of four execution engines: simple flat planning (v1), DAG-based parallel execution (v2), emergent TODO-list planning (v5), or goal-driven planning (v8). A v9 SubAgent mechanism allows any ReAct-loop agent to spawn isolated sub-agents for complex subtasks. A v7 tracing module provides OpenTelemetry-based full-lifecycle observability.
 
 - **Language**: Python 3.11+ (async/await throughout)
 - **LLM**: OpenAI-compatible API (DeepSeek default, supports Ollama/Qwen/etc.)
 - **UI**: Rich console with event-driven rendering
-- **Current version**: v8.0
+- **Current version**: v9.0
 
 ## Architecture
 
@@ -21,6 +21,7 @@ User Task → Orchestrator → [classify_task] → simple / complex / emergent
              ENABLE_GOAL_DRIVEN_PLANNER=true  → GoalDrivenPlanner (goal anchoring + dynamic TODO + goal reflection)
 All paths → Token usage summary → Long-term memory store
 All paths → TracingBridge (event-to-span, v7 OpenTelemetry)
+Any ReAct path (when SUBAGENT_ENABLED=true) → can call "subagent" tool → SubAgent (depth=1, isolated context, summary-only return)
 ```
 
 ### Event Multicast Pattern (Central to the System)
@@ -47,7 +48,8 @@ manus_demo/
 │   ├── executor.py            # ExecutorAgent — ReAct loop per step/node (legacy or ReActEngine)
 │   ├── reflector.py           # ReflectorAgent — exit criteria validation + quality assessment
 │   ├── emergent_planner.py    # EmergentPlannerAgent — Claude Code style TODO-driven planning (v5)
-│   └── goal_driven_planner.py # GoalDrivenPlannerAgent — goal anchoring + dynamic TODO + goal reflection (v8)
+│   ├── goal_driven_planner.py # GoalDrivenPlannerAgent — goal anchoring + dynamic TODO + goal reflection (v8)
+│   └── subagent.py            # SubAgent — isolated depth=1 sub-agent with own context + summary-only return (v9)
 ├── dag/
 │   ├── graph.py               # TaskDAG — graph structure, topological sort, ready-node detection, dynamic mutation
 │   ├── executor.py            # DAGExecutor — super-step parallel execution loop
@@ -63,6 +65,7 @@ manus_demo/
 │   ├── file_ops.py            # FileOpsTool — sandboxed file read/write/list
 │   ├── shell_tool.py          # ShellTool — sandboxed bash execution with command blacklist
 │   ├── subprocess_utils.py    # Shared subprocess runner with timeout + output-size limits
+│   ├── subagent_tool.py       # SubAgentTool — meta-tool that spawns SubAgents (v9, depth=1 enforcement)
 │   └── router.py              # ToolRouter — per-node failure tracking, suggests alternative tools on threshold
 ├── tracing/                   # v7 OpenTelemetry-based full-lifecycle tracing
 │   ├── __init__.py            # Lazy imports — no-ops when TRACING_ENABLED=false
@@ -105,7 +108,9 @@ manus_demo/
 | `TaskEdge` | DAG edge (DEPENDENCY / CONDITIONAL / ROLLBACK) |
 | `DAGState` | Centralized execution state — `node_results` dict, `get_node_context()`, `merge_result()` |
 | `TodoList` / `TodoItem` | v5 emergent planning state with cycle detection |
-| `StepResult` | Execution result per step/node (success, output, tool_calls_log) |
+| `StepResult` | Execution result per step/node (success, output, tool_calls_log, iterations_completed) |
+| `SubAgentSummary` | Structured summary from SubAgent — accomplished, findings, issues, artifacts, tool_calls_summary |
+| `SubAgentResult` | Full SubAgent execution result — summary, iterations_used, tokens_used, tool_calls_log |
 | `LLMCallRecord` | Per-LLM-call token record (call_type, prompt_summary, tokens, engine) |
 | `TokenUsageSummary` | Aggregated token usage: call_records + by_engine + total |
 | `Reflection` | Reflector output (passed, score, feedback, suggestions) |
@@ -131,6 +136,36 @@ OpenTelemetry-based tracing adds observability without modifying core execution 
 - **Sensitive data**: `SENSITIVE_KEYS` set in `tracing/config.py` triggers automatic redaction of api_key, token, etc.
 - **Unconditional full request/response recording**: LLM span attributes (`gen_ai.prompt.content`, `gen_ai.response.content`, `gen_ai.response.tool_calls`, `gen_ai.response.finish_reason`) are always recorded when tracing is enabled — no truncation, no sanitization, not gated by `TRACING_LOG_PROMPTS`. This is a demo/tutorial project; full raw data is required for observability. Response data is extracted by `_extract_response_data()` before `_end_llm_span()` to keep `_end_llm_span` free of OpenAI SDK type assumptions.
 - **LLM span lifecycle gotcha**: `_end_llm_span` reads token usage from `_call_records[-1]`, so `_record_call()` must be called before `_end_llm_span`. This is safe because in the single-threaded asyncio event loop there is no `await` between them.
+
+## SubAgent (v9)
+
+Multi-agent mechanism following the Claude Code Subagent pattern. When `SUBAGENT_ENABLED=true`, the `subagent` tool is injected into the ExecutorAgent's tool list; the LLM can then decide to call it during ReAct loops.
+
+**Key design principles**:
+- **depth=1**: SubAgent's tool whitelist structurally excludes the `subagent` tool — it cannot spawn further SubAgents
+- **Independent context**: SubAgent has its own `ReActEngine` instance, own messages list, own system prompt
+- **Summary-only return**: Parent receives `SubAgentSummary` JSON (accomplished/findings/issues/artifacts/tool_calls_summary), never the full conversation history
+- **Token budget circuit breaker**: `SubAgentTokenExhausted` exception raised via `on_iteration` callback when cumulative tokens exceed `SUBAGENT_MAX_TOKENS_PER_CALL`
+- **Sandbox isolation**: Optional per-SubAgent sandbox subdirectory to prevent dual-write conflicts
+
+**Anti-pattern defenses**:
+- #2 Context leak: independent messages list, only structured summary returned
+- #3 Depth=1: structural enforcement via tool whitelist filtering
+- #4 Dual-write: sandbox directory isolation
+- #5 Self-critique: structured summary template forces `issues` field
+- #6 Summary loss: `SubAgentSummary` structured artifact + full `tool_calls_log` preserved in `SubAgentResult`
+- #8 Token explosion: per-call token budget + call count limit (`SUBAGENT_MAX_CALLS_PER_TASK`)
+
+**Integration flow**:
+1. `OrchestratorAgent.__init__()` — if `SUBAGENT_ENABLED`, creates `SubAgentTool` and appends to tools list
+2. LLM calls `subagent(task_description, tool_whitelist?)` during ReAct
+3. `SubAgentTool.execute()` — validates whitelist, creates isolated sandbox dir, spawns `SubAgent`
+4. `SubAgent.run()` — runs `ReActEngine.execute()` with `on_iteration=self._on_react_iteration` for token budget checking
+5. Returns `SubAgentResult.summary_text` (JSON string) to parent; `SubAgentTool.reset_task_state()` called at task boundary
+
+**Event keys** (emitted by SubAgent, consumed by UI/TracingBridge/EvaluationProbe): `subagent_start`, `subagent_complete`, `subagent_failed`, `subagent_timed_out`, `subagent_limit_exceeded`. All event dicts use `"iterations_used"` key (not `"iterations"`).
+
+**To trigger SubAgent in practice**: Use emergent route + enable the flag: `SUBAGENT_ENABLED=true PLAN_MODE=emergent python main.py "multi-step research task"`
 
 ## Evaluation Module
 
@@ -183,6 +218,14 @@ All config via env vars / `.env` file. Key variables:
 | `TRACING_ENDPOINT` | `http://localhost:4318` | OTLP HTTP endpoint |
 | `TRACING_SAMPLE_RATE` | `1.0` | Sampling rate (0.0–1.0) |
 | `TRACING_LOG_PROMPTS` | `false` | Legacy flag (no longer gates prompt recording — prompts are always recorded when tracing enabled; kept for config backward compat) |
+| `SUBAGENT_ENABLED` | `false` | v9 SubAgent master switch |
+| `SUBAGENT_MAX_ITERATIONS` | `10` | SubAgent internal ReAct max iterations |
+| `SUBAGENT_TIMEOUT` | `300` | SubAgent execution timeout (seconds) |
+| `SUBAGENT_MAX_CONCURRENT` | `3` | Max concurrent SubAgents |
+| `SUBAGENT_SUMMARY_MAX_LENGTH` | `2000` | Max chars before LLM-based summary compression |
+| `SUBAGENT_MAX_CALLS_PER_TASK` | `3` | Max SubAgent calls per task (anti-pattern #3/8) |
+| `SUBAGENT_MAX_TOKENS_PER_CALL` | `50000` | Per-call token budget (anti-pattern #8) |
+| `SUBAGENT_DEFAULT_TOOL_WHITELIST` | `""` | Default tool whitelist (comma-separated, empty=all) |
 
 ## Common Commands
 
@@ -226,6 +269,7 @@ python -m pytest tests/test_llm_integration.py -v       # LLMClient retry, token
 python -m pytest tests/test_optimizations.py -v         # Performance optimizations
 python -m pytest tests/test_real_tools.py -v            # Real tool execution (sandbox)
 python -m pytest tests/test_shell_tool.py -v            # ShellTool blacklist, sandbox
+python -m pytest tests/test_subagent.py -v              # v9 SubAgent, SubAgentTool, anti-patterns, token budget
 
 # Run a single test
 python -m pytest tests/test_dag_capabilities.py::test_topological_sort -v
@@ -257,7 +301,7 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 - **Event-driven UI** — OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which forwards to the `on_event` callback in `main.py`; ExecutorAgent and ReflectorAgent do not emit events directly
 - **Pydantic models** for data structures, but LLM message passing uses raw `list[dict[str, Any]]` (OpenAI API compatibility)
 - **Chinese + English bilingual comments** — most modules have dual-language docstrings
-- **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`)
+- **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`); v9 SubAgent defaults to disabled (`false`)
 - **Token tracking centralized** — only `LLMClient` and `OrchestratorAgent` manage token usage; individual execution agents (Executor, EmergentPlanner, Reflector, Planner) have no token tracking code
 - **Replan edge pattern** — `_parse_dag()` may produce edges referencing nodes outside its parsed set (LLM references old DAG completed nodes); these are filtered and stored in `_filtered_edges`; `_merge_dags()` reconstructs valid ones after merge
 - **OTel detach convention** — all `otel_context.detach()` calls in `tracing/bridge.py` are unprotected by try/except (OTel library catches ValueError internally); logging suppression is handled centrally by `OtelDetachFilter` in `main.py`, not at each call site
@@ -276,6 +320,10 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 10. **DAG dataflow dependencies**: `PLANNER_SYSTEM_PROMPT` Rule 6 requires actions to express cross-subgoal dataflow dependencies (e.g., `act_2_1.dependencies = ["act_1_1"]`); `_parse_dag()` automatically infers subgoal-level dependencies from cross-subgoal action deps — no code restriction on dep_id scope
 11. **Replan robustness**: `_parse_dag()` filters orphan edges (source/target not in parsed nodes) and stores them in `TaskDAG._filtered_edges`; `_merge_dags()` reconstructs these cross-DAG edges after merge when both endpoints exist in the merged node set
 12. **OTel context detach handling**: `OtelDetachFilter` in `main.py` suppresses OTel `Failed to detach context` ERROR tracebacks by downgrading the log record to INFO in-place — avoids misleading stack traces during concurrent asyncio DAG execution
+13. **SubAgent depth=1 enforcement**: Structural, not just prompt-based — `SubAgentTool` always filters "subagent" from the tool whitelist before passing to `SubAgent`, so the LLM literally cannot call it
+14. **ReActEngine on_iteration callback**: `execute()` accepts `on_iteration: Callable[[int, list[ToolCallRecord]], None]` invoked after each iteration; used by `SubAgent._on_react_iteration()` for token budget checking (can raise to abort); `StepResult.iterations_completed` populated from the iteration counter
+15. **SubAgent token accounting**: Uses record index range (`records[records_before:]`) not delta, because `_get_total_tokens()` sums all records including pre-existing ones from the shared `LLMClient`
+16. **SubAgent event key convention**: All SubAgent event dicts use `"iterations_used"` key consistently; `TracingBridge` reads `data.get("iterations_used", 0)` — mismatched keys were a P0 bug fixed in review
 
 ## Documentation
 

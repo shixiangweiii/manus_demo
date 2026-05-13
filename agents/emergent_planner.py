@@ -47,9 +47,11 @@ from schema import StepResult, TodoItem, TodoList, TodoStatus, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
+from agents.prompt_utils import build_system_prompt
+
 logger = logging.getLogger(__name__)
 
-EMERGENT_PLANNER_SYSTEM_PROMPT = """\
+_EMERGENT_BASE_PROMPT = """\
 You are an autonomous task execution agent that follows the ReAct paradigm.
 
 Your workflow for each TODO item:
@@ -67,6 +69,8 @@ execution step, the system may ask you to review and update the TODO
 list. You can suggest new TODOs, modifications, or mark items as blocked
 through your responses. Focus on executing each TODO with the tools available.
 """
+
+EMERGENT_PLANNER_SYSTEM_PROMPT = build_system_prompt(_EMERGENT_BASE_PROMPT)
 
 
 class EmergentPlannerAgent(BaseAgent):

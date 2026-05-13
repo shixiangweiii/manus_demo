@@ -63,6 +63,9 @@ class SpanName:
     # --- ReAct Loop ---
     REACT_ITERATION = "react.iteration"
 
+    # --- SubAgent (v9) ---
+    SUBAGENT_EXECUTE = "subagent.execute"
+
     # --- LLM Calls ---
     LLM_CHAT = "llm.chat"
     LLM_CHAT_WITH_TOOLS = "llm.chat_with_tools"
@@ -158,6 +161,17 @@ class AttrKey:
     REACT_MAX_ITERATIONS = "react.max_iterations"
     REACT_HAS_TOOL_CALL = "react.has_tool_call"
 
+    # --- SubAgent (v9) ---
+    SUBAGENT_ID = "subagent.id"
+    SUBAGENT_TASK = "subagent.task_description"
+    SUBAGENT_STATUS = "subagent.status"
+    SUBAGENT_PARENT_AGENT = "subagent.parent_agent"
+    SUBAGENT_TOOL_WHITELIST = "subagent.tool_whitelist"
+    SUBAGENT_ITERATIONS = "subagent.iterations_used"
+    SUBAGENT_DURATION_MS = "subagent.duration_ms"
+    SUBAGENT_TOKENS_USED = "subagent.tokens_used"
+    SUBAGENT_CALL_COUNT = "subagent.call_count"
+
     # --- Reflection ---
     REFLECTION_PASSED = "reflection.passed"
     REFLECTION_SCORE = "reflection.score"
@@ -244,6 +258,7 @@ SPAN_ICONS: dict[str, str] = {
     "memory": "\U0001f9e0",
     "knowledge": "\U0001f4da",
     "todo": "\U0001f4dd",
+    "subagent": "\U0001f916",
     "step": "\U0001f463",
 }
 

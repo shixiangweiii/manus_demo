@@ -64,9 +64,11 @@ from schema import (
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
+from agents.prompt_utils import build_system_prompt
+
 logger = logging.getLogger(__name__)
 
-V8_GOAL_DRIVEN_SYSTEM_PROMPT = """\
+_V8_BASE_PROMPT = """\
 You are an autonomous task execution agent with a "begin with the end in mind" philosophy.
 
 ## Your Guiding Principle
@@ -87,6 +89,8 @@ For each iteration you follow this sequence:
 - If a tool fails, re-reflect on whether the approach is still aligned with the goal.
 - Prefer actions that directly contribute to the current milestone.
 """
+
+V8_GOAL_DRIVEN_SYSTEM_PROMPT = build_system_prompt(_V8_BASE_PROMPT)
 
 # JSON prompt templates for structured LLM calls
 # 结构化 LLM 调用的 JSON 提示模板

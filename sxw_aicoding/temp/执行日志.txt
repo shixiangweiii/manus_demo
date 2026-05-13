@@ -1,0 +1,159 @@
+(.venv) U-VX9HX54K-2315:manus_demo shixiangweii$ export PLAN_MODE=emergent
+(.venv) U-VX9HX54K-2315:manus_demo shixiangweii$ export EMERGENT_PLANNING_ENABLED=true
+(.venv) U-VX9HX54K-2315:manus_demo shixiangweii$ export ENABLE_GOAL_DRIVEN_PLANNER=false
+(.venv) U-VX9HX54K-2315:manus_demo shixiangweii$ export ENABLE_REACT_ENGINE_V2=true
+(.venv) U-VX9HX54K-2315:manus_demo shixiangweii$ SUBAGENT_ENABLED=true PLAN_MODE=emergent LLM_API_KEY=sk-566c708dcaf94958992779216d8eb0f9 python main.py "请搜索当前项目目录下所有 Python 文件，找出哪些文件使用了 asyncio.gather，并汇总分析结果"
+[21:21:49] INFO     [LLMClient] Retry disabled (backward compatible mode)
+           INFO     [FileSpanExporter] Output directory: /Users/shixiangweii/PycharmProjects/manus_learn_proj/manus_demo/traces
+           INFO     [Tracing] Initialized: backend=file, sample_rate=1.00, service=manus-demo
+           INFO     [Orchestrator] SubAgent tool (v9) enabled
+           INFO     [Executor] Using unified ReActEngine (v6.0)
+           INFO     [EmergentPlanner] Using unified ReActEngine (v6.0)
+           INFO     Knowledge index built: 7 chunks from 1 files
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────── New Task ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ 请搜索当前项目目录下所有 Python 文件，找出哪些文件使用了 asyncio.gather，并汇总分析结果                                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+>>> Gathering context...
+╭─────────────────────────────────────────────────────────────────────────────────────────────── Knowledge Retrieved ────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ [Knowledge 1] (source: sample.txt, relevance: 0.1097)                                                                                                                                                              │
+│ Tool System:                                                                                                                                                                                                       │
+│ Agents can interact with the external world through a pluggable tool system:                                                                                                                                       │
+│ - Web Search: Query information from the internet                                                                                                                                                                  │
+│ - Code Execution: Run Python code to perform computations                                                                                                                                                          │
+│ - File Operations: Read and write files for data processing                                                                                                                                                        │
+│ The tool system uses OpenAI-compatible function calling, allowing the LLM to                                                                                                                                       │
+│ naturally select and invoke tools as part of its reasoning process.                                                                                                                                                │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+>>> Classifying task complexity...
+           INFO     [Planner] PLAN_MODE override: emergent
+  Task complexity: Emergent (v5 TODO list)
+
+>>> Planning (v5 emergent via TODO list)...
+
+>>> Executing with emergent planning (TODO list)...
+
+>>> Initializing emergent planning...
+[21:21:55] INFO     [EmergentPlanner] Initialized TODO list with 3 items
+
+>>> Emergent planning iteration 1...
+           INFO     [EmergentPlanner] Executing TODO 1: 搜索当前项目目录下所有 Python 文件并列出路径
+           INFO     [ReActEngine] Starting execution for 1: --- Switching to TODO 1: 搜索当前项目目录下所有 Python 文件并列出路径 ---
+
+                    Execute the following TODO:
+
+                    TODO 1: 搜索当前项目
+[21:21:57] INFO     [ReActEngine] Tool call: file_ops({'action': 'list'})
+[21:21:58] INFO     [ReActEngine] Tool call: execute_shell({'command': 'find /home/user -name "*.py" 2>/dev/null'})
+           INFO     Executing shell command: find /home/user -name "*.py" 2>/dev/null
+[21:22:00] INFO     [ReActEngine] Tool call: execute_shell({'command': 'pwd && find . -name "*.py" -type f 2>/dev/null'})
+           INFO     Executing shell command: pwd && find . -name "*.py" -type f 2>/dev/null
+[21:22:03] INFO     [ReActEngine] Tool call: execute_shell({'command': 'find . -type f 2>/dev/null'})
+           INFO     Executing shell command: find . -type f 2>/dev/null
+           INFO     [ReActEngine] Tool call: execute_shell({'command': 'find /Users/shixiangweii/.manus_demo -name "*.py" -type f 2>/dev/null'})
+           INFO     Executing shell command: find /Users/shixiangweii/.manus_demo -name "*.py" -type f 2>/dev/null
+[21:22:07] INFO     [ReActEngine] Completed in 5 iterations
+
+>>> Emergent planning iteration 2...
+           INFO     [EmergentPlanner] Executing TODO 2: 检查每个 Python 文件内容中是否包含 'asyncio.gather'
+           INFO     [ReActEngine] Starting execution for 2: --- Switching to TODO 2: 检查每个 Python 文件内容中是否包含 'asyncio.gather' ---
+
+                    Execute the following TODO:
+
+                    TO
+[21:22:09] INFO     [ReActEngine] Tool call: file_ops({'action': 'list'})
+[21:22:10] INFO     [ReActEngine] Tool call: execute_shell({'command': 'find /Users/shixiangweii/.manus_demo/sandbox -name "*.py" 2>/dev/null'})
+           INFO     Executing shell command: find /Users/shixiangweii/.manus_demo/sandbox -name "*.py" 2>/dev/null
+[21:22:12] INFO     [ReActEngine] Tool call: execute_shell({'command': 'find /Users/shixiangweii/.manus_demo/sandbox/subagent_1 /Users/shixiangweii/.manus_demo/sandbox/subagent_2 -type f 2>/dev/null'})
+           INFO     Executing shell command: find /Users/shixiangweii/.manus_demo/sandbox/subagent_1 /Users/shixiangweii/.manus_demo/sandbox/suba
+[21:22:16] INFO     [ReActEngine] Completed in 4 iterations
+
+>>> Emergent planning iteration 3...
+           INFO     [EmergentPlanner] Executing TODO 3: 汇总分析结果，列出使用了 asyncio.gather 的文件
+           INFO     [ReActEngine] Starting execution for 3: --- Switching to TODO 3: 汇总分析结果，列出使用了 asyncio.gather 的文件 ---
+
+                    Execute the following TODO:
+
+                    TODO 3: 汇
+[21:22:18] INFO     [ReActEngine] Tool call: file_ops({'action': 'list'})
+[21:22:21] INFO     [ReActEngine] Tool call: execute_shell({'command': 'find . -type f -name "*.py" 2>/dev/null; echo "---"; ls -la subagent_1/ subagent_2/ 2>/dev/null'})
+           INFO     Executing shell command: find . -type f -name "*.py" 2>/dev/null; echo "---"; ls -la subagent_1/ subagent_2/ 2>/dev/null
+[21:22:24] INFO     [ReActEngine] Completed in 3 iterations
+
+>>> Emergent planning completed.
+
+>>> Emergent planning completed.
+                                         Token Consumption Per-Call
+┏━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ #    ┃ Type             ┃ Prompt Summary                           ┃     Prompt ┃ Completion ┃      Total ┃
+┡━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ 1    │ chat_json        │ Initialize a TODO list for this task. Cr │        416 │        240 │        656 │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 2    │ chat_with_tools  │ --- Switching to TODO 1:                 │       1068 │         98 │       1166 │
+│      │                  │ 搜索当前项目目录下所有 Pyt               │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 3    │ chat_with_tools  │ --- Switching to TODO 1:                 │       1180 │        110 │       1290 │
+│      │                  │ 搜索当前项目目录下所有 Pyt               │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 4    │ chat_with_tools  │ --- Switching to TODO 1:                 │       1308 │        111 │       1419 │
+│      │                  │ 搜索当前项目目录下所有 Pyt               │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 5    │ chat_with_tools  │ --- Switching to TODO 1:                 │       1446 │        195 │       1641 │
+│      │                  │ 搜索当前项目目录下所有 Pyt               │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 6    │ chat_with_tools  │ --- Switching to TODO 1:                 │       1687 │        265 │       1952 │
+│      │                  │ 搜索当前项目目录下所有 Pyt               │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 7    │ chat_with_tools  │ --- Switching to TODO 2: 检查每个 Pytho… │       1238 │        107 │       1345 │
+│      │                  │ 文件内                                   │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 8    │ chat_with_tools  │ --- Switching to TODO 2: 检查每个 Pytho… │       1370 │         83 │       1453 │
+│      │                  │ 文件内                                   │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 9    │ chat_with_tools  │ --- Switching to TODO 2: 检查每个 Pytho… │       1490 │        142 │       1632 │
+│      │                  │ 文件内                                   │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 10   │ chat_with_tools  │ --- Switching to TODO 2: 检查每个 Pytho… │       1630 │        312 │       1942 │
+│      │                  │ 文件内                                   │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 11   │ chat_with_tools  │ --- Switching to TODO 3:                 │       1268 │        108 │       1376 │
+│      │                  │ 汇总分析结果，列出使用了 as              │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 12   │ chat_with_tools  │ --- Switching to TODO 3:                 │       1380 │        182 │       1562 │
+│      │                  │ 汇总分析结果，列出使用了 as              │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 13   │ chat_with_tools  │ --- Switching to TODO 3:                 │       1669 │        297 │       1966 │
+│      │                  │ 汇总分析结果，列出使用了 as              │            │            │            │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 14   │ chat_json        │ Initialize a TODO list for this task. Cr │        974 │         36 │       1010 │
+├──────┼──────────────────┼──────────────────────────────────────────┼────────────┼────────────┼────────────┤
+│ 15   │ chat             │ Initialize a TODO list for this task. Cr │       1586 │        160 │       1746 │
+└──────┴──────────────────┴──────────────────────────────────────────┴────────────┴────────────┴────────────┘
+                         Token Consumption by Engine
+┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
+┃                      ┃                 ┃      Completion ┃                 ┃
+┃ Engine               ┃   Prompt Tokens ┃          Tokens ┃    Total Tokens ┃
+┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
+│ deepseek-v4-flash    │           19710 │            2446 │           22156 │
+└──────────────────────┴─────────────────┴─────────────────┴─────────────────┘
+╭──────────────────────────────────────────────────────────────────────────────────────────────── Token Consumption ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Total Tokens: 22156                                                                                                                                                                                                │
+│   Prompt:     19710                                                                                                                                                                                                │
+│   Completion: 2446                                                                                                                                                                                                 │
+│   Note: Total may include reasoning tokens (prompt + completion ≤ total)                                                                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+[21:22:28] INFO     Stored long-term memory: 请搜索当前项目目录下所有 Python 文件，找出哪些文件使用了 asyncio.gather，并汇总分析结果
+   (Result stored in long-term memory)
+╭─────────────────────────────────────────────────────────────────────────────────────────────────── Final Answer ───────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ## 任务总结                                                                                                                                                                                                        │
+│                                                                                                                                                                                                                    │
+│ 对当前项目目录（`/Users/shixiangweii/.manus_demo/sandbox`）进行了递归搜索，未发现任何 Python 文件（`.py`）。项目中仅包含：                                                                                         │
+│                                                                                                                                                                                                                    │
+│ - 两个空目录：`subagent_1/` 和 `subagent_2/`                                                                                                                                                                       │
+│ - 一个 Markdown 文件：`杭州市明天天气预报_2026-05-14.md`                                                                                                                                                           │
+│                                                                                                                                                                                                                    │
+│ 因此，**没有任何文件使用了 `asyncio.gather`**。任务已完成。                                                                                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+(.venv) U-VX9HX54K-2315:manus_demo shixiangweii$

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import config
 from context.manager import ContextManager
@@ -90,6 +90,7 @@ class ReActEngine:
         context: str = "",
         node_id: str | None = None,
         system_hint: str = "",
+        on_iteration: Callable[[int, list[ToolCallRecord]], None] | None = None,
     ) -> StepResult:
         """
         Execute a single task using the ReAct loop.
@@ -99,6 +100,8 @@ class ReActEngine:
             context: Additional context from dependencies/previous steps
             node_id: Optional identifier for tool routing (per-node stats)
             system_hint: Additional system-level hint for the LLM
+            on_iteration: Optional callback invoked after each iteration with
+                (iteration_number, current_tool_calls_log). Can raise to abort.
 
         Returns:
             StepResult: Contains success status, output text, and tool call log
@@ -172,16 +175,20 @@ class ReActEngine:
                     success=False,
                     output=f"LLM call failed: {exc}",
                     tool_calls_log=tool_calls_log,
+                    iterations_completed=iteration,
                 )
 
             if not response_msg.tool_calls:
                 final_output = response_msg.content or "Task completed (no output)."
                 logger.info("[ReActEngine] Completed in %d iterations", iteration)
+                if on_iteration:
+                    on_iteration(iteration, tool_calls_log)
                 return StepResult(
                     step_id=step_id,
                     success=True,
                     output=final_output,
                     tool_calls_log=tool_calls_log,
+                    iterations_completed=iteration,
                 )
 
             tool_messages: list[dict[str, Any]] = []
@@ -238,12 +245,16 @@ class ReActEngine:
 
             messages.extend(tool_messages)
 
+            if on_iteration:
+                on_iteration(iteration, tool_calls_log)
+
         logger.warning("[ReActEngine] Hit max iterations (%d)", self.max_iterations)
         return StepResult(
             step_id=step_id,
             success=False,
             output=f"Task did not complete within {self.max_iterations} iterations.",
             tool_calls_log=tool_calls_log,
+            iterations_completed=iteration,
         )
 
     def get_node_summary(self, node_id: str) -> dict[str, Any]:

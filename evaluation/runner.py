@@ -121,6 +121,9 @@ class EvaluationProbe:
         self.todo_completed: int = 0
         self.todo_blocked: int = 0
 
+        # v9 SubAgent specifics (anti-pattern #10 defense)
+        self.subagent_results: list[dict] = []
+
         # Phase tracking
         self._phase_started: dict[str, float] = {}
 
@@ -291,6 +294,27 @@ class EvaluationProbe:
             self.execution_end = time.time()
             self.final_answer = data.get("answer", "")
             self.task_success = len(self.final_answer) > 0 and "无法完成" not in self.final_answer
+
+        # --- SubAgent (v9) ---
+        elif event == "subagent_complete":
+            self.subagent_results.append({
+                "status": "completed",
+                "subagent_id": data.get("subagent_id", ""),
+                "iterations_used": data.get("iterations_used", 0),
+                "tokens_used": data.get("tokens_used", 0),
+                "duration_ms": data.get("duration_ms", 0.0),
+                "tool_calls_count": data.get("tool_calls_count", 0),
+            })
+
+        elif event in ("subagent_failed", "subagent_timed_out"):
+            self.subagent_results.append({
+                "status": "failed" if event == "subagent_failed" else "timed_out",
+                "subagent_id": data.get("subagent_id", ""),
+                "iterations_used": data.get("iterations_used", 0),
+                "tokens_used": data.get("tokens_used", 0),
+                "duration_ms": data.get("duration_ms", 0.0),
+                "tool_calls_count": data.get("tool_calls_count", 0),
+            })
 
     def build_result(
         self,

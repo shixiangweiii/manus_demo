@@ -112,6 +112,22 @@ class OrchestratorAgent:
             original_on_event = on_event or (lambda *_: None)
             on_event = self._make_multicast(original_on_event, self._tracing_bridge.on_event)
 
+        # v9 SubAgent tool (feature-flagged, default off)
+        # v9 子智能体工具（特性开关控制，默认关闭）
+        self._subagent_tool = None
+        if config.SUBAGENT_ENABLED:
+            from tools.subagent_tool import SubAgentTool
+            tool_dict = {t.name: t for t in tools or []}
+            self._subagent_tool = SubAgentTool(
+                llm_client=self.llm_client,
+                available_tools=tool_dict,
+                context_manager=self.context_manager,
+                on_event=self._emit,
+                parent_name="OrchestratorAgent",
+            )
+            tools = list(tools or []) + [self._subagent_tool]
+            logger.info("[Orchestrator] SubAgent tool (v9) enabled")
+
         # Sub-agents（各专用子智能体）
         self.planner = PlannerAgent(self.llm_client, self.context_manager)
         self.executor_agent = ExecutorAgent(
@@ -174,6 +190,10 @@ class OrchestratorAgent:
 
         # Token 追踪：重置记录，开始新任务
         self.llm_client.reset_usage()
+
+        # v9: Reset SubAgent per-task state for new task
+        if self._subagent_tool:
+            self._subagent_tool.reset_task_state()
 
         if not config.EMERGENT_PLANNING_ENABLED:
             logger.info("[Orchestrator] Emergent planning mode is disabled via config")

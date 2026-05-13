@@ -397,6 +397,41 @@ def on_event(event: str, data: Any) -> None:
         summary: TokenUsageSummary = data
         _render_token_summary(summary)
 
+    # --- v9 SubAgent Events ---
+    # --- v9 子智能体事件 ---
+    elif event == "subagent_start":
+        console.print(
+            f"    [bold blue][SubAgent][/bold blue] {data['subagent_id']} spawned: "
+            f"{data['task_description'][:100]}"
+        )
+    elif event == "subagent_complete":
+        console.print(
+            f"    [green][SubAgent][/green] {data['subagent_id']} completed "
+            f"({data['iterations']} iters, {data.get('tokens_used', 0)} tokens, {data['duration_ms']:.0f}ms)"
+        )
+        try:
+            import json as _json
+            summary_data = _json.loads(data["summary"]) if isinstance(data["summary"], str) else data["summary"]
+            accomplished = summary_data.get("accomplished", "")[:500]
+            if accomplished:
+                console.print(Panel(
+                    accomplished,
+                    title=f"[SubAgent] {data['subagent_id']} Summary",
+                    border_style="green",
+                ))
+        except Exception:
+            pass
+    elif event == "subagent_failed":
+        console.print(
+            f"    [red][SubAgent][/red] {data['subagent_id']} FAILED: "
+            f"{data.get('error', 'unknown')[:200]}"
+        )
+    elif event == "subagent_timed_out":
+        console.print(
+            f"    [red][SubAgent][/red] {data['subagent_id']} TIMED OUT "
+            f"after {data['timeout']}s"
+        )
+
     elif event == "task_complete":
         # 任务完成：显示绿色边框的最终答案面板
         console.print(Panel(

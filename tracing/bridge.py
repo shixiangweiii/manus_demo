@@ -77,6 +77,9 @@ class TracingBridge:
         # TODO-level tracking (emergent mode)
         self._todo_spans: dict[str, tuple[Span, Any]] = {}
 
+        # SubAgent-level tracking (v9)
+        self._subagent_spans: dict[str, tuple[Span, Any]] = {}
+
         # Timing
         self._task_start_time: float = 0.0
 
@@ -112,6 +115,11 @@ class TracingBridge:
             "goal_reanchor": self._on_goal_reanchor,
             "goal_drift_alert": self._on_goal_drift_alert,
             "stagnation_detected": self._on_stagnation_detected,
+            # v9 SubAgent events
+            "subagent_start": self._on_subagent_start,
+            "subagent_complete": self._on_subagent_complete,
+            "subagent_failed": self._on_subagent_failed,
+            "subagent_timed_out": self._on_subagent_timed_out,
         }
 
     def on_event(self, event: str, data: Any = None) -> None:
@@ -759,6 +767,109 @@ class TracingBridge:
                 "total_todos": int(data.get("total_todos", 0)),
             }
             self._root_span.add_event("stagnation.detected", attributes=stagnation_attrs)
+
+    # ------------------------------------------------------------------
+    # SubAgent Events (v9)
+    # 子智能体事件（v9 新增）
+    # ------------------------------------------------------------------
+
+    def _on_subagent_start(self, data: Any) -> None:
+        """Create a span when a SubAgent starts executing."""
+        if not isinstance(data, dict):
+            return
+
+        subagent_id = data.get("subagent_id", "unknown")
+        task_description = data.get("task_description", "")
+        parent_agent = data.get("parent_agent", "")
+        tool_whitelist = data.get("tool_whitelist", [])
+
+        from tracing.spans import AttrKey
+        span_name = f"subagent.execute.{subagent_id}"
+
+        parent_context = (
+            trace.set_span_in_context(self._phase_span)
+            if self._phase_span
+            else None
+        )
+
+        span = self._tracer.start_span(span_name, context=parent_context)
+        token = otel_context.attach(trace.set_span_in_context(span))
+
+        span.set_attribute(AttrKey.SUBAGENT_ID, subagent_id)
+        if task_description:
+            self._safe_set_attr(span, AttrKey.SUBAGENT_TASK, task_description)
+        if parent_agent:
+            span.set_attribute(AttrKey.SUBAGENT_PARENT_AGENT, parent_agent)
+        if tool_whitelist:
+            span.set_attribute(AttrKey.SUBAGENT_TOOL_WHITELIST, ", ".join(str(t) for t in tool_whitelist))
+
+        self._subagent_spans[subagent_id] = (span, token)
+
+    def _on_subagent_complete(self, data: Any) -> None:
+        """End a SubAgent span with success status."""
+        if not isinstance(data, dict):
+            return
+        subagent_id = data.get("subagent_id", "unknown")
+
+        from tracing.spans import AttrKey
+        if subagent_id in self._subagent_spans:
+            span, _ = self._subagent_spans[subagent_id]
+            span.set_attribute(AttrKey.SUBAGENT_STATUS, "completed")
+            span.set_attribute(AttrKey.SUBAGENT_ITERATIONS, int(data.get("iterations_used", 0)))
+            span.set_attribute(AttrKey.SUBAGENT_DURATION_MS, float(data.get("duration_ms", 0.0)))
+            tokens = data.get("tokens_used", 0)
+            if tokens:
+                span.set_attribute(AttrKey.SUBAGENT_TOKENS_USED, int(tokens))
+
+        self._end_subagent_span(subagent_id, StatusCode.OK)
+
+    def _on_subagent_failed(self, data: Any) -> None:
+        """End a SubAgent span with error status."""
+        if not isinstance(data, dict):
+            return
+        subagent_id = data.get("subagent_id", "unknown")
+
+        from tracing.spans import AttrKey
+        if subagent_id in self._subagent_spans:
+            span, _ = self._subagent_spans[subagent_id]
+            span.set_attribute(AttrKey.SUBAGENT_STATUS, "failed")
+            span.set_attribute(AttrKey.SUBAGENT_ITERATIONS, int(data.get("iterations_used", 0)))
+            span.set_attribute(AttrKey.SUBAGENT_DURATION_MS, float(data.get("duration_ms", 0.0)))
+            error = data.get("error", "")
+            if error:
+                span.set_attribute("subagent.error", str(error)[:500])
+
+        self._end_subagent_span(subagent_id, StatusCode.ERROR)
+
+    def _on_subagent_timed_out(self, data: Any) -> None:
+        """End a SubAgent span with timeout status."""
+        if not isinstance(data, dict):
+            return
+        subagent_id = data.get("subagent_id", "unknown")
+
+        from tracing.spans import AttrKey
+        if subagent_id in self._subagent_spans:
+            span, _ = self._subagent_spans[subagent_id]
+            span.set_attribute(AttrKey.SUBAGENT_STATUS, "timed_out")
+            span.set_attribute(AttrKey.SUBAGENT_ITERATIONS, int(data.get("iterations_used", 0)))
+            span.set_attribute(AttrKey.SUBAGENT_DURATION_MS, float(data.get("duration_ms", 0.0)))
+            timeout = data.get("timeout", 0)
+            if timeout:
+                span.set_attribute("subagent.timeout_seconds", int(timeout))
+
+        self._end_subagent_span(subagent_id, StatusCode.ERROR)
+
+    def _end_subagent_span(self, subagent_id: str, status_code: StatusCode) -> None:
+        """End a specific SubAgent span."""
+        if subagent_id in self._subagent_spans:
+            span, token = self._subagent_spans.pop(subagent_id)
+            span.set_status(status_code)
+            span.end()
+            if token:
+                try:
+                    otel_context.detach(token)
+                except (ValueError, Exception):
+                    pass
 
     # ------------------------------------------------------------------
     # Helpers

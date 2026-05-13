@@ -44,9 +44,11 @@ from schema import Step, StepResult, TaskNode, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
+from agents.prompt_utils import build_system_prompt
+
 logger = logging.getLogger(__name__)
 
-EXECUTOR_SYSTEM_PROMPT = """\
+_EXECUTOR_BASE_PROMPT = """\
 You are a task execution agent that follows the ReAct paradigm.
 
 For each step you receive, you should:
@@ -61,6 +63,8 @@ what was accomplished. Do NOT call any more tools once the step is done.
 Available tools will be provided via function calling. Use them wisely.
 Be concise and focused on completing the step objective.
 """
+
+EXECUTOR_SYSTEM_PROMPT = build_system_prompt(_EXECUTOR_BASE_PROMPT)
 
 
 class ExecutorAgent(BaseAgent):

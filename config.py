@@ -96,6 +96,17 @@ GOAL_REFLECTION_INTERVAL = int(os.getenv("GOAL_REFLECTION_INTERVAL", "1"))  # �
 MAX_GOAL_DRIVEN_ITERATIONS = int(os.getenv("MAX_GOAL_DRIVEN_ITERATIONS", str(MAX_TODO_ITEMS * MAX_TODO_RETRIES)))  # v8 主循环最大迭代数
 GOAL_DRIVEN_STAGNATION_WINDOW = int(os.getenv("GOAL_DRIVEN_STAGNATION_WINDOW", "3"))  # 连续多少轮无进度突破则提前终止
 
+# --- v9.0 SubAgent Feature Flags (Claude Code Subagent pattern, default off) ---
+# --- 子智能体（v9 新增）- Claude Code Subagent 模式 ---
+SUBAGENT_ENABLED = os.getenv("SUBAGENT_ENABLED", "false").lower() == "true"  # 是否启用 SubAgent 模式
+SUBAGENT_MAX_ITERATIONS = int(os.getenv("SUBAGENT_MAX_ITERATIONS", str(MAX_REACT_ITERATIONS)))  # SubAgent 内部 ReAct 最大迭代次数
+SUBAGENT_TIMEOUT = int(os.getenv("SUBAGENT_TIMEOUT", str(NODE_EXECUTION_TIMEOUT)))  # SubAgent 执行超时时间（秒）
+SUBAGENT_MAX_CONCURRENT = int(os.getenv("SUBAGENT_MAX_CONCURRENT", "3"))  # 最大并发 SubAgent 数量
+SUBAGENT_SUMMARY_MAX_LENGTH = int(os.getenv("SUBAGENT_SUMMARY_MAX_LENGTH", "2000"))  # SubAgent 返回摘要最大字符数
+SUBAGENT_MAX_CALLS_PER_TASK = int(os.getenv("SUBAGENT_MAX_CALLS_PER_TASK", "3"))  # 反模式 #3/8：单任务 SubAgent 调用次数上限
+SUBAGENT_MAX_TOKENS_PER_CALL = int(os.getenv("SUBAGENT_MAX_TOKENS_PER_CALL", "50000"))  # 反模式 #8：单次 SubAgent 调用 Token 预算上限
+SUBAGENT_DEFAULT_TOOL_WHITELIST = os.getenv("SUBAGENT_DEFAULT_TOOL_WHITELIST", "")  # 默认工具白名单（逗号分隔，空=全量授权）
+
 # ======================================================================
 # Tracing Configuration (v7)
 # 全链路追踪配置（v7 新增）
