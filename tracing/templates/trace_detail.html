@@ -320,6 +320,131 @@
         color: var(--text-primary);
     }
 
+    /* 小全屏按钮 */
+    .btn-fullscreen-small {
+        font-size: 10px;
+        padding: 1px 6px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        background: var(--bg-card);
+        color: var(--text-muted);
+        cursor: pointer;
+        font-family: var(--font-mono);
+    }
+
+    .btn-fullscreen-small:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
+    }
+
+    /* 全屏 Modal 遮罩层 */
+    .fullscreen-modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.7);
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.25s ease, visibility 0.25s ease;
+    }
+
+    .fullscreen-modal-overlay.active {
+        opacity: 1;
+        visibility: visible;
+    }
+
+    /* Modal 内容容器 */
+    .fullscreen-modal-content {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        width: 100%;
+        max-width: 1200px;
+        height: 90vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        transform: scale(0.95);
+        transition: transform 0.25s ease;
+    }
+
+    .fullscreen-modal-overlay.active .fullscreen-modal-content {
+        transform: scale(1);
+    }
+
+    /* Modal 头部 */
+    .fullscreen-modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 20px;
+        background: var(--bg-secondary);
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+    }
+
+    .fullscreen-modal-title {
+        font-family: var(--font-mono);
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--accent);
+    }
+
+    .fullscreen-modal-actions {
+        display: flex;
+        gap: 8px;
+    }
+
+    .fullscreen-modal-btn {
+        padding: 6px 14px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--bg-card);
+        color: var(--text-secondary);
+        cursor: pointer;
+        font-size: 13px;
+        font-family: var(--font-sans);
+        transition: all 0.15s;
+    }
+
+    .fullscreen-modal-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
+    }
+
+    .fullscreen-modal-btn.close-btn {
+        border-color: var(--error);
+        color: var(--error);
+    }
+
+    .fullscreen-modal-btn.close-btn:hover {
+        background: rgba(244, 67, 54, 0.15);
+    }
+
+    /* Modal 内容体 */
+    .fullscreen-modal-body {
+        flex: 1;
+        padding: 20px;
+        overflow-y: auto;
+    }
+
+    .fullscreen-modal-body pre {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 13px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--text-primary);
+    }
+
     .long-attr-pre {
         background: var(--bg-secondary);
         padding: 12px;
@@ -442,6 +567,22 @@
                 <div class="detail-empty-icon">📌</div>
                 Click a span in the tree to view its details
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- 全屏 Modal -->
+<div id="fullscreen-modal" class="fullscreen-modal-overlay">
+    <div class="fullscreen-modal-content">
+        <div class="fullscreen-modal-header">
+            <span class="fullscreen-modal-title" id="fullscreen-modal-title">Attribute</span>
+            <div class="fullscreen-modal-actions">
+                <button class="fullscreen-modal-btn" onclick="copyFullscreenContent()">Copy</button>
+                <button class="fullscreen-modal-btn close-btn" onclick="closeFullscreenModal()">Close</button>
+            </div>
+        </div>
+        <div class="fullscreen-modal-body">
+            <pre id="fullscreen-modal-pre"></pre>
         </div>
     </div>
 </div>
@@ -580,23 +721,53 @@
         const attrs = node.attributes || {};
         const attrKeys = Object.keys(attrs).sort();
         const LONG_THRESHOLD = 150;
+
+        // 优先提取 LLM prompt / response 属性
+        const PRIORITY_ATTRS = ['gen_ai.prompt.content', 'gen_ai.response.content'];
+        const priorityKeys = [];
         const shortKeys = [];
         const longKeys = [];
         for (const key of attrKeys) {
             let val = attrs[key];
             if (typeof val === 'object') val = JSON.stringify(val, null, 2);
             const s = String(val);
-            if (s.includes('\n') && s.length > LONG_THRESHOLD) {
+            if (PRIORITY_ATTRS.includes(key)) {
+                priorityKeys.push(key);
+            } else if (s.includes('\n') && s.length > LONG_THRESHOLD) {
                 longKeys.push(key);
             } else {
                 shortKeys.push(key);
             }
         }
 
+        // 优先渲染 LLM prompt / response（作为可折叠长文本块，默认展开）
+        if (priorityKeys.length > 0) {
+            for (const key of priorityKeys) {
+                let val = String(attrs[key]);
+                const blockId = 'long-' + key.replace(/[^a-zA-Z0-9]/g, '_');
+                const lines = val.split('\n').length;
+
+                html += '<div class="detail-section">';
+                html += '<div class="long-attr-block">';
+                html += '<div class="long-attr-header" onclick="this.nextElementSibling.classList.toggle(\'expanded\');';
+                html += '  var t=this.querySelector(\'.long-attr-toggle\');';
+                html += '  t.textContent=t.textContent===\'▶ Expand\'?\'▼ Collapse\':\'▶ Expand\';">';
+                html += '<span class="long-attr-key">' + escapeHtml(key) + '</span>';
+                html += '<span class="long-attr-badge">';
+                html += '<span class="long-attr-chars">' + val.length + ' chars / ' + lines + ' lines</span>';
+                html += '<button class="btn-copy-small" onclick="event.stopPropagation();copyBlock(\'' + blockId + '\',this)">Copy</button>';
+                html += '<button class="btn-fullscreen-small" onclick="event.stopPropagation();openFullscreenModal(\'' + escapeHtml(key) + '\', document.getElementById(\'' + blockId + '\').textContent)">Full</button>';
+                html += '<span class="long-attr-toggle">▼ Collapse</span>';
+                html += '</span></div>';
+                html += '<pre class="long-attr-pre expanded" id="' + blockId + '">' + escapeHtml(val) + '</pre>';
+                html += '</div></div>';
+            }
+        }
+
         // Short attrs in table
-        if (shortKeys.length > 0 || longKeys.length === 0) {
+        if (shortKeys.length > 0 || (longKeys.length === 0 && priorityKeys.length === 0)) {
             html += '<div class="detail-section">';
-            html += '<div class="detail-section-title">Attributes (' + attrKeys.length + ')</div>';
+            html += '<div class="detail-section-title">Attributes (' + (shortKeys.length + longKeys.length) + ')</div>';
             if (shortKeys.length > 0) {
                 html += '<table class="attr-table">';
                 for (const key of shortKeys) {
@@ -627,6 +798,7 @@
             html += '<span class="long-attr-badge">';
             html += '<span class="long-attr-chars">' + val.length + ' chars / ' + lines + ' lines</span>';
             html += '<button class="btn-copy-small" onclick="event.stopPropagation();copyBlock(\'' + blockId + '\',this)">Copy</button>';
+            html += '<button class="btn-fullscreen-small" onclick="event.stopPropagation();openFullscreenModal(\'' + escapeHtml(key) + '\', document.getElementById(\'' + blockId + '\').textContent)">Full</button>';
             html += '<span class="long-attr-toggle">▶ Expand</span>';
             html += '</span></div>';
             html += '<pre class="long-attr-pre" id="' + blockId + '">' + escapeHtml(val) + '</pre>';
@@ -702,6 +874,41 @@
             setTimeout(function() { btn.textContent = 'Copy'; }, 1200);
         });
     };
+
+    // 全屏 Modal 状态
+    let _fullscreenContent = '';
+
+    function openFullscreenModal(title, content) {
+        _fullscreenContent = content;
+        document.getElementById('fullscreen-modal-title').textContent = title;
+        document.getElementById('fullscreen-modal-pre').textContent = content;
+        document.getElementById('fullscreen-modal').classList.add('active');
+        document.body.style.overflow = 'hidden';
+    }
+
+    function closeFullscreenModal() {
+        document.getElementById('fullscreen-modal').classList.remove('active');
+        document.body.style.overflow = '';
+        _fullscreenContent = '';
+    }
+
+    window.openFullscreenModal = openFullscreenModal;
+    window.closeFullscreenModal = closeFullscreenModal;
+
+    window.copyFullscreenContent = function() {
+        if (!_fullscreenContent) return;
+        navigator.clipboard.writeText(_fullscreenContent).then(function() {});
+    };
+
+    // ESC 关闭
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeFullscreenModal();
+    });
+
+    // 点击遮罩关闭
+    document.getElementById('fullscreen-modal').addEventListener('click', function(e) {
+        if (e.target === this) closeFullscreenModal();
+    });
 })();
 </script>
 {% endblock %}
