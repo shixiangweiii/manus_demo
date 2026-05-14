@@ -81,11 +81,13 @@ Be honest about issues — do not omit problems. Return ONLY valid JSON.
 
 
 def _extract_artifacts_from_log(tool_calls_log: list[ToolCallRecord]) -> list[str]:
-    """Extract file paths from tool calls log (no LLM needed)."""
+    """Extract file paths from tool calls log (no LLM needed).
+    Note: shell-created files cannot be statically detected; this is best-effort.
+    """
     artifacts = []
     for tc in tool_calls_log:
-        if tc.tool_name in ("file_ops", "write_file", "read_file", "list_files"):
-            path = tc.parameters.get("path") or tc.parameters.get("file_path", "")
+        if tc.tool_name == "file_ops" and tc.parameters.get("action") == "write":
+            path = tc.parameters.get("filename", "")
             if path and path not in artifacts:
                 artifacts.append(path)
     return artifacts
@@ -161,6 +163,7 @@ class SubAgent:
         self._accumulated_tool_calls: list[ToolCallRecord] = []
         self._iterations_so_far: int = 0
         self._token_exceeded: bool = False
+        self._records_before: int = 0
 
     def _emit(self, event: str, data: Any = None) -> None:
         try:
@@ -168,18 +171,14 @@ class SubAgent:
         except Exception:
             logger.debug("[SubAgent] Event callback error for '%s'", event, exc_info=True)
 
-    def _get_total_tokens(self) -> int:
-        """Get total tokens consumed so far from shared LLMClient."""
-        records = self.llm_client.get_call_records()
-        return sum(r.total_tokens for r in records)
-
     def _on_react_iteration(self, iteration: int, tool_calls: list[ToolCallRecord]) -> None:
         """ReAct iteration callback — accumulate tool calls and check token budget."""
         self._iterations_so_far = iteration
         self._accumulated_tool_calls.extend(tool_calls)
 
-        # Anti-pattern #8: per-call token budget check
-        current_tokens = self._get_total_tokens() - self._tokens_before
+        # Anti-pattern #8: per-call token budget check (index range method)
+        records = self.llm_client.get_call_records()
+        current_tokens = sum(r.total_tokens for r in records[self._records_before:])
         if current_tokens >= self.max_tokens:
             logger.warning(
                 "[SubAgent] Token budget exceeded: %d >= %d",
@@ -199,8 +198,7 @@ class SubAgent:
         the full tool_calls_log is preserved for debugging.
         """
         start_time = time.perf_counter()
-        self._tokens_before = self._get_total_tokens()
-        records_before = len(self.llm_client.get_call_records())
+        self._records_before = len(self.llm_client.get_call_records())
 
         # Reset per-run state
         self._accumulated_tool_calls = []
@@ -232,7 +230,7 @@ class SubAgent:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             # Token calculation via record index range (safe under shared LLMClient)
             records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[records_before:])
+            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
             iterations_used = step_result.iterations_completed
 
             if step_result.success:
@@ -297,7 +295,7 @@ class SubAgent:
         except SubAgentTokenExhausted:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[records_before:])
+            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
 
             budget_summary = SubAgentSummary(
                 accomplished="",
@@ -334,7 +332,7 @@ class SubAgent:
         except asyncio.TimeoutError:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[records_before:])
+            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
 
             timeout_summary = SubAgentSummary(
                 accomplished="",
@@ -371,7 +369,7 @@ class SubAgent:
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[records_before:])
+            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
             error_msg = str(exc)[:500]
 
             error_summary = SubAgentSummary(
@@ -421,17 +419,8 @@ class SubAgent:
         artifacts = _extract_artifacts_from_log(tool_calls_log)
         tool_calls_summary = _extract_tool_calls_summary_from_log(tool_calls_log)
 
-        # If output is already short enough, build summary with extracted fields
-        if len(output) <= config.SUBAGENT_SUMMARY_MAX_LENGTH:
-            return SubAgentSummary(
-                accomplished=output,
-                findings="See accomplished field" if output else "",
-                issues="",
-                artifacts=artifacts,
-                tool_calls_summary=tool_calls_summary,
-            )
-
         # Use LLM to generate structured summary
+        # (no short-path bypass — anti-pattern #5 defense requires all paths to go through LLM reflection)
         try:
             messages = list(self._summary_messages)
             messages.append({

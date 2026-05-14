@@ -833,7 +833,7 @@ class TestSubAgentAntiPatterns:
         """#6: SubAgentResult preserves full tool_calls_log for debugging."""
         tc_log = [
             ToolCallRecord(tool_name="search", parameters={}, result="found 3 items"),
-            ToolCallRecord(tool_name="file_ops", parameters={"path": "/tmp"}, result="listed"),
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "list", "filename": "/tmp"}, result="listed"),
         ]
         result = SubAgentResult(
             subagent_id="SA-1",
@@ -1103,8 +1103,8 @@ class TestP0TokenBudgetCircuitBreaker:
             # But since we're mocking execute, we need to simulate differently
             pass
 
-        # Direct test: _on_react_iteration raises when budget exceeded
-        agent._tokens_before = 0
+        # Direct test: _on_react_iteration raises when budget exceeded (index range method)
+        agent._records_before = 0
         with pytest.raises(SubAgentTokenExhausted):
             agent._on_react_iteration(1, [])
 
@@ -1125,7 +1125,7 @@ class TestP0TokenBudgetCircuitBreaker:
         client.get_call_records.return_value = [
             LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=100),
         ]
-        agent._tokens_before = 0
+        agent._records_before = 0
 
         # Should not raise
         agent._on_react_iteration(1, [])
@@ -1184,13 +1184,21 @@ class TestP1ParentNamePassthrough:
             assert call_kwargs.kwargs.get("parent_agent_name") == "TestParent"
 
 
-class TestP1ShortOutputExtraction:
+class TestP1SummarizeArtifactsAndToolCalls:
 
     @pytest.mark.asyncio
-    async def test_short_output_extracts_artifacts(self):
-        """P1-5: Short output path extracts artifacts from tool_calls_log."""
+    async def test_summarize_extracts_artifacts_from_tool_calls_log(self):
+        """P1-5: _summarize_result correctly includes artifacts from tool_calls_log."""
         from agents.subagent import SubAgent
         client = _make_llm_client()
+        # Mock chat_json to return summary with empty artifacts (trigger override logic)
+        client.chat_json = AsyncMock(return_value={
+            "accomplished": "short result",
+            "findings": "",
+            "issues": "",
+            "artifacts": [],
+            "tool_calls_summary": "file_ops(write)",
+        })
         agent = SubAgent(
             name="SA-1",
             task_description="test",
@@ -1199,25 +1207,31 @@ class TestP1ShortOutputExtraction:
         )
 
         tc_log = [
-            ToolCallRecord(tool_name="file_ops", parameters={"path": "/tmp/out.txt"}, result="written"),
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "write", "filename": "/tmp/out.txt"}, result="written"),
         ]
         with patch.object(agent._react_engine, "execute", new_callable=AsyncMock) as mock_exec:
-            # Short output (under SUBAGENT_SUMMARY_MAX_LENGTH)
             mock_exec.return_value = _make_step_result(
                 success=True, output="short result",
                 tool_calls=tc_log, iterations_completed=1,
             )
             result = await agent.run()
 
-        # Should have extracted artifact from tool_calls_log
+        # Should have extracted artifact from tool_calls_log via override
         assert "/tmp/out.txt" in result.summary.artifacts
         assert result.summary.tool_calls_summary != ""
 
     @pytest.mark.asyncio
-    async def test_short_output_extracts_tool_calls_summary(self):
-        """P1-5: Short output path extracts tool_calls_summary from log."""
+    async def test_summarize_extracts_tool_calls_summary(self):
+        """P1-5: _summarize_result correctly includes tool_calls_summary from log."""
         from agents.subagent import SubAgent
         client = _make_llm_client()
+        client.chat_json = AsyncMock(return_value={
+            "accomplished": "short result",
+            "findings": "test findings",
+            "issues": "",
+            "artifacts": [],
+            "tool_calls_summary": "",
+        })
         agent = SubAgent(
             name="SA-1",
             task_description="test",
@@ -1227,7 +1241,7 @@ class TestP1ShortOutputExtraction:
 
         tc_log = [
             ToolCallRecord(tool_name="web_search", parameters={"query": "test"}, result="found"),
-            ToolCallRecord(tool_name="file_ops", parameters={"path": "/tmp/f.txt"}, result="ok"),
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "write", "filename": "/tmp/f.txt"}, result="ok"),
         ]
         with patch.object(agent._react_engine, "execute", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = _make_step_result(
@@ -1453,10 +1467,8 @@ class TestP2TokenIndexRange:
         call_count = [0]
         def get_records_side_effect():
             call_count[0] += 1
-            # Call 1: _get_total_tokens() for _tokens_before
-            # Call 2: len() for records_before
-            # Both need to return pre_records
-            if call_count[0] <= 2:
+            # Call 1: len() for _records_before
+            if call_count[0] <= 1:
                 return pre_records
             return all_records  # After execution
 
@@ -1687,3 +1699,89 @@ class TestSystemPromptComposition:
                 assert "THINK" in prompt
                 assert "ACT" in prompt
                 assert "OBSERVE" in prompt
+
+
+# ======================================================================
+# Test Fixes from Code Review (P0, P1+)
+# ======================================================================
+
+class TestP0NoDoubleWrite:
+    """P0 fix: SubAgentTool passes context="" to SubAgent.run(), not task_description."""
+
+    @pytest.mark.asyncio
+    async def test_subagent_tool_passes_empty_context(self):
+        """SubAgentTool.execute() passes context="" to avoid double-write."""
+        from tools.subagent_tool import SubAgentTool
+        client = _make_llm_client()
+
+        tool = SubAgentTool(
+            llm_client=client,
+            available_tools={"mock_tool": _make_tool()},
+        )
+
+        with patch("agents.subagent.SubAgent") as MockSubAgent, \
+             patch("os.makedirs"):
+            mock_result = _make_subagent_result()
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=mock_result)
+            MockSubAgent.return_value = mock_instance
+
+            await tool.execute(task_description="research async patterns")
+
+            # Verify run() was called with context="" (not task_description)
+            call_args = mock_instance.run.call_args
+            assert call_args.kwargs.get("context", None) == ""
+
+
+class TestExtractArtifactsFromLog:
+    """P1+ fix: _extract_artifacts_from_log uses correct parameter names."""
+
+    def test_extracts_from_file_ops_write_action(self):
+        """Extracts filename from file_ops with action='write'."""
+        from agents.subagent import _extract_artifacts_from_log
+        tc_log = [
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "write", "filename": "result.txt"}, result="written"),
+        ]
+        assert _extract_artifacts_from_log(tc_log) == ["result.txt"]
+
+    def test_skips_file_ops_read_action(self):
+        """Does not extract from file_ops with action='read' (only write creates artifacts)."""
+        from agents.subagent import _extract_artifacts_from_log
+        tc_log = [
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "read", "filename": "data.txt"}, result="content"),
+        ]
+        assert _extract_artifacts_from_log(tc_log) == []
+
+    def test_skips_file_ops_list_action(self):
+        """Does not extract from file_ops with action='list'."""
+        from agents.subagent import _extract_artifacts_from_log
+        tc_log = [
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "list", "filename": ""}, result="3 files"),
+        ]
+        assert _extract_artifacts_from_log(tc_log) == []
+
+    def test_skips_shell_tool(self):
+        """Shell tool file creation cannot be statically detected."""
+        from agents.subagent import _extract_artifacts_from_log
+        tc_log = [
+            ToolCallRecord(tool_name="shell", parameters={"command": "touch /tmp/newfile.txt"}, result="ok"),
+        ]
+        assert _extract_artifacts_from_log(tc_log) == []
+
+    def test_skips_old_parameter_names(self):
+        """Old parameter names (path, file_path) are no longer matched."""
+        from agents.subagent import _extract_artifacts_from_log
+        tc_log = [
+            ToolCallRecord(tool_name="file_ops", parameters={"path": "/tmp/out.txt"}, result="written"),
+        ]
+        # No 'action' key → no match
+        assert _extract_artifacts_from_log(tc_log) == []
+
+    def test_deduplicates_paths(self):
+        """Same filename from multiple write calls is deduplicated."""
+        from agents.subagent import _extract_artifacts_from_log
+        tc_log = [
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "write", "filename": "report.md"}, result="written"),
+            ToolCallRecord(tool_name="file_ops", parameters={"action": "write", "filename": "report.md"}, result="updated"),
+        ]
+        assert _extract_artifacts_from_log(tc_log) == ["report.md"]

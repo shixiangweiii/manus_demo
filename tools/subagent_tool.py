@@ -48,7 +48,7 @@ class SubAgentTool(BaseTool):
         subagent_timeout: int | None = None,
         max_calls_per_task: int | None = None,
         max_tokens_per_call: int | None = None,
-        parent_name: str = "OrchestratorAgent",
+        parent_name: str = "OrchestratorAgent",  # TODO: should be determined at runtime (actual LLM caller is ExecutorAgent/EmergentPlannerAgent/GoalDrivenPlannerAgent)
     ):
         self._llm_client = llm_client
         self._available_tools = available_tools
@@ -186,7 +186,7 @@ class SubAgentTool(BaseTool):
                 sandbox_subdir=sandbox_subdir,
             )
 
-            result: SubAgentResult = await subagent.run(context=task_description)
+            result: SubAgentResult = await subagent.run(context="")
             self._call_count += 1
 
             # Return structured summary as JSON string (anti-pattern #6)

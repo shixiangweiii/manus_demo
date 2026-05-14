@@ -198,8 +198,8 @@ Benchmarks all three planning paradigms (simple/complex/emergent) against 12 tas
 12. **OTel context detach handling**: `OtelDetachFilter` in `main.py` suppresses OTel `Failed to detach context` ERROR tracebacks by downgrading the log record to INFO in-place — avoids misleading stack traces during concurrent asyncio DAG execution
 13. **SubAgent depth=1 enforcement**: Structural, not just prompt-based — `SubAgentTool` always filters "subagent" from the tool whitelist before passing to `SubAgent`, so the LLM literally cannot call it
 14. **ReActEngine on_iteration callback**: `execute()` accepts `on_iteration: Callable[[int, list[ToolCallRecord]], None]` invoked after each iteration; used by `SubAgent._on_react_iteration()` for token budget checking (can raise to abort); `StepResult.iterations_completed` populated from the iteration counter
-15. **SubAgent token accounting**: Uses record index range (`records[records_before:]`) not delta, because `_get_total_tokens()` sums all records including pre-existing ones from the shared `LLMClient`
-16. **SubAgent event key convention**: All SubAgent event dicts use `"iterations_used"` key consistently; `TracingBridge` reads `data.get("iterations_used", 0)` — mismatched keys were a P0 bug fixed in review
+15. **SubAgent token accounting**: Uses record index range (`records[_records_before:]`) throughout both `_on_react_iteration` and `run()` — no delta method, no `_get_total_tokens()` helper; `_records_before` is initialized to 0 in `__init__` and set to `len(llm_client.get_call_records())` at the start of each `run()`
+16. **SubAgent token budget scope**: The per-call token budget covers only the ReAct main loop; the summarize step (one additional LLM call, `max_tokens=1500`) is excluded from the budget check by design, as it occurs after the loop completes and before returning
 
 ## Documentation
 
