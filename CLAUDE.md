@@ -24,6 +24,19 @@ All paths → TracingBridge (event-to-span, v7 OpenTelemetry)
 Any ReAct path (when SUBAGENT_ENABLED=true) → can call "subagent" tool → SubAgent (depth=1, isolated context, summary-only return)
 ```
 
+### Module Roles
+
+- **`agents/`** — OrchestratorAgent (compose + route, no BaseAgent inheritance), PlannerAgent (two-stage classifier + plan/DAG), ExecutorAgent (ReAct loop), ReflectorAgent (exit criteria + quality), EmergentPlannerAgent (v5 TODO-driven), GoalDrivenPlannerAgent (v8 goal anchoring), SubAgent (v9 depth=1 isolated sub-agent)
+- **`dag/`** — TaskDAG (graph + topological sort + ready-node detection + dynamic mutation), DAGExecutor (super-step parallel loop), NodeStateMachine (enforces legal status transitions)
+- **`react/`** — ReActEngine (unified ReAct loop, v6 feature-flagged via `ENABLE_REACT_ENGINE_V2`)
+- **`llm/`** — LLMClient (OpenAI-compatible async wrapper with retry + centralized per-call token tracking)
+- **`tools/`** — BaseTool ABC, WebSearchTool, CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool (v9 meta-tool), ToolRouter (per-node failure tracking), subprocess_utils (shared sandbox runner)
+- **`tracing/`** — OpenTelemetry observability: TracingBridge (event→span), multi-backend exporters, FastAPI web viewer with left-right split detail page, @traced decorator
+- **`memory/`** — ShortTermMemory (sliding-window), LongTermMemory (JSON-file persistence + keyword search)
+- **`context/`** — ContextManager (token estimation + LLM-based compression with safe split boundary)
+- **`knowledge/`** — KnowledgeRetriever (TF-IDF + cosine similarity)
+- **`evaluation/`** — Benchmark 3 paradigms with 4-dimension weighted scoring (Planning 30% / Execution 40% / Efficiency 20% / Reflection 10%)
+
 ### Event Multicast Pattern (Central to the System)
 
 OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which fans out to multiple subscribers via `on_event` callback:
@@ -34,86 +47,78 @@ OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event,
 
 ExecutorAgent and ReflectorAgent do **not** emit events directly — they return results to their caller which then emits.
 
-### Source Layout
+## Common Commands
 
-```
-manus_demo/
-├── main.py                    # CLI entry (interactive / single-task / -v verbose)
-├── config.py                  # All env-var-driven config (no hardcoded secrets)
-├── schema.py                  # Pydantic models: TaskNode, DAGState, Plan, TodoList, LLMCallRecord, etc.
-├── agents/
-│   ├── base.py                # BaseAgent — think(), think_json(), think_with_tools(), message history
-│   ├── orchestrator.py        # OrchestratorAgent — classify → route → execute → reflect → memory
-│   ├── planner.py             # PlannerAgent — two-stage classifier + plan/DAG generation + adaptive planning
-│   ├── executor.py            # ExecutorAgent — ReAct loop per step/node (legacy or ReActEngine)
-│   ├── reflector.py           # ReflectorAgent — exit criteria validation + quality assessment
-│   ├── emergent_planner.py    # EmergentPlannerAgent — Claude Code style TODO-driven planning (v5)
-│   ├── goal_driven_planner.py # GoalDrivenPlannerAgent — goal anchoring + dynamic TODO + goal reflection (v8)
-│   └── subagent.py            # SubAgent — isolated depth=1 sub-agent with own context + summary-only return (v9)
-├── dag/
-│   ├── graph.py               # TaskDAG — graph structure, topological sort, ready-node detection, dynamic mutation
-│   ├── executor.py            # DAGExecutor — super-step parallel execution loop
-│   └── state_machine.py       # NodeStateMachine — enforces legal node status transitions
-├── react/
-│   └── engine.py              # ReActEngine — unified ReAct loop (v6 feature-flagged, ENABLE_REACT_ENGINE_V2)
-├── llm/
-│   └── client.py              # LLMClient — OpenAI-compatible async wrapper with retry + per-call token tracking
-├── tools/
-│   ├── base.py                # BaseTool ABC — name, description, parameters_schema, execute(), traced_execute()
-│   ├── web_search.py          # WebSearchTool — mock search results
-│   ├── code_executor.py       # CodeExecutorTool — subprocess sandbox Python execution
-│   ├── file_ops.py            # FileOpsTool — sandboxed file read/write/list
-│   ├── shell_tool.py          # ShellTool — sandboxed bash execution with command blacklist
-│   ├── subprocess_utils.py    # Shared subprocess runner with timeout + output-size limits
-│   ├── subagent_tool.py       # SubAgentTool — meta-tool that spawns SubAgents (v9, depth=1 enforcement)
-│   └── router.py              # ToolRouter — per-node failure tracking, suggests alternative tools on threshold
-├── tracing/                   # v7 OpenTelemetry-based full-lifecycle tracing
-│   ├── __init__.py            # Lazy imports — no-ops when TRACING_ENABLED=false
-│   ├── config.py              # Tracing-specific config (backend, sample rate, sensitive data patterns)
-│   ├── provider.py            # TracerProvider factory with multi-backend support (console/file/rich/otlp/phoenix)
-│   ├── bridge.py              # TracingBridge — subscribes to _emit events, creates parent-child OTel spans
-│   ├── decorators.py          # @traced decorator + shared helpers (_truncate, _safe_set_attribute)
-│   ├── spans.py               # SpanName, AttrKey, EventName, SPAN_ICONS constants
-│   ├── exporters.py           # FileSpanExporter (JSON), RichConsoleExporter (tree)
-│   ├── server.py              # FastAPI web viewer for trace visualization (Jinja2 templates)
-│   ├── templates/             # Jinja2 HTML templates for web viewer
-│   │   ├── base.html          # Dark theme base layout (header, content, CSS variables)
-│   │   ├── trace_list.html    # Trace list page (table of traces)
-│   │   └── trace_detail.html  # Trace detail page (left-right split: tree + detail panel)
-│   └── __main__.py            # `python -m tracing` entry point for standalone viewer
-├── memory/
-│   ├── short_term.py          # ShortTermMemory — sliding-window message buffer
-│   └── long_term.py           # LongTermMemory — JSON-file persistence + keyword search
-├── context/
-│   └── manager.py             # ContextManager — token estimation + LLM-based context compression
-├── knowledge/
-│   ├── retriever.py           # KnowledgeRetriever — TF-IDF + cosine similarity document retrieval
-│   └── docs/                  # Knowledge base text files
-├── evaluation/                # Evaluation module — benchmark 3 plan-and-execute paradigms
-│   ├── metrics.py             # Core metric models + 4-dimension weighted scoring functions
-│   ├── benchmark.py           # 12 benchmark tasks with ground truth
-│   ├── runner.py              # EvaluationProbe (event listener) + EvaluationRunner
-│   ├── report.py              # Rich console comparison report + JSON export
-│   └── eval_cli.py            # CLI entry: `python -m evaluation.eval_cli`
-├── tests/                     # pytest suite (mock-based, no LLM API required)
-└── sxw_aicoding/docs/         # Detailed architecture docs (codemap, CHANGELOG, design docs)
+```bash
+# Install
+pip install -r requirements.txt
+
+# Configure (copy and edit with your API key)
+cp .env.example .env
+
+# Run (interactive)
+python main.py
+
+# Run (single task)
+python main.py "task description"
+
+# Run (verbose)
+python main.py -v
+
+# Force planning mode
+PLAN_MODE=simple python main.py "task"
+PLAN_MODE=complex python main.py "task"
+PLAN_MODE=emergent python main.py "task"
+
+# SubAgent (v9)
+SUBAGENT_ENABLED=true PLAN_MODE=emergent python main.py "multi-step research task"
+
+# Tracing viewer (v7)
+python -m tracing                    # Start web viewer on http://localhost:8000
+
+# All tests (no API key needed, mock-based)
+python -m pytest tests/ -v
+
+# Run a single test
+python -m pytest tests/test_dag_capabilities.py::test_topological_sort -v
+
+# Evaluation CLI (requires LLM_API_KEY)
+python -m evaluation.eval_cli --dry-run                    # Show benchmark tasks
+python -m evaluation.eval_cli --difficulty easy --modes simple  # Quick smoke test
+python -m evaluation.eval_cli --output results.json        # Full eval with JSON export
+
+# Syntax check modified files
+python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 ```
 
-## Key Data Models (schema.py)
+## Key Configuration
 
-| Model | Purpose |
-|-------|---------|
-| `Plan` / `Step` | v1 flat plan with ordered steps |
-| `TaskNode` | DAG node (GOAL / SUBGOAL / ACTION) with status, exit_criteria, risk |
-| `TaskEdge` | DAG edge (DEPENDENCY / CONDITIONAL / ROLLBACK) |
-| `DAGState` | Centralized execution state — `node_results` dict, `get_node_context()`, `merge_result()` |
-| `TodoList` / `TodoItem` | v5 emergent planning state with cycle detection |
-| `StepResult` | Execution result per step/node (success, output, tool_calls_log, iterations_completed) |
-| `SubAgentSummary` | Structured summary from SubAgent — accomplished, findings, issues, artifacts, tool_calls_summary |
-| `SubAgentResult` | Full SubAgent execution result — summary, iterations_used, tokens_used, tool_calls_log |
-| `LLMCallRecord` | Per-LLM-call token record (call_type, prompt_summary, tokens, engine) |
-| `TokenUsageSummary` | Aggregated token usage: call_records + by_engine + total |
-| `Reflection` | Reflector output (passed, score, feedback, suggestions) |
+All config via env vars / `.env` file (see `config.py` for full list). Most commonly needed:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `LLM_API_KEY` | — | API key (required) |
+| `LLM_MODEL` | `deepseek-chat` | Model name |
+| `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
+| `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 goal-driven engine within emergent path |
+| `SUBAGENT_ENABLED` | `false` | v9 SubAgent master switch |
+| `TRACING_ENABLED` | `false` | Master switch for v7 tracing |
+| `TRACING_BACKEND` | `console` | `console` / `file` / `rich` / `otlp` / `phoenix` |
+| `MAX_REACT_ITERATIONS` | `10` | ReAct loop cap per node |
+| `DAG_SERIAL_EXECUTION` | `true` | Serial DAG execution (default; set `false` for parallel) |
+| `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5/v8 emergent planning route |
+
+## Code Conventions
+
+- **All agents except OrchestratorAgent inherit `BaseAgent`** which provides `think()`, `think_json()`, `think_with_tools()` and manages message history; OrchestratorAgent does not inherit BaseAgent (no own LLM message history) — it composes sub-agents and shares a single `LLMClient` instance
+- **All tools inherit `BaseTool`** with `name`, `description`, `parameters_schema`, `execute()`, and `to_openai_tool()`
+- **Async throughout** — all LLM calls and tool executions are `async def`
+- **Event-driven UI** — OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which forwards to the `on_event` callback in `main.py`; ExecutorAgent and ReflectorAgent do not emit events directly
+- **Pydantic models** for data structures, but LLM message passing uses raw `list[dict[str, Any]]` (OpenAI API compatibility)
+- **Chinese + English bilingual comments** — most modules have dual-language docstrings
+- **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`); v9 SubAgent defaults to disabled (`false`)
+- **Token tracking centralized** — only `LLMClient` and `OrchestratorAgent` manage token usage; individual execution agents (Executor, EmergentPlanner, Reflector, Planner) have no token tracking code
+- **OTel detach convention** — all `otel_context.detach()` calls in `tracing/bridge.py` are unprotected by try/except (OTel library catches ValueError internally); logging suppression is handled centrally by `OtelDetachFilter` in `main.py`, not at each call site
 
 ## Token Tracking
 
@@ -165,8 +170,6 @@ Multi-agent mechanism following the Claude Code Subagent pattern. When `SUBAGENT
 
 **Event keys** (emitted by SubAgent, consumed by UI/TracingBridge/EvaluationProbe): `subagent_start`, `subagent_complete`, `subagent_failed`, `subagent_timed_out`, `subagent_limit_exceeded`. All event dicts use `"iterations_used"` key (not `"iterations"`).
 
-**To trigger SubAgent in practice**: Use emergent route + enable the flag: `SUBAGENT_ENABLED=true PLAN_MODE=emergent python main.py "multi-step research task"`
-
 ## Evaluation Module
 
 Benchmarks all three planning paradigms (simple/complex/emergent) against 12 tasks (4 easy, 4 medium, 4 hard).
@@ -178,133 +181,6 @@ Benchmarks all three planning paradigms (simple/complex/emergent) against 12 tas
 - Reflection Accuracy (10%) — whether Reflector's pass/fail verdict matches ground truth
 
 **Event Probe Pattern**: `EvaluationProbe` hooks into `on_event` callback without modifying core code. `EvaluationRunner` forces routing via `config.PLAN_MODE` override and sets `classification_forced` dynamically (`True` when forced, `False` when auto). Forced mode redistributes classification weight to other planning dimensions in scoring.
-
-## Configuration (config.py)
-
-All config via env vars / `.env` file. Key variables:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API endpoint |
-| `LLM_API_KEY` | — | API key (required) |
-| `LLM_MODEL` | `deepseek-chat` | Model name |
-| `MAX_CONTEXT_TOKENS` | `8000` | Context token limit before compression |
-| `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
-| `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 goal-driven engine within emergent path |
-| `GOAL_REANCHOR_INTERVAL` | `5` | Iterations between goal re-anchoring |
-| `GOAL_REFLECTION_INTERVAL` | `1` | Iterations between goal reflection |
-| `MAX_GOAL_DRIVEN_ITERATIONS` | `60` | v8 main loop iteration cap |
-| `GOAL_DRIVEN_STAGNATION_WINDOW` | `3` | Consecutive no-progress rounds before early stop |
-| `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5/v8 emergent planning route |
-| `MAX_REACT_ITERATIONS` | `10` | ReAct loop cap per node |
-| `MAX_PARALLEL_NODES` | `3` | Super-step parallelism cap |
-| `DAG_SERIAL_EXECUTION` | `true` | 串行执行 DAG 节点（默认开启；设 `false` 恢复并行，并行模式通过 `create_for_node()` 实例隔离保证安全） |
-| `MAX_REPLAN_ATTEMPTS` | `3` | Max reflect-fail replan cycles |
-| `TOKEN_TRACKING_ENABLED` | `true` | Enable per-call token tracking |
-| `LLM_RETRY_ENABLED` | `false` | Enable exponential-backoff retry |
-| `ENABLE_REACT_ENGINE_V2` | `false` | Use unified ReActEngine (v6 feature flag) |
-| `ADAPTIVE_PLANNING_ENABLED` | `true` | Enable runtime DAG adaptation |
-| `ADAPT_PLAN_INTERVAL` | `1` | Super-steps between adaptive checks |
-| `ADAPT_PLAN_MIN_COMPLETED` | `1` | Min completed actions before adaptive |
-| `NODE_EXECUTION_TIMEOUT` | `300` | Per-node timeout in seconds |
-| `SANDBOX_DIR` | `~/.manus_demo/sandbox` | Sandboxed file/shell working directory |
-| `MAX_TODO_ITEMS` | `20` | v5 TODO list max size |
-| `MAX_TODO_RETRIES` | `3` | Max retries per TODO item |
-| `TODO_COMPRESSION_THRESHOLD` | `0.8` | Context usage ratio triggering TODO compression |
-| `MAX_EMERGENT_OUTER_ITERATIONS` | `60` | v5 emergent main loop iteration cap |
-| `TOOL_FAILURE_THRESHOLD` | `2` | v3 consecutive failures before suggesting tool switch |
-| `TRACING_ENABLED` | `false` | Master switch for v7 tracing |
-| `TRACING_BACKEND` | `console` | `console` / `file` / `rich` / `otlp` / `phoenix` |
-| `TRACING_ENDPOINT` | `http://localhost:4318` | OTLP HTTP endpoint |
-| `TRACING_SAMPLE_RATE` | `1.0` | Sampling rate (0.0–1.0) |
-| `TRACING_LOG_PROMPTS` | `false` | Legacy flag (no longer gates prompt recording — prompts are always recorded when tracing enabled; kept for config backward compat) |
-| `SUBAGENT_ENABLED` | `false` | v9 SubAgent master switch |
-| `SUBAGENT_MAX_ITERATIONS` | `10` | SubAgent internal ReAct max iterations |
-| `SUBAGENT_TIMEOUT` | `300` | SubAgent execution timeout (seconds) |
-| `SUBAGENT_MAX_CONCURRENT` | `3` | Max concurrent SubAgents |
-| `SUBAGENT_SUMMARY_MAX_LENGTH` | `2000` | Max chars before LLM-based summary compression |
-| `SUBAGENT_MAX_CALLS_PER_TASK` | `3` | Max SubAgent calls per task (anti-pattern #3/8) |
-| `SUBAGENT_MAX_TOKENS_PER_CALL` | `50000` | Per-call token budget (anti-pattern #8) |
-| `SUBAGENT_DEFAULT_TOOL_WHITELIST` | `""` | Default tool whitelist (comma-separated, empty=all) |
-
-## Common Commands
-
-```bash
-# Install
-pip install -r requirements.txt
-
-# Configure (copy and edit with your API key)
-cp .env.example .env
-
-# Run (interactive)
-python main.py
-
-# Run (single task)
-python main.py "task description"
-
-# Run (verbose)
-python main.py -v
-
-# Force planning mode
-PLAN_MODE=simple python main.py "task"
-PLAN_MODE=complex python main.py "task"
-PLAN_MODE=emergent python main.py "task"
-
-# Tracing viewer (v7)
-python -m tracing                    # Start web viewer on http://localhost:8000
-
-# All tests (no API key needed, mock-based)
-python -m pytest tests/ -v
-
-# Individual test suites
-python -m pytest tests/test_dag_capabilities.py -v      # DAG planning, parallel exec, conditional/rollback, adaptive
-python -m pytest tests/test_emergent_planning.py -v     # v5 TODO list management, EmergentPlanner
-python -m pytest tests/test_emergent_simple.py -v       # v5 emergent planning simple scenarios
-python -m pytest tests/test_goal_driven_planner.py -v   # v8 goal-driven planning, milestones, stagnation
-python -m pytest tests/test_tracing.py -v               # v7 OTel tracing bridge, spans, exporters
-python -m pytest tests/test_evaluation.py -v            # Evaluation metrics, scoring, probe
-python -m pytest tests/test_concurrent_execution.py -v  # asyncio.gather DAG parallelism
-python -m pytest tests/test_cycle_detection.py -v       # DAG cycle detection
-python -m pytest tests/test_llm_integration.py -v       # LLMClient retry, token tracking
-python -m pytest tests/test_optimizations.py -v         # Performance optimizations
-python -m pytest tests/test_real_tools.py -v            # Real tool execution (sandbox)
-python -m pytest tests/test_shell_tool.py -v            # ShellTool blacklist, sandbox
-python -m pytest tests/test_subagent.py -v              # v9 SubAgent, SubAgentTool, anti-patterns, token budget
-
-# Run a single test
-python -m pytest tests/test_dag_capabilities.py::test_topological_sort -v
-
-# Evaluation CLI (requires LLM_API_KEY)
-python -m evaluation.eval_cli --dry-run                    # Show benchmark tasks
-python -m evaluation.eval_cli --difficulty easy --modes simple  # Quick smoke test
-python -m evaluation.eval_cli --output results.json        # Full eval with JSON export
-
-# Syntax check modified files
-python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
-```
-
-## Dependencies
-
-- `openai` — AsyncOpenAI client
-- `pydantic` — Data models with validation
-- `rich` — Terminal UI (tables, panels, trees)
-- `python-dotenv` — `.env` file loading
-- `opentelemetry-api` / `opentelemetry-sdk` / `opentelemetry-exporter-otlp` — v7 tracing
-- `fastapi` / `uvicorn` / `jinja2` — v7 trace web viewer
-- `pytest` / `pytest-asyncio` — Testing (optional)
-
-## Code Conventions
-
-- **All agents except OrchestratorAgent inherit `BaseAgent`** which provides `think()`, `think_json()`, `think_with_tools()` and manages message history; OrchestratorAgent does not inherit BaseAgent (no own LLM message history) — it composes sub-agents and shares a single `LLMClient` instance
-- **All tools inherit `BaseTool`** with `name`, `description`, `parameters_schema`, `execute()`, and `to_openai_tool()`
-- **Async throughout** — all LLM calls and tool executions are `async def`
-- **Event-driven UI** — OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which forwards to the `on_event` callback in `main.py`; ExecutorAgent and ReflectorAgent do not emit events directly
-- **Pydantic models** for data structures, but LLM message passing uses raw `list[dict[str, Any]]` (OpenAI API compatibility)
-- **Chinese + English bilingual comments** — most modules have dual-language docstrings
-- **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`); v9 SubAgent defaults to disabled (`false`)
-- **Token tracking centralized** — only `LLMClient` and `OrchestratorAgent` manage token usage; individual execution agents (Executor, EmergentPlanner, Reflector, Planner) have no token tracking code
-- **Replan edge pattern** — `_parse_dag()` may produce edges referencing nodes outside its parsed set (LLM references old DAG completed nodes); these are filtered and stored in `_filtered_edges`; `_merge_dags()` reconstructs valid ones after merge
-- **OTel detach convention** — all `otel_context.detach()` calls in `tracing/bridge.py` are unprotected by try/except (OTel library catches ValueError internally); logging suppression is handled centrally by `OtelDetachFilter` in `main.py`, not at each call site
 
 ## Important Design Decisions
 
@@ -327,18 +203,4 @@ python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
 
 ## Documentation
 
-Detailed design docs live in `sxw_aicoding/docs/`:
-- `codemap.md` — Full component reference with method signatures and data flow diagrams
-- `CHANGELOG.md` — Version history v1→v7 with per-feature breakdown
-- `data-structures-and-algorithms.md` — Schema, graph algorithms, state machine details
-- `dynamic-features.md` — v1→v5 dynamic capability comparison
-- `emergent-planning.md` — v5 emergent planning system design
-- `hybrid-plan-routing.md` — v4 two-stage classifier design
-- `llm-integration.md` — v6 LLM retry + ReActEngine design
-- `upgrade-plan.md` — v6 upgrade plan with completion status
-- `evaluation-guide.md` — Evaluation module design, metrics system, usage guide, and extension instructions
-- `tracing-design.md` — v7 tracing architecture and design rationale
-- `tracing-guide.md` — v7 tracing usage guide and extension instructions
-- `推理引擎类型环境变量配置.md` — Complete guide on PLAN_MODE / ENABLE_GOAL_DRIVEN_PLANNER routing and env var configuration per engine type
-- `related-papers.md` — Research papers referenced in system design
-- `planning-gap-analysis.md` — Gap analysis for planning paradigms
+Detailed design docs live in `sxw_aicoding/docs/` (codemap, CHANGELOG, per-feature design docs, evaluation guide, tracing design/guide, env var configuration guide, related papers, planning gap analysis).
