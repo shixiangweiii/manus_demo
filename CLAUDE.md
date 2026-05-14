@@ -88,7 +88,7 @@ python -m evaluation.eval_cli --difficulty easy --modes simple  # Quick smoke te
 python -m evaluation.eval_cli --output results.json        # Full eval with JSON export
 
 # Syntax check modified files
-python3 -m py_compile schema.py llm/client.py agents/orchestrator.py
+python3 -m py_compile schema.py llm/client.py agents/orchestrator.py agents/subagent.py tools/subagent_tool.py
 ```
 
 ## Key Configuration
@@ -152,19 +152,20 @@ Multi-agent mechanism following the Claude Code Subagent pattern. When `SUBAGENT
 - **Summary-only return**: Parent receives `SubAgentSummary` JSON (accomplished/findings/issues/artifacts/tool_calls_summary), never the full conversation history
 - **Token budget circuit breaker**: `SubAgentTokenExhausted` exception raised via `on_iteration` callback when cumulative tokens exceed `SUBAGENT_MAX_TOKENS_PER_CALL`
 - **Sandbox isolation**: Optional per-SubAgent sandbox subdirectory to prevent dual-write conflicts
+- **Artifacts extraction**: `_extract_artifacts_from_log` uses `file_ops` tool's actual parameter name `filename` (not `path`/`file_path`) and filters only `action="write"` operations; shell-created files cannot be statically detected (best-effort)
 
 **Anti-pattern defenses**:
 - #2 Context leak: independent messages list, only structured summary returned
 - #3 Depth=1: structural enforcement via tool whitelist filtering
 - #4 Dual-write: sandbox directory isolation
-- #5 Self-critique: structured summary template forces `issues` field
+- #5 Self-critique: all summary paths go through LLM reflection (no short-path bypass with `issues=""`); `_summarize_result` has 3 fallback levels: model_validate → unexpected structure → generation failed
 - #6 Summary loss: `SubAgentSummary` structured artifact + full `tool_calls_log` preserved in `SubAgentResult`
 - #8 Token explosion: per-call token budget + call count limit (`SUBAGENT_MAX_CALLS_PER_TASK`)
 
 **Integration flow**:
 1. `OrchestratorAgent.__init__()` — if `SUBAGENT_ENABLED`, creates `SubAgentTool` and appends to tools list
 2. LLM calls `subagent(task_description, tool_whitelist?)` during ReAct
-3. `SubAgentTool.execute()` — validates whitelist, creates isolated sandbox dir, spawns `SubAgent`
+3. `SubAgentTool.execute()` — validates whitelist, creates isolated sandbox dir, spawns `SubAgent` with `context=""` (not `task_description` — avoids P0 double-write where task desc would appear twice in the ReAct prompt)
 4. `SubAgent.run()` — runs `ReActEngine.execute()` with `on_iteration=self._on_react_iteration` for token budget checking
 5. Returns `SubAgentResult.summary_text` (JSON string) to parent; `SubAgentTool.reset_task_state()` called at task boundary
 

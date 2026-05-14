@@ -165,6 +165,10 @@ class SubAgent:
         self._token_exceeded: bool = False
         self._records_before: int = 0
 
+        logger.info("[SubAgent] Created %s: tools=%s, max_iterations=%d, timeout=%ds, max_tokens=%d, sandbox='%s'",
+                    self.name, list(self.tools.keys()), max_iterations or config.SUBAGENT_MAX_ITERATIONS,
+                    self.timeout, self.max_tokens, sandbox_subdir or "(none)")
+
     def _emit(self, event: str, data: Any = None) -> None:
         try:
             self._on_event(event, data)
@@ -179,6 +183,8 @@ class SubAgent:
         # Anti-pattern #8: per-call token budget check (index range method)
         records = self.llm_client.get_call_records()
         current_tokens = sum(r.total_tokens for r in records[self._records_before:])
+        logger.debug("[SubAgent] Iteration %d: tokens=%d/%d, tool_calls=%d",
+                     iteration, current_tokens, self.max_tokens, len(self._accumulated_tool_calls))
         if current_tokens >= self.max_tokens:
             logger.warning(
                 "[SubAgent] Token budget exceeded: %d >= %d",
@@ -199,6 +205,9 @@ class SubAgent:
         """
         start_time = time.perf_counter()
         self._records_before = len(self.llm_client.get_call_records())
+
+        logger.info("[SubAgent] %s starting run: task='%s', context='%s', records_before=%d",
+                    self.name, self.task_description[:100], context[:80] if context else "(empty)", self._records_before)
 
         # Reset per-run state
         self._accumulated_tool_calls = []
@@ -232,6 +241,9 @@ class SubAgent:
             records = self.llm_client.get_call_records()
             tokens_used = sum(r.total_tokens for r in records[self._records_before:])
             iterations_used = step_result.iterations_completed
+
+            logger.info("[SubAgent] %s ReAct loop done: success=%s, iterations=%d, tokens=%d, duration=%.0fms",
+                        self.name, step_result.success, iterations_used, tokens_used, elapsed_ms)
 
             if step_result.success:
                 summary = await self._summarize_result(step_result)
@@ -297,6 +309,9 @@ class SubAgent:
             records = self.llm_client.get_call_records()
             tokens_used = sum(r.total_tokens for r in records[self._records_before:])
 
+            logger.warning("[SubAgent] %s token budget exceeded: %d >= %d (iterations=%d, duration=%.0fms)",
+                           self.name, tokens_used, self.max_tokens, self._iterations_so_far, elapsed_ms)
+
             budget_summary = SubAgentSummary(
                 accomplished="",
                 findings="",
@@ -333,6 +348,9 @@ class SubAgent:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             records = self.llm_client.get_call_records()
             tokens_used = sum(r.total_tokens for r in records[self._records_before:])
+
+            logger.warning("[SubAgent] %s timed out after %ds (iterations=%d, tokens=%d)",
+                           self.name, self.timeout, self._iterations_so_far, tokens_used)
 
             timeout_summary = SubAgentSummary(
                 accomplished="",
@@ -371,6 +389,9 @@ class SubAgent:
             records = self.llm_client.get_call_records()
             tokens_used = sum(r.total_tokens for r in records[self._records_before:])
             error_msg = str(exc)[:500]
+
+            logger.error("[SubAgent] %s unexpected error: %s (iterations=%d, duration=%.0fms)",
+                         self.name, error_msg[:200], self._iterations_so_far, elapsed_ms, exc_info=True)
 
             error_summary = SubAgentSummary(
                 accomplished="",
@@ -419,6 +440,9 @@ class SubAgent:
         artifacts = _extract_artifacts_from_log(tool_calls_log)
         tool_calls_summary = _extract_tool_calls_summary_from_log(tool_calls_log)
 
+        logger.debug("[SubAgent] _summarize_result: output_len=%d, tool_calls=%d, extracted_artifacts=%s",
+                     len(output), len(tool_calls_log), artifacts)
+
         # Use LLM to generate structured summary
         # (no short-path bypass — anti-pattern #5 defense requires all paths to go through LLM reflection)
         try:
@@ -428,6 +452,9 @@ class SubAgent:
                 "content": f"{SUMMARIZE_PROMPT}\n\nYour work output:\n{output[:8000]}",
             })
 
+            logger.debug("[SubAgent] Generating LLM summary: output_truncated=%d chars sent",
+                         min(len(output), 8000))
+
             response = await self.llm_client.chat_json(
                 messages, temperature=0.2, max_tokens=1500,
             )
@@ -435,6 +462,8 @@ class SubAgent:
             if isinstance(response, dict):
                 try:
                     summary = SubAgentSummary.model_validate(response)
+                    logger.debug("[SubAgent] LLM summary validated: accomplished='%s', issues='%s'",
+                                 summary.accomplished[:100], summary.issues[:100])
                     # Override mechanical fields with extracted data for accuracy
                     if not summary.artifacts and artifacts:
                         summary = summary.model_copy(update={"artifacts": artifacts})
@@ -442,9 +471,10 @@ class SubAgent:
                         summary = summary.model_copy(update={"tool_calls_summary": tool_calls_summary})
                     return summary
                 except ValidationError:
-                    pass
+                    logger.debug("[SubAgent] LLM summary validation failed, using fallback")
 
             # JSON parsed but wrong structure — fallback
+            logger.debug("[SubAgent] LLM returned unexpected structure, using truncated fallback")
             return SubAgentSummary(
                 accomplished=str(response)[:500],
                 findings="",
@@ -454,7 +484,7 @@ class SubAgent:
             )
 
         except Exception:
-            logger.debug("[SubAgent] Summary generation failed, truncating", exc_info=True)
+            logger.debug("[SubAgent] Summary generation failed, truncating (output_len=%d)", len(output), exc_info=True)
             return SubAgentSummary(
                 accomplished=output[:config.SUBAGENT_SUMMARY_MAX_LENGTH],
                 findings="",

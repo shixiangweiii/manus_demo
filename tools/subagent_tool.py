@@ -112,6 +112,8 @@ class SubAgentTool(BaseTool):
         """
         # Anti-pattern #3/8: Call count limit
         if self._call_count >= self._max_calls:
+            logger.warning("[SubAgentTool] Call limit reached: %d/%d, rejecting task",
+                           self._call_count, self._max_calls)
             self._on_event("subagent_limit_exceeded", {
                 "call_count": self._call_count,
                 "max_calls": self._max_calls,
@@ -121,6 +123,9 @@ class SubAgentTool(BaseTool):
         task_description = kwargs.get("task_description", "")
         if not task_description:
             return "Error: task_description is required for subagent tool."
+
+        logger.info("[SubAgentTool] Spawning SubAgent (call #%d/%d) for task: '%s'",
+                    self._call_count + 1, self._max_calls, task_description[:100])
 
         tool_whitelist = kwargs.get("tool_whitelist", [])
 
@@ -155,6 +160,10 @@ class SubAgentTool(BaseTool):
             if name in self._available_tools
         ]
 
+        logger.debug("[SubAgentTool] Resolved whitelist: requested=%s, final=%s",
+                     tool_whitelist if tool_whitelist else "(empty→default)",
+                     validated_whitelist)
+
         # Generate unique SubAgent name
         self._subagent_counter += 1
         subagent_name = f"SubAgent-{self._subagent_counter}"
@@ -165,6 +174,7 @@ class SubAgentTool(BaseTool):
             sandbox_base = config.SANDBOX_DIR
             sandbox_subdir = os.path.join(sandbox_base, f"subagent_{self._subagent_counter}")
             os.makedirs(sandbox_subdir, exist_ok=True)
+            logger.debug("[SubAgentTool] Sandbox created: %s", sandbox_subdir)
         except OSError:
             logger.debug("[SubAgentTool] Failed to create sandbox subdir, continuing without isolation")
 
@@ -189,6 +199,14 @@ class SubAgentTool(BaseTool):
             result: SubAgentResult = await subagent.run(context="")
             self._call_count += 1
 
+            logger.info("[SubAgentTool] SubAgent-%d completed: status=%s, iterations=%d, tokens=%d, duration=%.0fms, artifacts=%s",
+                        self._subagent_counter, result.status.value, result.iterations_used,
+                        result.tokens_used, result.duration_ms, result.summary.artifacts)
+            logger.debug("[SubAgentTool] SubAgent-%d summary: accomplished='%s', issues='%s'",
+                        self._subagent_counter,
+                        result.summary.accomplished[:200],
+                        result.summary.issues[:200])
+
             # Return structured summary as JSON string (anti-pattern #6)
             return result.summary_text
 
@@ -196,6 +214,8 @@ class SubAgentTool(BaseTool):
             # Outer timeout fallback — normally handled by SubAgent.run() internally
             # 外层超时兜底 — 正常由 SubAgent.run() 内部处理
             self._call_count += 1
+            logger.warning("[SubAgentTool] SubAgent-%d outer timeout after %ds",
+                           self._subagent_counter, self._timeout)
             error_summary = {
                 "accomplished": "",
                 "findings": "",
@@ -219,5 +239,7 @@ class SubAgentTool(BaseTool):
 
     def reset_task_state(self) -> None:
         """Reset per-task state for a new task (called by OrchestratorAgent.run())."""
+        logger.debug("[SubAgentTool] Resetting task state: call_count=%d→0, subagent_counter=%d→0",
+                     self._call_count, self._subagent_counter)
         self._call_count = 0
         self._subagent_counter = 0
