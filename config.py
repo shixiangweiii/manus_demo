@@ -20,7 +20,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")                        # Mod
 
 # --- Agent Limits ---
 # --- 智能体执行限制 ---
-MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "8000"))    # 上下文 Token 上限，超出后触发摘要压缩
+MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "16000"))   # 上下文 Token 上限，超出后触发摘要压缩
 MAX_REACT_ITERATIONS = int(os.getenv("MAX_REACT_ITERATIONS", "10"))  # 每个 Action 节点 ReAct 循环最大迭代次数
 MAX_REPLAN_ATTEMPTS = int(os.getenv("MAX_REPLAN_ATTEMPTS", "3"))     # 反思失败后最大重规划次数
 
@@ -80,6 +80,18 @@ CODE_MAX_CONCURRENT = int(os.getenv("CODE_MAX_CONCURRENT", "3"))                
 # --- 网络搜索（v10：基于 DDGS/DuckDuckGo 的真实搜索）---
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))  # 单次搜索返回最大结果数
 WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "15"))         # 单次搜索超时（秒）
+
+# --- Bailian MCP (Aliyun Search & WebParser, v11) ---
+# --- 百炼 MCP（阿里云搜索 & 网页解析，v11 新增）---
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")  # 阿里云 DashScope API Key（为空时回退到 DDGS）
+BAILIAN_WEBSEARCH_MCP_URL = os.getenv("BAILIAN_WEBSEARCH_MCP_URL", "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp")  # 搜索 MCP 服务端点
+BAILIAN_WEBPARSER_MCP_URL = os.getenv("BAILIAN_WEBPARSER_MCP_URL", "https://dashscope.aliyuncs.com/api/v1/mcps/WebParser/mcp")  # 网页解析 MCP 服务端点
+
+# --- Convergence Guidance ---
+# --- 收敛指引（防止搜索循环）---
+SEARCH_CONVERGENCE_THRESHOLD = int(os.getenv("SEARCH_CONVERGENCE_THRESHOLD", "3"))  # 同工具调用 N 次后注入收敛提示
+FETCH_URL_MAX_CONTENT_LENGTH = int(os.getenv("FETCH_URL_MAX_CONTENT_LENGTH", "10000"))  # fetch_url 返回内容最大字符数
+TOOL_RESULT_TRUNCATION_LIMIT = int(os.getenv("TOOL_RESULT_TRUNCATION_LIMIT", "2000"))  # ToolCallRecord 成功结果截断长度
 
 # --- v6.0 Feature Flags (向后兼容，默认关闭) ---
 # --- ReAct Engine ---

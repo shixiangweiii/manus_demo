@@ -39,6 +39,7 @@ from tools.code_executor import CodeExecutorTool
 from tools.file_ops import FileOpsTool
 from tools.shell_tool import ShellTool
 from tools.web_search import WebSearchTool
+from tools.fetch_url import FetchUrlTool
 
 logger = logging.getLogger(__name__)
 
@@ -480,6 +481,7 @@ async def run_interactive() -> None:
         "This demo implements:\n"
         "  [green]NEW[/green] [bold]ReActEngine v2[/bold] — unified ReAct loop engine, extracted from Executor & EmergentPlanner (v6)\n"
         "  [green]NEW[/green] [bold]LLM retry[/bold] — exponential backoff retry for LLM calls (v6)\n"
+        "  [green]NEW[/green] [bold]Bailian MCP web search + fetch_url[/bold] — richer search results + URL page fetching, convergence guidance (v11)\n"
         "  [green]NEW[/green] [bold]Hybrid plan routing[/bold] — auto-selects simple (v1), complex (v2), or emergent (v5) path (v5)\n"
         "  [green]NEW[/green] [bold]Two-stage classifier[/bold] — rules fast-filter + LLM fallback (v4)\n"
         "  [green]NEW[/green] [bold]Emergent planning[/bold] — Claude Code style, plan emerges via TODO list (v5)\n"
@@ -495,7 +497,8 @@ async def run_interactive() -> None:
         "  [cyan]10.[/cyan] Adaptive planning — plan evolves during execution (v3)\n"
         "  [cyan]11.[/cyan] Tool router — failure-based tool switching hints (v3)\n"
         "  [cyan]12.[/cyan] Dynamic DAG mutation — add/remove/modify nodes at runtime (v3)\n"
-        "  [cyan]13.[/cyan] Emergent planning — Claude Code style, while(tool_use) loop with TODO list (v5)\n\n"
+        "  [cyan]13.[/cyan] Bailian MCP search + fetch_url — convergence guidance for web search loops (v11)\n"
+        "  [cyan]14.[/cyan] Emergent planning — Claude Code style, while(tool_use) loop with TODO list (v5)\n\n"
         "Type your task and press Enter. Type [bold]quit[/bold] to exit.\n"
         "Set PLAN_MODE=simple|complex|emergent to force a specific path (default: auto).",
         title="[bold blue]Welcome[/bold blue]",
@@ -503,8 +506,8 @@ async def run_interactive() -> None:
     ))
 
     llm_client = LLMClient()
-    # 注册四个工具：网络搜索、Python 代码执行、文件读写、Shell 命令执行
-    tools = [WebSearchTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    # 注册五个工具：网络搜索、URL页面抓取、Python 代码执行、文件读写、Shell 命令执行
+    tools = [WebSearchTool(), FetchUrlTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
@@ -540,7 +543,7 @@ async def run_single(task: str) -> None:
     用于 `python main.py "任务描述"` 的命令行用法。
     """
     llm_client = LLMClient()
-    tools = [WebSearchTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    tools = [WebSearchTool(), FetchUrlTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,

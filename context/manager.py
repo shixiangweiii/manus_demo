@@ -67,11 +67,23 @@ class ContextManager:
         """
         Estimate total tokens for a list of messages.
         估算消息列表的总 Token 数（包含每条消息的 overhead）。
+
+        Counts:
+          - msg.content (str)
+          - msg.tool_calls[].function.name + .arguments (assistant tool-call JSON
+            is billed as prompt tokens but has no `content`; previously missed)
+          - per-message overhead (~4 tokens for role markers)
         """
         total = 0
         for msg in messages:
             content = msg.get("content", "") or ""
             total += self.estimate_tokens(content) + 4  # 每条消息约 4 个 Token 的固定开销
+            # Assistant messages may carry tool_calls without textual content —
+            # those still consume prompt tokens at the API. Account for them.
+            for tc in msg.get("tool_calls", []) or []:
+                fn = tc.get("function", {}) or {}
+                total += self.estimate_tokens(fn.get("name", "") or "")
+                total += self.estimate_tokens(fn.get("arguments", "") or "")
         return total
 
     # ------------------------------------------------------------------

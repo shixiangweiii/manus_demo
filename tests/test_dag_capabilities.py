@@ -864,13 +864,14 @@ class TestBugFixesVerification:
 
     def test_tool_error_detection_exists(self):
         """
-        验证 Critical #2 修复：agents/executor.py 中存在 Error 字符串检测逻辑。
+        验证 Critical #2 修复：ReActEngine 中存在 Error 字符串检测逻辑。
+        v12: legacy _react_loop 已移除，ExecutorAgent 现委托给 ReActEngine。
         """
         import inspect
-        from agents.executor import ExecutorAgent
+        from react.engine import ReActEngine
 
-        source = inspect.getsource(ExecutorAgent)
-        assert "[TOOL ERROR]" in source, "executor 应包含 [TOOL ERROR] 标记"
+        source = inspect.getsource(ReActEngine)
+        assert "[TOOL ERROR]" in source, "ReActEngine 应包含 [TOOL ERROR] 标记"
 
     # ------------------------------------------------------------------
     # Critical #3: v5 状态机不闭合

@@ -47,7 +47,7 @@ from schema import StepResult, TodoItem, TodoList, TodoStatus, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
-from agents.prompt_utils import build_system_prompt
+from agents.prompt_utils import build_system_prompt, build_convergence_hint
 
 logger = logging.getLogger(__name__)
 
@@ -528,6 +528,13 @@ class EmergentPlannerAgent(BaseAgent):
                 if router_hint:
                     continue_msg += f"\n\nIMPORTANT: {router_hint}"
 
+                # v11: Dynamic convergence guidance based on tool call frequency
+                tool_call_counts: dict[str, int] = {}
+                for tc in tool_calls_log:
+                    tool_call_counts[tc.tool_name] = tool_call_counts.get(tc.tool_name, 0) + 1
+
+                continue_msg += build_convergence_hint(tool_call_counts)
+
                 response_msg = await self.think_with_tools(
                     prompt if iteration == 1 else continue_msg,
                     tools=self.tool_schemas,
@@ -581,7 +588,7 @@ class EmergentPlannerAgent(BaseAgent):
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
-                    result=result if is_error else result[:1000],
+                    result=result if is_error else result[:config_module.TOOL_RESULT_TRUNCATION_LIMIT],
                 ))
                 if is_error:
                     result_with_marker = (

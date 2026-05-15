@@ -1599,7 +1599,8 @@ class TestPromptUtilsModule:
         from agents.prompt_utils import build_system_prompt
         base = "You are an agent."
         with patch.object(config, "SUBAGENT_ENABLED", True):
-            result = build_system_prompt(base)
+            # Disable context injection so the test only verifies guidance behavior
+            result = build_system_prompt(base, inject_context=False)
             assert result.startswith("You are an agent.")
             assert "subagent" in result.lower()
 
@@ -1608,7 +1609,8 @@ class TestPromptUtilsModule:
         from agents.prompt_utils import build_system_prompt
         base = "You are an agent."
         with patch.object(config, "SUBAGENT_ENABLED", False):
-            result = build_system_prompt(base)
+            # Disable context injection so we can test guidance-disabled path purely
+            result = build_system_prompt(base, inject_context=False)
             assert result == base
 
     def test_guidance_has_positive_and_negative_criteria(self):

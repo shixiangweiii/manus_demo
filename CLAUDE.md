@@ -9,13 +9,13 @@ Manus Demo is a multi-agent AI system demonstrating autonomous task execution th
 - **Language**: Python 3.11+ (async/await throughout)
 - **LLM**: OpenAI-compatible API (DeepSeek default, supports Ollama/Qwen/etc.)
 - **UI**: Rich console with event-driven rendering
-- **Current version**: v9.0
+- **Current version**: v12.0
 
 ## Architecture
 
 ```
 User Task → Orchestrator → [classify_task] → simple / complex / emergent
-  simple:    Planner.create_plan()     → Executor (sequential ReAct)  → Reflector
+  simple:    Planner.create_plan()     → Executor (sequential ReAct via ReActEngine)  → Reflector
   complex:   Planner.create_dag()      → DAGExecutor (parallel super-steps) → Reflector
   emergent:  ENABLE_GOAL_DRIVEN_PLANNER=false → EmergentPlanner (TODO scheduling + per-TODO ReAct)
              ENABLE_GOAL_DRIVEN_PLANNER=true  → GoalDrivenPlanner (goal anchoring + dynamic TODO + goal reflection)
@@ -28,7 +28,7 @@ Any ReAct path (when SUBAGENT_ENABLED=true) → can call "subagent" tool → Sub
 
 - **`main.py`** parses `sys.argv` directly (not `argparse`). Verbose flag: `"--verbose" in sys.argv or "-v" in sys.argv`. Positional args joined as task string after filtering flags.
 - **Interactive mode** (`run_interactive()`) creates one `LLMClient` + `OrchestratorAgent` instance for the entire session — long-term memory accumulates across multiple tasks within a session. Quit commands: "quit", "exit", "q".
-- **Base tools** registered in `main.py`: `WebSearchTool`, `CodeExecutorTool`, `FileOpsTool`, `ShellTool`. `SubAgentTool` is injected by `OrchestratorAgent.__init__()` when `SUBAGENT_ENABLED=true`, not in main.py's tool list.
+- **Base tools** registered in `main.py`: `WebSearchTool`, `CodeExecutorTool`, `FileOpsTool`, `ShellTool`, `FetchUrlTool`. `SubAgentTool` is injected by `OrchestratorAgent.__init__()` when `SUBAGENT_ENABLED=true`, not in main.py's tool list.
 - **`on_event` callback** in `main.py` handles 30+ event types with Rich console rendering. All event rendering logic lives here.
 - **Logging suppression**: `setup_logging()` sets `httpx`, `openai`, `httpcore` loggers to WARNING level; `OtelDetachFilter` suppresses OTel detach errors.
 
@@ -45,14 +45,14 @@ Any ReAct path (when SUBAGENT_ENABLED=true) → can call "subagent" tool → Sub
 
 ## Module Roles
 
-- **`agents/`** — OrchestratorAgent (compose + route, no BaseAgent inheritance), PlannerAgent (two-stage classifier + plan/DAG), ExecutorAgent (ReAct loop), ReflectorAgent (exit criteria + quality), EmergentPlannerAgent (v5 TODO-driven), GoalDrivenPlannerAgent (v8 goal anchoring), SubAgent (v9 depth=1 isolated sub-agent), prompt_utils (system prompt composition + SubAgent tool-selection guidance)
+- **`agents/`** — OrchestratorAgent (compose + route, no BaseAgent inheritance), PlannerAgent (two-stage classifier + plan/DAG), ExecutorAgent (delegates to ReActEngine, no own ReAct loop), ReflectorAgent (exit criteria + quality), EmergentPlannerAgent (v5 TODO-driven), GoalDrivenPlannerAgent (v8 goal anchoring), SubAgent (v9 depth=1 isolated sub-agent), prompt_utils (system prompt composition + context injection + SubAgent tool-selection guidance + convergence hint)
 - **`dag/`** — TaskDAG (graph + topological sort + ready-node detection + dynamic mutation), DAGExecutor (super-step parallel loop), NodeStateMachine (enforces legal status transitions)
-- **`react/`** — ReActEngine (unified ReAct loop, v6 feature-flagged via `ENABLE_REACT_ENGINE_V2`)
+- **`react/`** — ReActEngine (sole ReAct loop implementation; v12 removed legacy `_react_loop`; runs independent tool_calls concurrently via `asyncio.gather`)
 - **`llm/`** — LLMClient (OpenAI-compatible async wrapper with retry + centralized per-call token tracking)
-- **`tools/`** — BaseTool ABC, WebSearchTool, CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool (v9 meta-tool), ToolRouter (per-node failure tracking), subprocess_utils (shared sandbox runner)
+- **`tools/`** — BaseTool ABC, WebSearchTool (v11: Bailian MCP primary + DDGS fallback; v12: parses `{pages, tools}` Bailian object structure), FetchUrlTool (v11: Bailian WebParser MCP), CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool (v9 meta-tool), ToolRouter (per-node failure tracking; v12: success/failure decided after Error: detection), BailianMCPClient (v11: MCP Streamable HTTP client; v12: extracts ExceptionGroup sub-exceptions, single source of timeout truth), subprocess_utils (shared sandbox runner)
 - **`tracing/`** — OpenTelemetry observability: TracingBridge (event→span), provider (TracerProvider setup), spans (span creation helpers), multi-backend exporters, FastAPI web viewer with Jinja2 templates (left-right split detail page), @traced decorator
 - **`memory/`** — ShortTermMemory (sliding-window), LongTermMemory (JSON-file persistence + keyword search)
-- **`context/`** — ContextManager (token estimation + LLM-based compression with safe split boundary)
+- **`context/`** — ContextManager (token estimation including assistant.tool_calls + LLM-based compression with safe split boundary)
 - **`knowledge/`** — KnowledgeRetriever (TF-IDF + cosine similarity)
 - **`evaluation/`** — Benchmark 3 paradigms with 4-dimension weighted scoring (Planning 30% / Execution 40% / Efficiency 20% / Reflection 10%)
 
@@ -68,7 +68,7 @@ ExecutorAgent and ReflectorAgent do **not** emit events directly — they return
 
 ## Key Dependencies
 
-`openai` (LLM API), `pydantic` (data models), `rich` (console UI), `python-dotenv` (env loading), `ddgs>=8.0.0` (web search, v10), `opentelemetry-api/sdk>=1.27.0` + `opentelemetry-exporter-otlp>=1.27.0` (tracing), `fastapi>=0.100.0` + `uvicorn>=0.20.0` + `jinja2>=3.1.0` (tracing web viewer). Test deps: `pytest`, `pytest-asyncio`.
+`openai` (LLM API), `pydantic` (data models), `rich` (console UI), `python-dotenv` (env loading), `ddgs>=8.0.0` (web search DDGS fallback, v10), `mcp>=1.0.0` + `httpx>=0.24.0` (Bailian MCP client, v11), `opentelemetry-api/sdk>=1.27.0` + `opentelemetry-exporter-otlp>=1.27.0` (tracing), `fastapi>=0.100.0` + `uvicorn>=0.20.0` + `jinja2>=3.1.0` (tracing web viewer). Test deps: `pytest`, `pytest-asyncio`.
 
 ## Common Commands
 
@@ -99,11 +99,15 @@ SUBAGENT_ENABLED=true PLAN_MODE=emergent python main.py "multi-step research tas
 # Tracing viewer (v7)
 python -m tracing                    # Start web viewer on http://localhost:8000
 
-# All tests (no API key needed, mock-based)
-python -m pytest tests/ -v
+# All tests (no API key needed, mock-based) — REQUIRES asyncio_mode flag
+# (no conftest.py / pytest.ini exists; pytest-asyncio defaults to strict mode)
+python -m pytest tests/ -v -o asyncio_mode=auto
 
 # Run a single test
-python -m pytest tests/test_dag_capabilities.py::test_topological_sort -v
+python -m pytest tests/test_dag_capabilities.py::test_topological_sort -v -o asyncio_mode=auto
+
+# Skip integration tests that need real LLM API (when running offline / under sandbox)
+python -m pytest tests/ -o asyncio_mode=auto --ignore=tests/test_llm_integration.py
 
 # Evaluation CLI (requires LLM_API_KEY)
 python -m evaluation.eval_cli --dry-run                    # Show benchmark tasks
@@ -111,7 +115,7 @@ python -m evaluation.eval_cli --difficulty easy --modes simple  # Quick smoke te
 python -m evaluation.eval_cli --output results.json        # Full eval with JSON export
 
 # Syntax check modified files
-python3 -m py_compile schema.py llm/client.py agents/orchestrator.py agents/subagent.py tools/subagent_tool.py
+python3 -m py_compile schema.py llm/client.py agents/orchestrator.py react/engine.py
 ```
 
 ## Key Configuration
@@ -123,14 +127,20 @@ All config via env vars / `.env` file (see `config.py` for full list). Most comm
 | `LLM_API_KEY` | — | API key (required) |
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API endpoint (supports Ollama/Qwen/etc.) |
 | `LLM_MODEL` | `deepseek-chat` | Model name |
+| `DASHSCOPE_API_KEY` | — | Bailian MCP auth key (v11; absent → web_search uses DDGS fallback, fetch_url returns Error) |
 | `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
 | `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 goal-driven engine within emergent path |
 | `SUBAGENT_ENABLED` | `false` | v9 SubAgent master switch |
 | `TRACING_ENABLED` | `false` | Master switch for v7 tracing |
 | `TRACING_BACKEND` | `console` | `console` / `file` / `rich` / `otlp` / `phoenix` |
 | `MAX_REACT_ITERATIONS` | `10` | ReAct loop cap per node |
+| `MAX_CONTEXT_TOKENS` | `16000` | v12: context compression threshold (raised from 8000; user .env may override) |
+| `SEARCH_CONVERGENCE_THRESHOLD` | `3` | v11: web_search/fetch_url call count threshold for convergence hints |
+| `FETCH_URL_MAX_CONTENT_LENGTH` | `10000` | v11: max chars returned by fetch_url before truncation |
+| `TOOL_RESULT_TRUNCATION_LIMIT` | `2000` | v11/v12: max chars in ToolCallRecord AND tool messages sent to LLM (v12: previously only ToolCallRecord was truncated) |
 | `DAG_SERIAL_EXECUTION` | `true` | Serial DAG execution (default; set `false` for parallel) |
 | `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5/v8 emergent planning route |
+| `ENABLE_REACT_ENGINE_V2` | `false` | **DEPRECATED in v12**: ReActEngine is now the only implementation; flag retained for backward compat but no longer affects behavior |
 
 ## Code Conventions
 
@@ -140,9 +150,18 @@ All config via env vars / `.env` file (see `config.py` for full list). Most comm
 - **Event-driven UI** — OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event, data)` which forwards to the `on_event` callback in `main.py`; ExecutorAgent and ReflectorAgent do not emit events directly
 - **Pydantic models** for data structures, but LLM message passing uses raw `list[dict[str, Any]]` (OpenAI API compatibility)
 - **Chinese + English bilingual comments** — most modules have dual-language docstrings
-- **Feature flags** — v6 capabilities (LLM retry, ReActEngine) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`); v9 SubAgent defaults to disabled (`false`)
+- **Feature flags** — v6 capabilities (LLM retry) default to disabled (`false`); v3/v5 features (adaptive planning, emergent planning) default to enabled (`true`); v7 tracing defaults to disabled (`false`); v9 SubAgent defaults to disabled (`false`); v12 removed `ENABLE_REACT_ENGINE_V2` as a behavior flag (always-on)
 - **Token tracking centralized** — only `LLMClient` and `OrchestratorAgent` manage token usage; individual execution agents (Executor, EmergentPlanner, Reflector, Planner) have no token tracking code
 - **OTel detach convention** — all `otel_context.detach()` calls in `tracing/bridge.py` are unprotected by try/except (OTel library catches ValueError internally); logging suppression is handled centrally by `OtelDetachFilter` in `main.py`, not at each call site
+
+## System Prompt Composition (v12)
+
+`agents/prompt_utils.build_system_prompt(base, inject_context=True, inject_subagent_guidance=True)` is the single composition entry point used by Executor and Planner. It appends:
+
+1. **Context injection** (v12, default ON) — current date / weekday / time, so the LLM does not guess the year in search queries and the Planner does not over-split tasks for date discovery. Implemented in `build_context_injection()`.
+2. **SubAgent tool guidance** (v9, only when `SUBAGENT_ENABLED=true`) — when-to-use / when-NOT-to-use heuristics. Set `inject_subagent_guidance=False` for agents that do not call tools (Planner, Reflector).
+
+`build_convergence_hint(tool_call_counts)` is the single source of dynamic NOTE/CRITICAL nudges based on `web_search`/`fetch_url` call frequency; called by ReActEngine after each iteration.
 
 ## Token Tracking
 
@@ -165,7 +184,22 @@ OpenTelemetry-based tracing adds observability without modifying core execution 
 - **Sensitive data**: `SENSITIVE_KEYS` set in `tracing/config.py` triggers automatic redaction of api_key, token, etc.
 - **Unconditional full request/response recording**: LLM span attributes (`gen_ai.prompt.content`, `gen_ai.response.content`, `gen_ai.response.tool_calls`, `gen_ai.response.finish_reason`) are always recorded when tracing is enabled — no truncation, no sanitization, not gated by `TRACING_LOG_PROMPTS`. This is a demo/tutorial project; full raw data is required for observability. Response data is extracted by `_extract_response_data()` before `_end_llm_span()` to keep `_end_llm_span` free of OpenAI SDK type assumptions.
 - **LLM span lifecycle gotcha**: `_end_llm_span` reads token usage from `_call_records[-1]`, so `_record_call()` must be called before `_end_llm_span`. This is safe because in the single-threaded asyncio event loop there is no `await` between them.
+- **`tool.success` accuracy** (v12): `BaseTool.traced_execute` detects `Error:`-prefixed string returns and sets `tool.success=False` + `StatusCode.ERROR` on the span. Previously only exceptions were marked as failure; tools that swallow exceptions and return error strings (web_search/fetch_url) now correctly show as failed in traces.
 - **Env var naming discrepancy**: The env var `TRACING_MAX_ATTR_LENGTH` maps to Python attribute `TRACING_MAX_ATTRIBUTE_LENGTH` — `.env.example` uses the shorter form, `config.py` reads it with the shorter key but exposes the longer attribute name.
+
+## Bailian MCP Web Search + fetch_url (v11/v12)
+
+Replaces DDGS-only search with Bailian MCP (Aliyun) primary + DDGS fallback, and adds a `fetch_url` tool for URL page content fetching.
+
+**Key design decisions**:
+- **Bailian primary + DDGS fallback**: When `DASHSCOPE_API_KEY` is set, WebSearchTool tries Bailian MCP first; on failure, falls back to DDGS. When key is absent, uses DDGS directly.
+- **v12 result formatting**: `_format_bailian_results` parses Bailian's `{pages, tools, request_id, status}` object structure. The `tools[]` array (structured data like real-time stock prices, weather) is rendered FIRST under "## Structured data ({type})" headers; `pages[]` then follow as compact numbered list (title + snippet + URL only). `hostlogo` / `request_id` / `status` are dropped (no information value). Falls back gracefully to legacy list-of-results shape and raw text passthrough for unexpected JSON.
+- **Per-call MCP connection**: `BailianMCPClient` uses per-call `streamablehttp_client` + `ClientSession` (no session caching, no singleton).
+- **v12 timeout strategy**: Inner streamablehttp timeout is set to `outer_timeout * 4 + 30` so the OUTER `asyncio.wait_for` is the single source of truth. Previously double-layered timeouts caused inner `streamablehttp` to fire first, raising `ExceptionGroup` before the outer wait_for could yield a clean TimeoutError.
+- **v12 ExceptionGroup unwrapping**: `BailianMCPClient.call_tool()` catches `BaseException`, inspects `exc.exceptions` for sub-exceptions, and re-raises as `RuntimeError(f"MCP {server}.{tool} failed: {details}")`. This converts opaque "unhandled errors in a TaskGroup (1 sub-exception)" into actionable diagnostics for the LLM.
+- **Error transparency**: `WebSearchTool.execute()` / `FetchUrlTool.execute()` translate all exceptions into `Error:` prefixed strings for LLM consumption.
+- **Convergence guidance**: `build_convergence_hint()` in `agents/prompt_utils.py` generates dynamic NOTE/CRITICAL messages based on tool call frequency.
+- **Content truncation**: fetch_url truncates at `FETCH_URL_MAX_CONTENT_LENGTH` (10,000 chars default).
 
 ## SubAgent (v9)
 
@@ -226,6 +260,15 @@ Benchmarks all three planning paradigms (simple/complex/emergent) against 12 tas
 14. **ReActEngine on_iteration callback**: `execute()` accepts `on_iteration: Callable[[int, list[ToolCallRecord]], None]` invoked after each iteration; used by `SubAgent._on_react_iteration()` for token budget checking (can raise to abort); `StepResult.iterations_completed` populated from the iteration counter
 15. **SubAgent token accounting**: Uses record index range (`records[_records_before:]`) throughout both `_on_react_iteration` and `run()` — no delta method, no `_get_total_tokens()` helper; `_records_before` is initialized to 0 in `__init__` and set to `len(llm_client.get_call_records())` at the start of each `run()`
 16. **SubAgent token budget scope**: The per-call token budget covers only the ReAct main loop; the summarize step (one additional LLM call, `max_tokens=1500`) is excluded from the budget check by design, as it occurs after the loop completes and before returning
+17. **Bailian MCP primary + DDGS fallback (v11)**: WebSearchTool tries Bailian MCP first when `DASHSCOPE_API_KEY` is set; on failure falls back to DDGS; when key is absent uses DDGS directly. FetchUrlTool requires `DASHSCOPE_API_KEY` (no DDGS equivalent for page fetching). Both tools use `Error:` prefixed strings for error transparency, shared with ReActEngine's `[TOOL ERROR]` detection.
+18. **Convergence hint single source (v11)**: `build_convergence_hint()` in `agents/prompt_utils.py` is the sole implementation; ReActEngine and `EmergentPlannerAgent` import and call it — no duplicated convergence logic.
+19. **Per-call MCP connection (v11)**: `BailianMCPClient` has no singleton or session caching; each `call_tool()` creates a fresh `streamablehttp_client` + `ClientSession`, calls the tool, then closes.
+20. **ReActEngine is the only ReAct implementation (v12)**: Legacy `_react_loop` removed from `ExecutorAgent`. `ENABLE_REACT_ENGINE_V2` flag retained in config for backward compat but no longer affects behavior. `EmergentPlannerAgent` still keeps a legacy non-ReAct fallback path; the `ENABLE_REACT_ENGINE_V2=false` branch there is preserved for compatibility but should be considered for removal in a future cleanup.
+21. **ToolRouter accounting (v12)**: Within ReActEngine, `record_failure()` vs `record_success()` is decided AFTER `Error:`-prefix detection on the result. Previously `record_success()` was called immediately after a non-throwing `traced_execute()`, masking tools that swallow exceptions and return error strings. This made ToolRouter's failure-threshold (continuous-failure → suggest alternative tool) mechanism finally work for `web_search`/`fetch_url`/etc.
+22. **Tool result truncation reaches the LLM (v12)**: `react/engine.py` now truncates oversized successful tool results at `TOOL_RESULT_TRUNCATION_LIMIT` BEFORE inserting into the messages list (previously only `ToolCallRecord` was truncated, while the LLM saw the full content). The truncation appends a clearly visible `[Tool output truncated at X chars; original length=Y]` marker so the LLM knows there is more available.
+23. **Concurrent tool_calls (v12)**: When the LLM returns multiple `tool_calls` in a single response, ReActEngine executes them concurrently via `asyncio.gather`. Results are then iterated in original order to write `tool_messages` in the order required by the OpenAI protocol (tool message order must match assistant.tool_calls order). ToolRouter writes are concurrency-safe in single-threaded asyncio.
+24. **Context injection into system prompts (v12)**: `prompt_utils.build_context_injection()` adds today's date / weekday / local time to Executor and Planner system prompts. This eliminates two recurring failures: LLM guessing wrong year in search queries, and Planner over-splitting "today/tomorrow" tasks for date-discovery steps. Planner's IMPLICIT DATA rule was rewritten to (a) USE injected date directly, (b) still create discovery steps for location/preferences.
+25. **ContextManager token estimation (v12)**: `estimate_messages_tokens` now counts `assistant.tool_calls[].function.{name, arguments}` in addition to `content`. Previously the tool_calls field was ignored, causing 12-30% underestimation and `compress_if_needed` failing to trigger even when prompts had ballooned past 18k tokens. Default `MAX_CONTEXT_TOKENS` raised from 8000 → 16000 to match real usage patterns; `.env.example` updated, but a user's existing `.env` file may still contain the old value.
 
 ## Documentation
 

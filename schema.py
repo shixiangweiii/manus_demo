@@ -346,7 +346,7 @@ class ToolCallRecord(BaseModel):
     """
     tool_name: str                                         # Tool name / 工具名称
     parameters: dict[str, Any] = Field(default_factory=dict)  # 调用参数
-    result: str = ""                                       # 工具返回结果（成功时截断到 1000 字符，错误时保留全文）
+    result: str = ""                                       # 工具返回结果（成功时截断到 TOOL_RESULT_TRUNCATION_LIMIT，错误时保留全文）
 
 
 class StepResult(BaseModel):

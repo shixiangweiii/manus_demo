@@ -1,12 +1,16 @@
 """
-Tests for the WebSearchTool (v10 - real DDGS-backed implementation).
-WebSearch 工具测试（v10 真实搜索实现）。
+Tests for the WebSearchTool (v11 - Bailian MCP primary + DDGS fallback).
+WebSearch 工具测试（v11 百炼 MCP 优先 + DDGS 回退）。
 
 All tests are mock-based; no real network calls. Covers:
-- _format_results 输出格式与字段兼容性
+- _format_results 输出格式与字段兼容性（DDGS 回退路径）
+- _format_bailian_results JSON 和纯文本格式
+- execute Bailian MCP 成功路径
+- execute Bailian MCP 失败 → DDGS 回退路径
+- execute 无 DASHSCOPE_API_KEY → DDGS 直通路径
 - execute 成功/超时/限速/通用异常/空 query 路径
-- query 与 max_results 透传给 DDGS
-- traced_execute 与 execute 的契约一致性（TRACING_ENABLED=false）
+- count 参数透传给 Bailian/DDGS
+- traced_execute 与 execute 的契约一致性
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.web_search import RatelimitException, WebSearchTool
+from tools.mcp_client import BailianMCPClient
 
 
 # ======================================================================
@@ -229,13 +234,15 @@ class TestToolContract:
         assert "query" in schema["properties"]
         assert "query" in schema["required"]
 
-    def test_description_is_real_not_simulated(self):
+    def test_description_mentions_fetch_url_and_search(self):
         desc = WebSearchTool().description.lower()
         # mock 时代的标记词应当被移除
         assert "simulated" not in desc
         assert "in this demo" not in desc
-        # 应明确提及 DuckDuckGo 或真实搜索
-        assert "duckduckgo" in desc
+        # 应明确提及 fetch_url 配合工具
+        assert "fetch_url" in desc
+        # 应提及搜索功能
+        assert "search" in desc
 
     @pytest.mark.asyncio
     async def test_traced_execute_passthrough_when_disabled(self, monkeypatch):
@@ -252,3 +259,103 @@ class TestToolContract:
         result = await tool.traced_execute(query="ping")
         assert "X" in result
         assert "https://z" in result
+
+    def test_parameters_schema_has_count(self):
+        schema = WebSearchTool().parameters_schema
+        assert "count" in schema["properties"]
+        assert "count" not in schema["required"]  # count is optional
+
+
+# ======================================================================
+# Bailian MCP paths
+# ======================================================================
+
+class TestBailianMCPPaths:
+
+    @pytest.mark.asyncio
+    async def test_bailian_success_no_ddgs_called(self, monkeypatch):
+        """When DASHSCOPE_API_KEY is set and Bailian succeeds, DDGS is NOT called."""
+        import config as cfg
+        monkeypatch.setattr(cfg, "DASHSCOPE_API_KEY", "sk-test-key")
+
+        # Mock BailianMCPClient to return successful result
+        async def fake_call_tool(self, server_name, tool_name, arguments, timeout=None):
+            return json.dumps([
+                {"title": "MCP Result", "content": "Full content from MCP", "url": "https://mcp.example"},
+            ])
+
+        monkeypatch.setattr(BailianMCPClient, "call_tool", fake_call_tool)
+
+        # Ensure DDGS is NOT called by patching it to raise if invoked
+        import ddgs
+        monkeypatch.setattr(ddgs, "DDGS", lambda: _FakeDDGS(exc=RuntimeError("DDGS should not be called")))
+
+        tool = WebSearchTool()
+        result = await tool.execute(query="test bailian")
+        assert "MCP Result" in result
+        assert "Full content from MCP" in result
+
+    @pytest.mark.asyncio
+    async def test_bailian_failure_falls_back_to_ddgs(self, monkeypatch):
+        """When Bailian MCP fails, falls back to DDGS."""
+        import config as cfg
+        monkeypatch.setattr(cfg, "DASHSCOPE_API_KEY", "sk-test-key")
+
+        # Mock BailianMCPClient to raise
+        mock_call_tool = MagicMock(side_effect=RuntimeError("MCP connection failed"))
+        monkeypatch.setattr(BailianMCPClient, "call_tool", mock_call_tool)
+
+        # DDGS succeeds
+        fake_results = [{"title": "DDGS Fallback", "body": "Works", "href": "https://ddgs.example"}]
+        import ddgs
+        monkeypatch.setattr(ddgs, "DDGS", lambda: _FakeDDGS(results=fake_results))
+
+        tool = WebSearchTool()
+        result = await tool.execute(query="fallback test")
+        assert "DDGS Fallback" in result
+
+    @pytest.mark.asyncio
+    async def test_no_api_key_uses_ddgs_directly(self, monkeypatch):
+        """When DASHSCOPE_API_KEY is empty, goes directly to DDGS."""
+        import config as cfg
+        monkeypatch.setattr(cfg, "DASHSCOPE_API_KEY", "")
+
+        fake_results = [{"title": "DDGS Only", "body": "Direct", "href": "https://ddgs.example"}]
+        import ddgs
+        monkeypatch.setattr(ddgs, "DDGS", lambda: _FakeDDGS(results=fake_results))
+
+        tool = WebSearchTool()
+        result = await tool.execute(query="no key test")
+        assert "DDGS Only" in result
+
+
+# ======================================================================
+# _format_bailian_results
+# ======================================================================
+
+import json
+
+class TestFormatBailianResults:
+
+    def test_json_list_format(self):
+        data = json.dumps([
+            {"title": "Result 1", "content": "Full abstract", "url": "https://r1.com"},
+            {"title": "Result 2", "abstract": "Summary text", "link": "https://r2.com"},
+        ])
+        text = WebSearchTool._format_bailian_results("query", data)
+        assert "Search results for: 'query'" in text
+        assert "1. Result 1" in text
+        assert "Full abstract" in text
+        assert "URL: https://r1.com" in text
+        assert "2. Result 2" in text
+        assert "Summary text" in text
+
+    def test_plain_text_passthrough(self):
+        raw = "Some plain text search results from Bailian"
+        text = WebSearchTool._format_bailian_results("q", raw)
+        assert "Search results for: 'q'" in text
+        assert raw in text
+
+    def test_empty_returns_no_results(self):
+        text = WebSearchTool._format_bailian_results("q", "")
+        assert text == "No results found for: 'q'"

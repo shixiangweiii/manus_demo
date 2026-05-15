@@ -33,6 +33,7 @@ from typing import Any
 
 import config
 from agents.base import BaseAgent
+from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from dag.graph import TaskDAG
 from llm.client import LLMClient
@@ -60,21 +61,25 @@ logger = logging.getLogger(__name__)
 # 系统提示词
 # ======================================================================
 
-SIMPLE_PLANNER_SYSTEM_PROMPT = """\
+_SIMPLE_PLANNER_BASE_PROMPT = """\
 You are a task planning agent. Your job is to decompose a complex user task
 into a clear, ordered sequence of executable steps.
 
 Rules:
 1. Break the task into 2-6 concrete, actionable steps.
 2. Each step should be independently executable by an executor agent that
-   has access to tools: web_search, execute_python, file_ops.
+   has access to tools: web_search, fetch_url, execute_python, file_ops.
 3. Order steps logically; specify dependencies if a step requires output
    from a prior step.
 4. Keep step descriptions clear and specific.
 5. IMPLICIT DATA: If the task requires information not directly provided
-   by the user (e.g., today's date, current location, user preferences),
-   create a dedicated step to OBTAIN it via tools. Do NOT make assumptions
-   about such data — discover it explicitly.
+   by the user, distinguish two cases:
+   (a) Date/time/weekday — already provided in the auto-injected
+       "Current Context" section above. Use it directly. Do NOT create a
+       step to obtain the date.
+   (b) Other contextual data (current location, user preferences, etc.)
+       — create a dedicated step to OBTAIN it via tools. Do NOT make
+       assumptions about such data — discover it explicitly.
 6. NO UNAUTHORIZED ASSUMPTIONS: Never invent default values for
    unspecified data (e.g., do not assume "Beijing" if location is
    unspecified). If real data cannot be obtained after reasonable
@@ -101,7 +106,13 @@ You MUST respond with a valid JSON object in this exact format:
 }
 """
 
-PLANNER_SYSTEM_PROMPT = """\
+SIMPLE_PLANNER_SYSTEM_PROMPT = build_system_prompt(
+    _SIMPLE_PLANNER_BASE_PROMPT,
+    inject_context=True,
+    inject_subagent_guidance=False,
+)
+
+_PLANNER_BASE_PROMPT = """\
 You are a hierarchical task planning agent. Your job is to decompose a
 complex user task into a structured, three-level plan:
 
@@ -112,7 +123,7 @@ Rules:
 2. Break the goal into 2-5 subgoals (logical groupings of work).
 3. Each subgoal contains 1-3 concrete, executable actions.
 4. Actions should be independently executable by a tool-using agent
-   with access to: web_search, execute_python, file_ops.
+   with access to: web_search, fetch_url, execute_python, file_ops.
 5. For each node, specify:
    - exit_criteria: what defines "done" for this node
    - confidence: 0.0-1.0 how likely this will succeed
@@ -139,9 +150,13 @@ Rules:
    Then organize into subgoals for clarity, but keep cross-subgoal
    dependencies on the actions that actually exchange data.
 10. IMPLICIT DATA: If a task requires information not directly provided in
-    the user's message (e.g., "today's date", "current location", "user's
-    language preference"), create a dedicated action to obtain it. Do NOT
-    assume the executor already has this data.
+    the user's message, distinguish two cases:
+    (a) Date/time/weekday — already provided in the auto-injected
+        "Current Context" section above. Use it directly. Do NOT create an
+        action to obtain the date.
+    (b) Other contextual data (current location, user preferences, etc.)
+        — create a dedicated action to obtain it. Do NOT assume the
+        executor already has this data.
 
 You MUST respond with a valid JSON object in this exact format:
 {
@@ -228,6 +243,12 @@ You MUST respond with a valid JSON object in this exact format:
   ]
 }
 """
+
+PLANNER_SYSTEM_PROMPT = build_system_prompt(
+    _PLANNER_BASE_PROMPT,
+    inject_context=True,
+    inject_subagent_guidance=False,
+)
 
 
 class PlannerAgent(BaseAgent):

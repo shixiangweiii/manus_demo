@@ -105,10 +105,22 @@ class BaseTool(ABC):
                     result = await self.execute(**kwargs)
                     elapsed_ms = (time.perf_counter() - start) * 1000
                     span.set_attribute("latency_ms", round(elapsed_ms, 2))
-                    span.set_attribute("tool.success", True)
+
+                    # Detect Error:-prefixed string returns (tools that swallow
+                    # exceptions and return error strings). Reflect failure in
+                    # the span so dashboards/traces are not misled.
+                    is_error_str = isinstance(result, str) and result.startswith("Error:")
+
                     if isinstance(result, str):
                         span.set_attribute("tool.result_size", len(result))
-                    span.set_status(StatusCode.OK)
+
+                    if is_error_str:
+                        span.set_attribute("tool.success", False)
+                        span.set_attribute("tool.error", str(result)[:500])
+                        span.set_status(StatusCode.ERROR, str(result)[:200])
+                    else:
+                        span.set_attribute("tool.success", True)
+                        span.set_status(StatusCode.OK)
                     return result
                 except Exception as exc:
                     elapsed_ms = (time.perf_counter() - start) * 1000

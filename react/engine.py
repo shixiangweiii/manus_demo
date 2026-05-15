@@ -27,11 +27,13 @@ config flag.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Callable
 
 import config
+from agents.prompt_utils import build_convergence_hint
 from context.manager import ContextManager
 from llm.client import LLMClient
 from schema import StepResult, ToolCallRecord
@@ -132,6 +134,13 @@ class ReActEngine:
                 if router_hint:
                     continue_msg += f"\n\nIMPORTANT: {router_hint}"
 
+                # Dynamic convergence guidance based on tool call frequency
+                tool_call_counts: dict[str, int] = {}
+                for tc in tool_calls_log:
+                    tool_call_counts[tc.tool_name] = tool_call_counts.get(tc.tool_name, 0) + 1
+
+                continue_msg += build_convergence_hint(tool_call_counts)
+
                 if iteration == 1:
                     user_input = prompt
                 else:
@@ -191,51 +200,78 @@ class ReActEngine:
                     iterations_completed=iteration,
                 )
 
-            tool_messages: list[dict[str, Any]] = []
-
-            for tool_call in response_msg.tool_calls:
-                func_name = tool_call.function.name
+            # Execute tool calls. Independent calls run concurrently via
+            # asyncio.gather; results are then processed in original order to
+            # preserve assistant.tool_calls ↔ tool messages alignment required
+            # by the OpenAI protocol.
+            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool]:
+                fn_name = tc.function.name
                 try:
-                    func_args = json.loads(tool_call.function.arguments)
+                    fn_args = json.loads(tc.function.arguments)
                 except (json.JSONDecodeError, TypeError):
-                    func_args = {}
+                    fn_args = {}
+                logger.info("[ReActEngine] Tool call: %s(%s)", fn_name, fn_args)
+                t = self.tools.get(fn_name)
+                if t is None:
+                    return tc, fn_name, fn_args, f"Error: Unknown tool '{fn_name}'", True
+                try:
+                    res = await t.traced_execute(**fn_args)
+                    err = isinstance(res, str) and res.startswith("Error:")
+                    return tc, fn_name, fn_args, res, err
+                except Exception as exc:
+                    return tc, fn_name, fn_args, f"Error: Tool execution error: {exc}", True
 
-                logger.info("[ReActEngine] Tool call: %s(%s)", func_name, func_args)
+            executions = await asyncio.gather(
+                *(_exec_one(tc) for tc in response_msg.tool_calls)
+            )
 
-                tool = self.tools.get(func_name)
-                is_error = False
-                if tool is None:
-                    result = f"Error: Unknown tool '{func_name}'"
+            tool_messages: list[dict[str, Any]] = []
+            truncation_limit = config.TOOL_RESULT_TRUNCATION_LIMIT
+
+            for tool_call, func_name, func_args, result, is_error in executions:
+                # Single ToolRouter accounting point — record after error detection
+                # so that Error:-prefixed returns are counted as failures (not successes).
+                if is_error:
                     self.tool_router.record_failure(str(step_id), func_name)
-                    is_error = True
                 else:
-                    try:
-                        result = await tool.traced_execute(**func_args)
-                        self.tool_router.record_success(str(step_id), func_name)
-                    except Exception as exc:
-                        result = f"Error: Tool execution error: {exc}"
-                        self.tool_router.record_failure(str(step_id), func_name)
-                        is_error = True
+                    self.tool_router.record_success(str(step_id), func_name)
 
-                if isinstance(result, str) and result.startswith("Error:"):
-                    is_error = True
+                # Apply truncation BOTH to record (UI/stats) AND to LLM
+                # context. Previously only ToolCallRecord was truncated, which
+                # let oversized successful results (e.g., 39k-char wttr.in JSON)
+                # blow up subsequent prompts.
+                if is_error:
+                    # Keep full error text — debugging value high, size usually small
+                    record_result = result
+                    llm_result = result
+                else:
+                    if isinstance(result, str) and len(result) > truncation_limit:
+                        truncated = result[:truncation_limit]
+                        record_result = truncated
+                        llm_result = (
+                            truncated
+                            + f"\n\n[Tool output truncated at {truncation_limit} characters "
+                              f"to control context size; original length={len(result)}]"
+                        )
+                    else:
+                        record_result = result
+                        llm_result = result
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
-                    # Keep full error text for debugging; truncate success results
-                    result=result if is_error else result[:1000],
+                    result=record_result,
                 ))
 
                 if is_error:
                     result_with_marker = (
-                        f"[TOOL ERROR] {result}\n\n"
+                        f"[TOOL ERROR] {llm_result}\n\n"
                         "IMPORTANT: The tool returned an error. Please analyze "
                         "the error and decide whether to retry with different "
                         "parameters or report the failure."
                     )
                 else:
-                    result_with_marker = result
+                    result_with_marker = llm_result
 
                 tool_messages.append({
                     "role": "tool",
