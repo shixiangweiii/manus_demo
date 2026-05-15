@@ -24,14 +24,33 @@ All paths → TracingBridge (event-to-span, v7 OpenTelemetry)
 Any ReAct path (when SUBAGENT_ENABLED=true) → can call "subagent" tool → SubAgent (depth=1, isolated context, summary-only return)
 ```
 
-### Module Roles
+### Entry Point & Interactive Mode
 
-- **`agents/`** — OrchestratorAgent (compose + route, no BaseAgent inheritance), PlannerAgent (two-stage classifier + plan/DAG), ExecutorAgent (ReAct loop), ReflectorAgent (exit criteria + quality), EmergentPlannerAgent (v5 TODO-driven), GoalDrivenPlannerAgent (v8 goal anchoring), SubAgent (v9 depth=1 isolated sub-agent)
+- **`main.py`** parses `sys.argv` directly (not `argparse`). Verbose flag: `"--verbose" in sys.argv or "-v" in sys.argv`. Positional args joined as task string after filtering flags.
+- **Interactive mode** (`run_interactive()`) creates one `LLMClient` + `OrchestratorAgent` instance for the entire session — long-term memory accumulates across multiple tasks within a session. Quit commands: "quit", "exit", "q".
+- **Base tools** registered in `main.py`: `WebSearchTool`, `CodeExecutorTool`, `FileOpsTool`, `ShellTool`. `SubAgentTool` is injected by `OrchestratorAgent.__init__()` when `SUBAGENT_ENABLED=true`, not in main.py's tool list.
+- **`on_event` callback** in `main.py` handles 30+ event types with Rich console rendering. All event rendering logic lives here.
+- **Logging suppression**: `setup_logging()` sets `httpx`, `openai`, `httpcore` loggers to WARNING level; `OtelDetachFilter` suppresses OTel detach errors.
+
+## Key Schema Enums
+
+- **NodeStatus** (7 states): `PENDING → READY → RUNNING → COMPLETED | FAILED | SKIPPED | ROLLED_BACK`
+- **NodeType**: `GOAL / SUBGOAL / ACTION`
+- **EdgeType**: `DEPENDENCY / CONDITIONAL / ROLLBACK`
+- **StepStatus**: `PENDING / RUNNING / COMPLETED / FAILED / SKIPPED`
+- **ExitCriteria** has 3-tier behavior: LLM validation (default), direct `result.success` check, or skip entirely
+- **TodoStatus**: `PENDING / IN_PROGRESS / COMPLETED / BLOCKED`
+- **SubAgentStatus**: `PENDING / RUNNING / COMPLETED / FAILED / TIMED_OUT`
+- **GoalAction**: `EXECUTE_TODO / REPLAN / COMPLETE`
+
+## Module Roles
+
+- **`agents/`** — OrchestratorAgent (compose + route, no BaseAgent inheritance), PlannerAgent (two-stage classifier + plan/DAG), ExecutorAgent (ReAct loop), ReflectorAgent (exit criteria + quality), EmergentPlannerAgent (v5 TODO-driven), GoalDrivenPlannerAgent (v8 goal anchoring), SubAgent (v9 depth=1 isolated sub-agent), prompt_utils (system prompt composition + SubAgent tool-selection guidance)
 - **`dag/`** — TaskDAG (graph + topological sort + ready-node detection + dynamic mutation), DAGExecutor (super-step parallel loop), NodeStateMachine (enforces legal status transitions)
 - **`react/`** — ReActEngine (unified ReAct loop, v6 feature-flagged via `ENABLE_REACT_ENGINE_V2`)
 - **`llm/`** — LLMClient (OpenAI-compatible async wrapper with retry + centralized per-call token tracking)
 - **`tools/`** — BaseTool ABC, WebSearchTool, CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool (v9 meta-tool), ToolRouter (per-node failure tracking), subprocess_utils (shared sandbox runner)
-- **`tracing/`** — OpenTelemetry observability: TracingBridge (event→span), multi-backend exporters, FastAPI web viewer with left-right split detail page, @traced decorator
+- **`tracing/`** — OpenTelemetry observability: TracingBridge (event→span), provider (TracerProvider setup), spans (span creation helpers), multi-backend exporters, FastAPI web viewer with Jinja2 templates (left-right split detail page), @traced decorator
 - **`memory/`** — ShortTermMemory (sliding-window), LongTermMemory (JSON-file persistence + keyword search)
 - **`context/`** — ContextManager (token estimation + LLM-based compression with safe split boundary)
 - **`knowledge/`** — KnowledgeRetriever (TF-IDF + cosine similarity)
@@ -46,6 +65,10 @@ OrchestratorAgent, EmergentPlannerAgent, and DAGExecutor call `self._emit(event,
 3. **EvaluationProbe** (`evaluation/runner.py`) — Collects metrics per-phase for benchmark scoring
 
 ExecutorAgent and ReflectorAgent do **not** emit events directly — they return results to their caller which then emits.
+
+## Key Dependencies
+
+`openai` (LLM API), `pydantic` (data models), `rich` (console UI), `python-dotenv` (env loading), `ddgs>=8.0.0` (web search, v10), `opentelemetry-api/sdk>=1.27.0` + `opentelemetry-exporter-otlp>=1.27.0` (tracing), `fastapi>=0.100.0` + `uvicorn>=0.20.0` + `jinja2>=3.1.0` (tracing web viewer). Test deps: `pytest`, `pytest-asyncio`.
 
 ## Common Commands
 
@@ -98,6 +121,7 @@ All config via env vars / `.env` file (see `config.py` for full list). Most comm
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `LLM_API_KEY` | — | API key (required) |
+| `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API endpoint (supports Ollama/Qwen/etc.) |
 | `LLM_MODEL` | `deepseek-chat` | Model name |
 | `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
 | `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 goal-driven engine within emergent path |
@@ -141,6 +165,7 @@ OpenTelemetry-based tracing adds observability without modifying core execution 
 - **Sensitive data**: `SENSITIVE_KEYS` set in `tracing/config.py` triggers automatic redaction of api_key, token, etc.
 - **Unconditional full request/response recording**: LLM span attributes (`gen_ai.prompt.content`, `gen_ai.response.content`, `gen_ai.response.tool_calls`, `gen_ai.response.finish_reason`) are always recorded when tracing is enabled — no truncation, no sanitization, not gated by `TRACING_LOG_PROMPTS`. This is a demo/tutorial project; full raw data is required for observability. Response data is extracted by `_extract_response_data()` before `_end_llm_span()` to keep `_end_llm_span` free of OpenAI SDK type assumptions.
 - **LLM span lifecycle gotcha**: `_end_llm_span` reads token usage from `_call_records[-1]`, so `_record_call()` must be called before `_end_llm_span`. This is safe because in the single-threaded asyncio event loop there is no `await` between them.
+- **Env var naming discrepancy**: The env var `TRACING_MAX_ATTR_LENGTH` maps to Python attribute `TRACING_MAX_ATTRIBUTE_LENGTH` — `.env.example` uses the shorter form, `config.py` reads it with the shorter key but exposes the longer attribute name.
 
 ## SubAgent (v9)
 
