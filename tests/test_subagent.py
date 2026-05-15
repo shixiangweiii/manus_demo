@@ -1791,3 +1791,132 @@ class TestExtractArtifactsFromLog:
             ToolCallRecord(tool_name="file_ops", parameters={"action": "write", "filename": "report.md"}, result="updated"),
         ]
         assert _extract_artifacts_from_log(tc_log) == ["report.md"]
+
+
+# ======================================================================
+# Wave B #15 — Concurrency regression tests for SubAgentTool
+# 并发回归测试：验证 Semaphore 限流（#5）+ reserve-before-await（#4）
+# ======================================================================
+
+class TestSubAgentConcurrency:
+    """Concurrency safety regression tests added for Wave B (#4 + #5)."""
+
+    @pytest.mark.asyncio
+    async def test_semaphore_limits_in_flight_concurrent_runs(self, monkeypatch):
+        """#5: Semaphore caps concurrent SubAgent.run() calls."""
+        from tools.subagent_tool import SubAgentTool
+
+        # Patch config BEFORE constructing the tool — Semaphore is built in __init__
+        monkeypatch.setattr(config, "SUBAGENT_MAX_CONCURRENT", 2)
+
+        in_flight = 0
+        max_in_flight = 0
+        completed = 0
+
+        async def fake_run(*args, **kwargs):
+            nonlocal in_flight, max_in_flight, completed
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.05)  # observable concurrency window
+            in_flight -= 1
+            completed += 1
+            return _make_subagent_result()
+
+        client = _make_llm_client()
+        tool = SubAgentTool(
+            llm_client=client,
+            available_tools={"search": _make_tool("search")},
+            max_calls_per_task=10,  # high cap so all 5 can reserve
+        )
+
+        with patch("agents.subagent.SubAgent") as MockSubAgent:
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(side_effect=fake_run)
+            MockSubAgent.return_value = mock_instance
+
+            results = await asyncio.gather(*(
+                tool.execute(task_description=f"task-{i}") for i in range(5)
+            ))
+
+        assert len(results) == 5
+        assert completed == 5
+        assert max_in_flight <= 2, f"Semaphore violated: max_in_flight={max_in_flight}"
+        assert tool._call_count == 5  # all 5 reservations succeeded
+
+    @pytest.mark.asyncio
+    async def test_call_count_never_exceeds_max_under_concurrent_load(self):
+        """#4: reserve-before-await prevents concurrent calls from racing past max_calls."""
+        from tools.subagent_tool import SubAgentTool
+
+        async def fake_run(*args, **kwargs):
+            await asyncio.sleep(0.05)  # widen the race window
+            return _make_subagent_result()
+
+        client = _make_llm_client()
+        tool = SubAgentTool(
+            llm_client=client,
+            available_tools={"search": _make_tool("search")},
+            max_calls_per_task=2,
+        )
+
+        with patch("agents.subagent.SubAgent") as MockSubAgent:
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(side_effect=fake_run)
+            MockSubAgent.return_value = mock_instance
+
+            results = await asyncio.gather(*(
+                tool.execute(task_description=f"task-{i}") for i in range(5)
+            ))
+
+        assert len(results) == 5
+        # Exactly 2 should run; the other 3 must be rejected with the rate-limit string
+        rejected = sum(1 for r in results if "limit reached" in r)
+        assert tool._call_count == 2, f"call_count={tool._call_count} exceeded max=2"
+        assert rejected == 3, f"expected 3 rejections, got {rejected}"
+
+    @pytest.mark.asyncio
+    async def test_failure_does_not_refund_budget(self):
+        """#4: failed SubAgent runs still consume budget (no refund) — anti-thrash."""
+        from tools.subagent_tool import SubAgentTool
+
+        async def failing_run(*args, **kwargs):
+            raise RuntimeError("simulated SubAgent crash")
+
+        client = _make_llm_client()
+        tool = SubAgentTool(
+            llm_client=client,
+            available_tools={"search": _make_tool("search")},
+            max_calls_per_task=2,
+        )
+
+        with patch("agents.subagent.SubAgent") as MockSubAgent:
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(side_effect=failing_run)
+            MockSubAgent.return_value = mock_instance
+
+            r1 = await tool.execute(task_description="will-crash-1")
+            r2 = await tool.execute(task_description="will-crash-2")
+            r3 = await tool.execute(task_description="should-be-rejected")
+
+        assert tool._call_count == 2
+        # First two crashed but their summaries are valid JSON error objects
+        assert "SubAgent error" in r1
+        assert "SubAgent error" in r2
+        # Third call hits limit
+        assert "limit reached" in r3
+
+    @pytest.mark.asyncio
+    async def test_empty_task_description_does_not_consume_budget(self):
+        """Validation rejection (empty task) must not reserve a budget slot."""
+        from tools.subagent_tool import SubAgentTool
+
+        client = _make_llm_client()
+        tool = SubAgentTool(
+            llm_client=client,
+            available_tools={"search": _make_tool("search")},
+            max_calls_per_task=1,
+        )
+
+        result = await tool.execute(task_description="")
+        assert "task_description is required" in result
+        assert tool._call_count == 0  # no slot consumed for invalid input

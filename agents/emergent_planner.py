@@ -126,6 +126,7 @@ class EmergentPlannerAgent(BaseAgent):
                 max_iterations=self.max_iterations,
                 tool_router=self.tool_router,
                 context_manager=self.context_manager,
+                agent_name="EmergentPlannerAgent",  # Wave C #7: dynamic SubAgent parent attribution
             )
             logger.info("[EmergentPlanner] Using unified ReActEngine (v6.0)")
         else:

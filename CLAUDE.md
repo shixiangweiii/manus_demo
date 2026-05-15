@@ -28,7 +28,7 @@ Any ReAct path (when SUBAGENT_ENABLED=true) → can call "subagent" tool → Sub
 
 - **`main.py`** parses `sys.argv` directly (not `argparse`). Verbose flag: `"--verbose" in sys.argv or "-v" in sys.argv`. Positional args joined as task string after filtering flags.
 - **Interactive mode** (`run_interactive()`) creates one `LLMClient` + `OrchestratorAgent` instance for the entire session — long-term memory accumulates across multiple tasks within a session. Quit commands: "quit", "exit", "q".
-- **Base tools** registered in `main.py`: `WebSearchTool`, `CodeExecutorTool`, `FileOpsTool`, `ShellTool`, `FetchUrlTool`. `SubAgentTool` is injected by `OrchestratorAgent.__init__()` when `SUBAGENT_ENABLED=true`, not in main.py's tool list.
+- **Base tools** registered in `main.py` (both single-task and interactive paths): `WebSearchTool`, `FetchUrlTool`, `UserLocationTool`, `CodeExecutorTool`, `FileOpsTool`, `ShellTool`. `SubAgentTool` is injected by `OrchestratorAgent.__init__()` when `SUBAGENT_ENABLED=true`, not in main.py's tool list.
 - **`on_event` callback** in `main.py` handles 30+ event types with Rich console rendering. All event rendering logic lives here.
 - **Logging suppression**: `setup_logging()` sets `httpx`, `openai`, `httpcore` loggers to WARNING level; `OtelDetachFilter` suppresses OTel detach errors.
 
@@ -49,7 +49,7 @@ Any ReAct path (when SUBAGENT_ENABLED=true) → can call "subagent" tool → Sub
 - **`dag/`** — TaskDAG (graph + topological sort + ready-node detection + dynamic mutation), DAGExecutor (super-step parallel loop), NodeStateMachine (enforces legal status transitions)
 - **`react/`** — ReActEngine (sole ReAct loop implementation; v12 removed legacy `_react_loop`; runs independent tool_calls concurrently via `asyncio.gather`)
 - **`llm/`** — LLMClient (OpenAI-compatible async wrapper with retry + centralized per-call token tracking)
-- **`tools/`** — BaseTool ABC, WebSearchTool (v11: Bailian MCP primary + DDGS fallback; v12: parses `{pages, tools}` Bailian object structure), FetchUrlTool (v11: Bailian WebParser MCP), CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool (v9 meta-tool), ToolRouter (per-node failure tracking; v12: success/failure decided after Error: detection), BailianMCPClient (v11: MCP Streamable HTTP client; v12: extracts ExceptionGroup sub-exceptions, single source of timeout truth), subprocess_utils (shared sandbox runner)
+- **`tools/`** — BaseTool ABC, WebSearchTool (v11: Bailian MCP primary + DDGS fallback; v12: parses `{pages, tools}` Bailian object structure), FetchUrlTool (v11: Bailian WebParser MCP), UserLocationTool (env > memory file > IP geolocation fallback chain; deliberately does NOT use system timezone, since IANA zones are not geographic identifiers), CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool (v9 meta-tool), ToolRouter (per-node failure tracking; v12: success/failure decided after Error: detection), BailianMCPClient (v11: MCP Streamable HTTP client; v12: extracts ExceptionGroup sub-exceptions, single source of timeout truth), subprocess_utils (shared sandbox runner)
 - **`tracing/`** — OpenTelemetry observability: TracingBridge (event→span), provider (TracerProvider setup), spans (span creation helpers), multi-backend exporters, FastAPI web viewer with Jinja2 templates (left-right split detail page), @traced decorator
 - **`memory/`** — ShortTermMemory (sliding-window), LongTermMemory (JSON-file persistence + keyword search)
 - **`context/`** — ContextManager (token estimation including assistant.tool_calls + LLM-based compression with safe split boundary)
@@ -128,6 +128,8 @@ All config via env vars / `.env` file (see `config.py` for full list). Most comm
 | `LLM_BASE_URL` | `https://api.deepseek.com/v1` | API endpoint (supports Ollama/Qwen/etc.) |
 | `LLM_MODEL` | `deepseek-chat` | Model name |
 | `DASHSCOPE_API_KEY` | — | Bailian MCP auth key (v11; absent → web_search uses DDGS fallback, fetch_url returns Error) |
+| `USER_LOCATION` | — | Explicit city for `user_location` tool (highest priority in fallback chain) |
+| `LOCATION_IP_LOOKUP_ENABLED` | `true` | Whether `user_location` may call public IP APIs (ipapi.co + ip.sb) when env/memory miss |
 | `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
 | `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 goal-driven engine within emergent path |
 | `SUBAGENT_ENABLED` | `false` | v9 SubAgent master switch |

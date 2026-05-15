@@ -38,6 +38,7 @@ class ToolStats:
     calls: int = 0              # 总调用次数
     failures: int = 0           # 失败次数
     consecutive_failures: int = 0  # 连续失败次数（成功后重置）
+    rate_limited: int = 0       # 业务限流次数（与 failures 分离，不计入失败阈值判定）
 
     @property
     def success_rate(self) -> float:
@@ -98,6 +99,19 @@ class ToolRouter:
         logger.info("[ToolRouter] %s/%s: failure #%d (consecutive: %d, threshold: %d)",
                     node_id, tool_name, stats.failures, stats.consecutive_failures, self._threshold)
 
+    def record_rate_limited(self, node_id: str, tool_name: str) -> None:
+        """Record a rate-limited (business) rejection — distinct from tool failure.
+
+        SubAgent 调用次数上限等业务限流不应进入 failure 桶，否则 ToolRouter 会
+        在多次限流后误把工具列入 failing_tools 名单并建议替代工具。该方法只
+        递增 rate_limited 计数，不动 calls/failures/consecutive_failures，
+        从而保留 failure-threshold 语义。
+        """
+        stats = self._get_stats(node_id, tool_name)
+        stats.rate_limited += 1
+        logger.info("[ToolRouter] %s/%s: rate-limited #%d (not counted as failure)",
+                    node_id, tool_name, stats.rate_limited)
+
     def should_suggest_alternative(self, node_id: str, tool_name: str) -> bool:
         """Check if consecutive failures have exceeded the threshold.
         检查连续失败次数是否超过阈值。"""
@@ -156,6 +170,7 @@ class ToolRouter:
                 "calls": s.calls,
                 "failures": s.failures,
                 "consecutive_failures": s.consecutive_failures,
+                "rate_limited": s.rate_limited,
                 "success_rate": f"{s.success_rate:.0%}",
             }
             for tool_name, s in self._stats[node_id].items()

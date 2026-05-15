@@ -120,6 +120,9 @@ class TracingBridge:
             "subagent_complete": self._on_subagent_complete,
             "subagent_failed": self._on_subagent_failed,
             "subagent_timed_out": self._on_subagent_timed_out,
+            # Wave C #6/#12: previously unconsumed SubAgent events
+            "subagent_limit_exceeded": self._on_subagent_limit_exceeded,
+            "subagent_iteration": self._on_subagent_iteration,
         }
 
     def on_event(self, event: str, data: Any = None) -> None:
@@ -870,6 +873,46 @@ class TracingBridge:
                     otel_context.detach(token)
                 except (ValueError, Exception):
                     pass
+
+    def _on_subagent_limit_exceeded(self, data: Any) -> None:
+        """Wave C #6: record limit-exceeded as event on the active phase span.
+
+        Don't open a new span — this is a synchronous rejection, not a
+        long-running phase. If no phase span is active, fall back to logging.
+        """
+        if not isinstance(data, dict):
+            return
+        attrs = {
+            "call_count": int(data.get("call_count", 0)),
+            "max_calls": int(data.get("max_calls", 0)),
+        }
+        try:
+            target_span = self._phase_span or self._root_span
+            if target_span is not None:
+                target_span.add_event("subagent_limit_exceeded", attributes=attrs)
+            else:
+                logger.info("[TracingBridge] subagent_limit_exceeded (no active span): %s", attrs)
+        except Exception:
+            logger.debug("[TracingBridge] failed to record subagent_limit_exceeded", exc_info=True)
+
+    def _on_subagent_iteration(self, data: Any) -> None:
+        """Wave C #12: record SubAgent ReAct iteration as a span event.
+
+        OTel best-practice: use add_event for periodic milestones rather than
+        creating a child span per iteration (would explode the trace).
+        """
+        if not isinstance(data, dict):
+            return
+        subagent_id = data.get("subagent_id", "unknown")
+        if subagent_id in self._subagent_spans:
+            span, _ = self._subagent_spans[subagent_id]
+            try:
+                span.add_event("iteration", attributes={
+                    "iteration": int(data.get("iteration", 0)),
+                    "tool_calls_count": int(data.get("tool_calls_count", 0)),
+                })
+            except Exception:
+                logger.debug("[TracingBridge] failed to record subagent iteration", exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers

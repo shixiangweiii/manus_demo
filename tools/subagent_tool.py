@@ -48,7 +48,7 @@ class SubAgentTool(BaseTool):
         subagent_timeout: int | None = None,
         max_calls_per_task: int | None = None,
         max_tokens_per_call: int | None = None,
-        parent_name: str = "OrchestratorAgent",  # TODO: should be determined at runtime (actual LLM caller is ExecutorAgent/EmergentPlannerAgent/GoalDrivenPlannerAgent)
+        parent_name: str = "OrchestratorAgent",  # Default; ReActEngine overrides via set_caller() per-call
     ):
         self._llm_client = llm_client
         self._available_tools = available_tools
@@ -61,6 +61,9 @@ class SubAgentTool(BaseTool):
         self._parent_name = parent_name
         self._subagent_counter = 0
         self._call_count = 0
+        # Wave B #5: limit concurrent SubAgent runs (was declared in config but never enforced)
+        # 实施 SUBAGENT_MAX_CONCURRENT 信号量限流（v9 配置存在但未启用）
+        self._semaphore = asyncio.Semaphore(config.SUBAGENT_MAX_CONCURRENT)
 
     @property
     def name(self) -> str:
@@ -124,8 +127,15 @@ class SubAgentTool(BaseTool):
         if not task_description:
             return "Error: task_description is required for subagent tool."
 
+        # Wave B #4: reserve budget atomically BEFORE any await.
+        # In single-threaded asyncio, the (check + reserve) above is race-free
+        # as long as no `await` sits between them. Failures DO NOT refund the
+        # slot — repeated SubAgent crashes must not bypass the budget.
+        # 检查与预扣在同一同步段内完成；失败不退款，避免崩溃→重试无限循环。
+        self._call_count += 1
+
         logger.info("[SubAgentTool] Spawning SubAgent (call #%d/%d) for task: '%s'",
-                    self._call_count + 1, self._max_calls, task_description[:100])
+                    self._call_count, self._max_calls, task_description[:100])
 
         tool_whitelist = kwargs.get("tool_whitelist", [])
 
@@ -196,8 +206,11 @@ class SubAgentTool(BaseTool):
                 sandbox_subdir=sandbox_subdir,
             )
 
-            result: SubAgentResult = await subagent.run(context="")
-            self._call_count += 1
+            # Wave B #5: only the expensive SubAgent.run() is gated by Semaphore;
+            # whitelist validation / sandbox creation above already ran in parallel.
+            # 信号量只 wrap 真正昂贵的 ReAct 循环；快路径不挤占并发槽。
+            async with self._semaphore:
+                result: SubAgentResult = await subagent.run(context="")
 
             logger.info("[SubAgentTool] SubAgent-%d completed: status=%s, iterations=%d, tokens=%d, duration=%.0fms, artifacts=%s",
                         self._subagent_counter, result.status.value, result.iterations_used,
@@ -213,7 +226,7 @@ class SubAgentTool(BaseTool):
         except asyncio.TimeoutError:
             # Outer timeout fallback — normally handled by SubAgent.run() internally
             # 外层超时兜底 — 正常由 SubAgent.run() 内部处理
-            self._call_count += 1
+            # Wave B #4: budget already reserved at top — no refund on failure.
             logger.warning("[SubAgentTool] SubAgent-%d outer timeout after %ds",
                            self._subagent_counter, self._timeout)
             error_summary = {
@@ -226,7 +239,7 @@ class SubAgentTool(BaseTool):
             return json.dumps(error_summary, ensure_ascii=False)
 
         except Exception as exc:
-            self._call_count += 1
+            # Wave B #4: budget already reserved at top — no refund on failure.
             logger.error("[SubAgentTool] SubAgent execution failed: %s", exc, exc_info=True)
             error_summary = {
                 "accomplished": "",
@@ -243,3 +256,16 @@ class SubAgentTool(BaseTool):
                      self._call_count, self._subagent_counter)
         self._call_count = 0
         self._subagent_counter = 0
+
+    def set_caller(self, name: str) -> None:
+        """Wave C #7: ReActEngine calls this immediately before traced_execute()
+        to inject the actual caller agent's name. asyncio single-threaded model
+        guarantees no other task interleaves between set_caller and the
+        synchronous prologue of execute() that captures self._parent_name into
+        a local variable for the SubAgent constructor.
+
+        ReActEngine 在每次工具调用前同步注入实际 caller 的名称，
+        替换硬编码的 'OrchestratorAgent'，让 tracing/eval 准确归因。
+        """
+        if name:
+            self._parent_name = name

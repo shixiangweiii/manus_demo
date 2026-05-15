@@ -194,6 +194,10 @@ class TaskEvaluationResult(BaseModel):
     execution_score: float = 0.0                # 执行评分 (0-1)
     efficiency_score: float = 0.0               # 效率评分 (0-1)
 
+    # v9 SubAgent metrics (Wave C #9: previously collected but unused)
+    # 子智能体相关指标（采集后聚合，便于评估 SubAgent 路径的 ROI）
+    subagent_metrics: dict[str, Any] = Field(default_factory=dict)
+
     # Metadata
     run_timestamp: float = Field(default_factory=time.time)
     llm_model: str = ""                         # 使用的 LLM 模型名

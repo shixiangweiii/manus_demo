@@ -94,6 +94,7 @@ class ExecutorAgent(BaseAgent):
             max_iterations=self.max_iterations,
             tool_router=self.tool_router,
             context_manager=self.context_manager,
+            agent_name="ExecutorAgent",  # Wave C #7: dynamic SubAgent parent attribution
         )
         logger.info("[Executor] Using unified ReActEngine")
 

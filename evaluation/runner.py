@@ -123,6 +123,8 @@ class EvaluationProbe:
 
         # v9 SubAgent specifics (anti-pattern #10 defense)
         self.subagent_results: list[dict] = []
+        # Wave C #6: count of times the subagent call-limit was hit
+        self.subagent_limits_hit: int = 0
 
         # Phase tracking
         self._phase_started: dict[str, float] = {}
@@ -316,6 +318,10 @@ class EvaluationProbe:
                 "tool_calls_count": data.get("tool_calls_count", 0),
             })
 
+        elif event == "subagent_limit_exceeded":
+            # Wave C #6: previously this event had no eval consumer
+            self.subagent_limits_hit += 1
+
     def build_result(
         self,
         task: BenchmarkTask,
@@ -432,6 +438,24 @@ class EvaluationProbe:
         efficiency_score = compute_efficiency_score(efficiency, execution)
         overall_score = compute_overall_score(planning_score, execution_score, efficiency_score, reflection)
 
+        # Wave C #9: aggregate SubAgent metrics from collected subagent_results
+        # (previously appended in _handle_event but never surfaced in result)
+        # 聚合 SubAgent 调用维度指标，让评估输出能反映 SubAgent 路径的实际产出
+        sa = self.subagent_results
+        sa_total = len(sa)
+        sa_succ = sum(1 for r in sa if r.get("status") == "completed")
+        subagent_metrics: dict[str, Any] = {}
+        if sa_total > 0 or self.subagent_limits_hit > 0:
+            subagent_metrics = {
+                "count": sa_total,
+                "success_rate": (sa_succ / sa_total) if sa_total else 1.0,
+                "tokens_total": sum(int(r.get("tokens_used", 0) or 0) for r in sa),
+                "avg_iterations": (
+                    sum(int(r.get("iterations_used", 0) or 0) for r in sa) / sa_total
+                ) if sa_total else 0.0,
+                "limits_hit": self.subagent_limits_hit,
+            }
+
         return TaskEvaluationResult(
             task_id=task.task_id,
             task_description=task.task_description,
@@ -447,6 +471,7 @@ class EvaluationProbe:
             execution_score=execution_score,
             efficiency_score=efficiency_score,
             llm_model=llm_model,
+            subagent_metrics=subagent_metrics,
             config_snapshot={
                 "plan_mode": forced_mode.value,
                 "max_react_iterations": getattr(config, 'MAX_REACT_ITERATIONS', None),

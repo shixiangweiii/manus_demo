@@ -409,7 +409,7 @@ def on_event(event: str, data: Any) -> None:
     elif event == "subagent_complete":
         console.print(
             f"    [green][SubAgent][/green] {data['subagent_id']} completed "
-            f"({data['iterations']} iters, {data.get('tokens_used', 0)} tokens, {data['duration_ms']:.0f}ms)"
+            f"({data.get('iterations_used', 0)} iters, {data.get('tokens_used', 0)} tokens, {data.get('duration_ms', 0):.0f}ms)"
         )
         try:
             import json as _json
@@ -432,6 +432,18 @@ def on_event(event: str, data: Any) -> None:
         console.print(
             f"    [red][SubAgent][/red] {data['subagent_id']} TIMED OUT "
             f"after {data['timeout']}s"
+        )
+    elif event == "subagent_limit_exceeded":
+        # Wave C #6: previously this event had no UI consumer (silent rate-limit)
+        console.print(
+            f"    [yellow][SubAgent][/yellow] limit exceeded "
+            f"({data.get('call_count', 0)}/{data.get('max_calls', 0)})"
+        )
+    elif event == "subagent_iteration":
+        # Wave C #12: dim mid-execution progress so the user can see SubAgent activity
+        console.print(
+            f"      [dim][SubAgent][/dim] {data.get('subagent_id', '?')} "
+            f"iter {data.get('iteration', 0)} ({data.get('tool_calls_count', 0)} tool calls)"
         )
 
     elif event == "task_complete":

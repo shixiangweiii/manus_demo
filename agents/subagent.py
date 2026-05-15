@@ -24,6 +24,7 @@ import time
 from typing import Any, Callable
 
 import config
+from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from llm.client import LLMClient
 from pydantic import ValidationError
@@ -135,8 +136,14 @@ class SubAgent:
         self.parent_agent_name = parent_agent_name
         self.sandbox_subdir = sandbox_subdir
 
-        # Build system prompt with optional sandbox isolation hint
-        system_prompt = SUBAGENT_SYSTEM_PROMPT
+        # Build system prompt with v12 context injection (date/time) + optional sandbox isolation
+        # inject_subagent_guidance=False because depth=1 — SubAgent cannot spawn further SubAgents
+        # 用 build_system_prompt 注入 v12 日期/时间上下文；depth=1 故不再附加 SubAgent 引导
+        system_prompt = build_system_prompt(
+            SUBAGENT_SYSTEM_PROMPT,
+            inject_context=True,
+            inject_subagent_guidance=False,
+        )
         if sandbox_subdir:
             system_prompt += f"\n9. Your working directory is {sandbox_subdir}. All file operations must be within this directory.\n   你的工作目录是 {sandbox_subdir}，所有文件操作应在此目录下进行。"
 
@@ -151,6 +158,7 @@ class SubAgent:
             max_iterations=max_iterations or config.SUBAGENT_MAX_ITERATIONS,
             tool_router=tool_router,
             context_manager=context_manager or ContextManager(),
+            agent_name=name,  # Wave C #7: SubAgent's own name (e.g. "SubAgent-1") for tool attribution
         )
 
         # For summary generation
@@ -176,9 +184,24 @@ class SubAgent:
             logger.debug("[SubAgent] Event callback error for '%s'", event, exc_info=True)
 
     def _on_react_iteration(self, iteration: int, tool_calls: list[ToolCallRecord]) -> None:
-        """ReAct iteration callback — accumulate tool calls and check token budget."""
+        """ReAct iteration callback — snapshot tool calls and check token budget.
+
+        ReAct engine passes the **cumulative** tool_calls_log (engine.py:194,285),
+        not a delta. Use shallow copy to snapshot it; using extend() here would
+        cause quadratic growth (iteration N produces N(N+1)/2 entries).
+        """
         self._iterations_so_far = iteration
-        self._accumulated_tool_calls.extend(tool_calls)
+        self._accumulated_tool_calls = list(tool_calls)
+
+        # Wave C #12: emit progress event so UI/Tracing/Eval can observe
+        # SubAgent's internal ReAct iterations rather than seeing only
+        # start/complete bookends.
+        # 发出迭代进度事件，让观察者看到 SubAgent 内部 ReAct 进展。
+        self._emit("subagent_iteration", {
+            "subagent_id": self.name,
+            "iteration": iteration,
+            "tool_calls_count": len(tool_calls),
+        })
 
         # Anti-pattern #8: per-call token budget check (index range method)
         records = self.llm_client.get_call_records()
@@ -300,6 +323,7 @@ class SubAgent:
                     "iterations_used": iterations_used,
                     "tool_calls_count": result.tool_calls_count,
                     "duration_ms": result.duration_ms,
+                    "tokens_used": tokens_used,
                 })
 
             return result
@@ -340,6 +364,7 @@ class SubAgent:
                 "iterations_used": self._iterations_so_far,
                 "tool_calls_count": len(self._accumulated_tool_calls),
                 "duration_ms": result.duration_ms,
+                "tokens_used": tokens_used,
             })
 
             return result
@@ -380,6 +405,7 @@ class SubAgent:
                 "iterations_used": self._iterations_so_far,
                 "tool_calls_count": len(self._accumulated_tool_calls),
                 "duration_ms": result.duration_ms,
+                "tokens_used": tokens_used,
             })
 
             return result
@@ -421,6 +447,7 @@ class SubAgent:
                 "iterations_used": self._iterations_so_far,
                 "tool_calls_count": len(self._accumulated_tool_calls),
                 "duration_ms": result.duration_ms,
+                "tokens_used": tokens_used,
             })
 
             return result

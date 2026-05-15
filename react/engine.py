@@ -71,10 +71,17 @@ class ReActEngine:
         max_iterations: int | None = None,
         tool_router: ToolRouter | None = None,
         context_manager: ContextManager | None = None,
+        agent_name: str = "",
     ):
         self.llm_client = llm_client
         self.context_manager = context_manager
         self.max_iterations = max_iterations or getattr(config, 'MAX_REACT_ITERATIONS', 10)
+        # Wave C #7: name of the agent owning this engine — propagated to tools
+        # via tool.set_caller(name) right before each traced_execute call so that
+        # SubAgentTool can correctly attribute parent_agent in tracing.
+        # 拥有此引擎的 Agent 名称——在每次 tool 执行前通过 set_caller 注入，
+        # 用于 SubAgentTool 准确归因 parent_agent（替换原硬编码 OrchestratorAgent）。
+        self.agent_name = agent_name
 
         if isinstance(tools, dict):
             self.tools = tools
@@ -204,7 +211,7 @@ class ReActEngine:
             # asyncio.gather; results are then processed in original order to
             # preserve assistant.tool_calls ↔ tool messages alignment required
             # by the OpenAI protocol.
-            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool]:
+            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool, bool]:
                 fn_name = tc.function.name
                 try:
                     fn_args = json.loads(tc.function.arguments)
@@ -213,13 +220,26 @@ class ReActEngine:
                 logger.info("[ReActEngine] Tool call: %s(%s)", fn_name, fn_args)
                 t = self.tools.get(fn_name)
                 if t is None:
-                    return tc, fn_name, fn_args, f"Error: Unknown tool '{fn_name}'", True
+                    return tc, fn_name, fn_args, f"Error: Unknown tool '{fn_name}'", True, False
+                # Wave C #7: notify the tool of its caller (sync, no await) so
+                # SubAgentTool / similar tools can attribute correctly. asyncio
+                # single-threaded model guarantees no preemption between this
+                # set_caller and the synchronous prologue of traced_execute.
+                # set_caller→execute 之间无 await，asyncio 单线程下原子。
+                if self.agent_name and hasattr(t, "set_caller"):
+                    try:
+                        t.set_caller(self.agent_name)
+                    except Exception:
+                        logger.debug("[ReActEngine] set_caller failed for %s", fn_name, exc_info=True)
                 try:
                     res = await t.traced_execute(**fn_args)
                     err = isinstance(res, str) and res.startswith("Error:")
-                    return tc, fn_name, fn_args, res, err
+                    # Distinguish business rate-limit (e.g. SubAgent call cap)
+                    # from real tool failure — see tools/router.record_rate_limited.
+                    rate_limited = err and isinstance(res, str) and "SubAgent call limit reached" in res
+                    return tc, fn_name, fn_args, res, err, rate_limited
                 except Exception as exc:
-                    return tc, fn_name, fn_args, f"Error: Tool execution error: {exc}", True
+                    return tc, fn_name, fn_args, f"Error: Tool execution error: {exc}", True, False
 
             executions = await asyncio.gather(
                 *(_exec_one(tc) for tc in response_msg.tool_calls)
@@ -228,10 +248,14 @@ class ReActEngine:
             tool_messages: list[dict[str, Any]] = []
             truncation_limit = config.TOOL_RESULT_TRUNCATION_LIMIT
 
-            for tool_call, func_name, func_args, result, is_error in executions:
+            for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
                 # Single ToolRouter accounting point — record after error detection
                 # so that Error:-prefixed returns are counted as failures (not successes).
-                if is_error:
+                # Three-state precedence: rate_limited > error > success.
+                # 业务限流（如 SubAgent 调用上限）单独入桶，不污染 failure 阈值。
+                if is_rate_limited:
+                    self.tool_router.record_rate_limited(str(step_id), func_name)
+                elif is_error:
                     self.tool_router.record_failure(str(step_id), func_name)
                 else:
                     self.tool_router.record_success(str(step_id), func_name)
