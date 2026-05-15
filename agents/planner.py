@@ -71,6 +71,18 @@ Rules:
 3. Order steps logically; specify dependencies if a step requires output
    from a prior step.
 4. Keep step descriptions clear and specific.
+5. IMPLICIT DATA: If the task requires information not directly provided
+   by the user (e.g., today's date, current location, user preferences),
+   create a dedicated step to OBTAIN it via tools. Do NOT make assumptions
+   about such data — discover it explicitly.
+6. NO UNAUTHORIZED ASSUMPTIONS: Never invent default values for
+   unspecified data (e.g., do not assume "Beijing" if location is
+   unspecified). If real data cannot be obtained after reasonable
+   attempts, the step should return a clear "data unavailable" message
+   — never fabricate.
+7. LANGUAGE: Write step descriptions in the SAME language as the user's
+   task. If the user's task is in Chinese, write step descriptions in
+   Chinese. This ensures downstream agents respond consistently.
 
 You MUST respond with a valid JSON object in this exact format:
 {
@@ -494,7 +506,14 @@ class PlannerAgent(BaseAgent):
         prompt += (
             "\nCreate a NEW plan for the REMAINING work. "
             "Do not repeat already-completed steps. "
-            "Account for the feedback and any failures."
+            "Account for the feedback and any failures.\n\n"
+            "IMPORTANT: In your new plan's \"dependencies\" fields, only "
+            "reference step IDs that you DEFINE in THIS new plan. Do NOT "
+            "reference step IDs from the 'Completed steps so far' list "
+            "above — those steps are already done and their IDs do not "
+            "exist in the new plan. The new plan is self-contained.\n"
+            "Also: do NOT reuse IDs from completed steps for new steps — "
+            "pick fresh IDs (e.g., if completed had 1, 2, start new at 3)."
         )
 
         logger.info("[Planner] Re-planning (v1) task: %s", task[:80])

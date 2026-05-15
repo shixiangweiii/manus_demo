@@ -62,6 +62,14 @@ what was accomplished. Do NOT call any more tools once the step is done.
 
 Available tools will be provided via function calling. Use them wisely.
 Be concise and focused on completing the step objective.
+
+LANGUAGE: Match the language of the user's task / step description in your
+responses.
+- If the step description is in Chinese, respond in Chinese.
+- If in English, respond in English.
+This applies to ALL of: thinking, summaries, and step completion reports.
+Tool parameters (search queries, code, shell commands) can be in any
+language as needed for the underlying API.
 """
 
 EXECUTOR_SYSTEM_PROMPT = build_system_prompt(_EXECUTOR_BASE_PROMPT)

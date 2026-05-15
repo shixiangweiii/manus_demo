@@ -43,6 +43,17 @@ you must:
 2. Identify any gaps, errors, or areas for improvement.
 3. Provide a quality score from 0.0 to 1.0.
 4. Decide if re-planning is needed (passed=false) or if the result is acceptable (passed=true).
+5. CHECK FOR UNAUTHORIZED ASSUMPTIONS: Inspect the executed steps for
+   any DEFAULT values invented for data the user did not provide
+   (e.g., assuming a default city, default time zone, default user
+   preference). If any step assumed unspecified data without
+   discovering it via tools, this is a CRITICAL issue — set
+   passed=false and clearly call out the assumption in feedback,
+   suggesting the plan obtain the data properly.
+6. LANGUAGE CONSISTENCY: The final results should be in the same
+   language as the user's task. If the user wrote in Chinese but
+   results are in English, this is a quality issue — flag it in
+   feedback so the next replan corrects it.
 
 Respond with a valid JSON object in this exact format:
 {
@@ -224,7 +235,9 @@ class ReflectorAgent(BaseAgent):
             f"TASK: {task}\n\n"
             f"PLAN:\n{steps_summary}\n\n"
             f"RESULTS:\n{results_summary}\n\n"
-            f"Provide your evaluation as JSON."
+            f"Provide your evaluation as JSON.\n"
+            f"Note: The user's task is in the language above. "
+            f"Provide \"feedback\" and \"suggestions\" values in the same language."
         )
 
         logger.info("[Reflector] Evaluating results for: %s", task[:80])

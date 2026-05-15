@@ -76,6 +76,11 @@ SUBPROCESS_MAX_OUTPUT_BYTES = int(os.getenv("SUBPROCESS_MAX_OUTPUT_BYTES", str(5
 SHELL_MAX_CONCURRENT = int(os.getenv("SHELL_MAX_CONCURRENT", "3"))                    # 最大并发 Shell 子进程数
 CODE_MAX_CONCURRENT = int(os.getenv("CODE_MAX_CONCURRENT", "3"))                      # 最大并发代码执行子进程数
 
+# --- Web Search (v10) ---
+# --- 网络搜索（v10：基于 DDGS/DuckDuckGo 的真实搜索）---
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))  # 单次搜索返回最大结果数
+WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "15"))         # 单次搜索超时（秒）
+
 # --- v6.0 Feature Flags (向后兼容，默认关闭) ---
 # --- ReAct Engine ---
 ENABLE_REACT_ENGINE_V2 = os.getenv("ENABLE_REACT_ENGINE_V2", "false").lower() == "true"  # 使用抽取后的统一 ReActEngine

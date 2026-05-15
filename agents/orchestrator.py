@@ -300,8 +300,12 @@ class OrchestratorAgent:
                     continue
 
                 # 依赖检查：若依赖步骤未成功完成，标记为 SKIPPED
+                # 修复 v1 跨轮 dep bug：replan 后新 plan 可能引用先前 attempt 的 step ID,
+                # 必须从 all_results(跨 attempt 累积)中获取已成功完成的 ID,
+                # 而不仅仅看当前 plan.steps（参考 plan 文件 修复 5 设计）
                 if step.dependencies:
-                    completed_ids = {s.id for s in plan.steps if s.status == StepStatus.COMPLETED}
+                    completed_ids = {r.step_id for r in all_results if r.success}
+                    completed_ids.update(s.id for s in plan.steps if s.status == StepStatus.COMPLETED)
                     unmet_deps = [d for d in step.dependencies if d not in completed_ids]
                     if unmet_deps:
                         step.status = StepStatus.SKIPPED
@@ -347,7 +351,7 @@ class OrchestratorAgent:
             self._emit("reflection", reflection)
 
             if reflection.passed:
-                return self._compile_answer(task, all_results)
+                return await self._compile_answer(task, all_results)
 
             if attempt < self.max_replan:
                 self._emit("phase", f"Re-planning based on feedback (attempt {attempt + 2})...")
@@ -367,20 +371,95 @@ class OrchestratorAgent:
                 all_results = preserved + (failed[-1:] if failed else [])
             else:
                 logger.warning("Max re-plan attempts reached. Returning best effort.")
-                return self._compile_answer(task, all_results)
+                return await self._compile_answer(task, all_results)
 
         return "Task could not be completed after maximum attempts."
 
-    @staticmethod
-    def _compile_answer(task: str, results: list[StepResult]) -> str:
+    async def _compile_answer(self, task: str, results: list[StepResult]) -> str:
         """
         Compile step results into a coherent final answer (v1 path).
         将各步骤结果汇编为连贯的最终回答（v1 路径）。
+
+        修复 6: 改造为异步实例方法 + LLM 最终合成,以确保:
+          - 最终答案与用户任务语言一致(中文任务输出中文)
+          - 诚实报告失败/未授权假设(不假装成功)
+          - evaluation/runner.py 失败标记保留("无法完成"/"could not complete")
         """
         successful = [r for r in results if r.success]
         if not successful:
-            return "Unfortunately, no steps completed successfully."
-        return "\n\n".join(r.output for r in successful)
+            return await self._synthesize_failure_answer(task)
+
+        raw = "\n\n".join(r.output for r in successful)
+        return await self._synthesize_final_answer(task, raw)
+
+    async def _synthesize_final_answer(self, task: str, raw_results: str) -> str:
+        """
+        Synthesize a final user-facing answer in the user's language.
+        把多步原始输出合成为面向用户的最终答案,并对齐用户语言。
+        """
+        # 防御性截断:避免 prompt 过长(LLM 上下文成本控制)
+        truncated = raw_results[:8000] if len(raw_results) > 8000 else raw_results
+        prompt = (
+            "Synthesize a final, user-facing answer based on the execution "
+            "results below.\n\n"
+            f"User's original task: {task}\n\n"
+            f"Step results (raw):\n{truncated}\n\n"
+            "Requirements:\n"
+            "1. Respond in the SAME language as the user's task.\n"
+            "2. If the steps did not yield a satisfying answer, say so HONESTLY "
+            "   — do NOT fabricate or guess. If responding in Chinese, include "
+            "   the phrase '无法完成' or '未能完成'; in English include "
+            "   'could not complete' or similar.\n"
+            "3. If any step assumed default values for unspecified data "
+            "   (e.g., a default city), explicitly note this caveat to the user.\n"
+            "4. Be concise and directly address the user's question."
+        )
+        try:
+            return await self.llm_client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Orchestrator] Final answer synthesis failed: %s. "
+                "Falling back to raw concat with marker.", exc,
+            )
+            # 不静默吞失败:附加显式标记,便于运维/调试感知
+            return (
+                f"{raw_results}\n\n"
+                f"[Note: Final answer synthesis failed ({exc.__class__.__name__}); "
+                f"raw concatenated step results shown above.]"
+            )
+
+    async def _synthesize_failure_answer(self, task: str) -> str:
+        """
+        Generate an honest failure message in the user's task language.
+        所有 step 都失败时,生成符合用户语言的诚实失败说明。
+
+        必须保证返回内容包含 evaluation/runner.py 识别的失败标记:
+          - 中文任务: 含 '无法完成'
+          - 英文任务: 含 'could not complete'
+        """
+        prompt = (
+            f"The user asked: {task}\n\n"
+            "All execution steps failed. Write a brief, honest message to the "
+            "user in their task language explaining that the request could "
+            "not be completed.\n\n"
+            "REQUIREMENTS:\n"
+            "1. If the user's task is in Chinese, respond in Chinese AND "
+            "   include the phrase '无法完成'.\n"
+            "2. If the user's task is in English, respond in English AND "
+            "   include the phrase 'could not complete'.\n"
+            "3. Do NOT fabricate an answer. Be concise."
+        )
+        try:
+            return await self.llm_client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+        except Exception:
+            # 双语兜底,确保 evaluation runner 识别失败状态
+            return "无法完成 / could not complete: all execution steps failed."
 
     # ------------------------------------------------------------------
     # Emergent Planning execution (v5 path)
