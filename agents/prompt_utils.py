@@ -35,6 +35,32 @@ def get_subagent_guidance() -> str:
     return ""
 
 
+# Location tool usage guidance (always injected when location tool is registered)
+# 用户位置工具使用引导（始终注入，引导 LLM 在需要位置时主动调用工具而非臆造默认值）
+_LOCATION_GUIDANCE = """
+
+## Tool Selection: When to Use the "get_user_location" Tool
+
+Some tasks (weather, local time, nearby restaurants, news, etc.) require
+the user's current city. The user often does not state it explicitly.
+In that case:
+- Call get_user_location BEFORE making any assumption about the city.
+- Use the returned city verbatim in subsequent steps.
+- If the tool returns "Error: ...", ask the user for their city or
+  state clearly that location is unknown — do NOT invent a default
+  (no "默认北京", no "default to capital", no fabricated city).
+
+DO NOT call get_user_location for tasks that do not depend on location
+(coding help, math, general Q&A, file operations on local sandbox).
+"""
+
+
+def get_location_guidance() -> str:
+    """Return the get_user_location tool guidance string (always on).
+    返回 get_user_location 工具引导（始终启用）。"""
+    return _LOCATION_GUIDANCE
+
+
 def build_context_injection() -> str:
     """
     Build runtime context to inject into system prompts: today's date, weekday, etc.
@@ -65,14 +91,18 @@ def build_system_prompt(
     base_prompt: str,
     inject_context: bool = True,
     inject_subagent_guidance: bool = True,
+    inject_location_guidance: bool = True,
 ) -> str:
-    """Compose a system prompt with optional context injection and subagent guidance.
-    组合系统提示词，按需注入运行时上下文和子智能体引导文本。
+    """Compose a system prompt with optional context / location / subagent guidance.
+    组合系统提示词，按需注入运行时上下文、位置工具引导和子智能体引导。
 
     Args:
         base_prompt: The agent's base system prompt.
         inject_context: When True (default), append today's date/time so the LLM
             does not need to discover it via tools.
+        inject_location_guidance: When True (default), append get_user_location
+            tool usage guidance. Set False for agents that do not call tools
+            (e.g., Reflector).
         inject_subagent_guidance: When True (default), append SubAgent tool
             usage guidance (only emitted if SUBAGENT_ENABLED=true). Set False
             for agents that do not call tools (e.g., Planner, Reflector).
@@ -80,6 +110,8 @@ def build_system_prompt(
     parts = [base_prompt]
     if inject_context:
         parts.append(build_context_injection())
+    if inject_location_guidance:
+        parts.append(get_location_guidance())
     if inject_subagent_guidance:
         guidance = get_subagent_guidance()
         if guidance:

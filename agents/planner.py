@@ -189,7 +189,7 @@ You MUST respond with a valid JSON object in this exact format:
           "exit_criteria": "成功获取城市名称",
           "confidence": 0.8,
           "risk_level": "medium",
-          "fallback_strategy": "使用IP定位或默认城市",
+          "fallback_strategy": "调用位置查询工具或显式询问用户，禁止假设默认城市",
           "dependencies": [],
           "condition": null,
           "rollback": null

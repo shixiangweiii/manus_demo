@@ -1605,12 +1605,16 @@ class TestPromptUtilsModule:
             assert "subagent" in result.lower()
 
     def test_build_system_prompt_without_guidance(self):
-        """build_system_prompt() returns base unchanged when disabled."""
+        """build_system_prompt() returns base unchanged when all injections disabled."""
         from agents.prompt_utils import build_system_prompt
         base = "You are an agent."
         with patch.object(config, "SUBAGENT_ENABLED", False):
-            # Disable context injection so we can test guidance-disabled path purely
-            result = build_system_prompt(base, inject_context=False)
+            # Disable all injections so we can test the pure pass-through path
+            result = build_system_prompt(
+                base,
+                inject_context=False,
+                inject_location_guidance=False,
+            )
             assert result == base
 
     def test_guidance_has_positive_and_negative_criteria(self):
@@ -1648,7 +1652,7 @@ class TestSystemPromptComposition:
             import agents.executor as executor_mod
             importlib.reload(executor_mod)
             prompt = executor_mod.EXECUTOR_SYSTEM_PROMPT
-            assert "When to Use" not in prompt
+            assert "subagent" not in prompt.lower()
 
     def test_emergent_prompt_includes_guidance_when_enabled(self):
         """EMERGENT_PLANNER_SYSTEM_PROMPT includes subagent guidance when enabled."""
@@ -1667,7 +1671,7 @@ class TestSystemPromptComposition:
             import agents.emergent_planner as ep_mod
             importlib.reload(ep_mod)
             prompt = ep_mod.EMERGENT_PLANNER_SYSTEM_PROMPT
-            assert "When to Use" not in prompt
+            assert "subagent" not in prompt.lower()
 
     def test_goal_driven_prompt_includes_guidance_when_enabled(self):
         """V8_GOAL_DRIVEN_SYSTEM_PROMPT includes subagent guidance when enabled."""
@@ -1686,7 +1690,7 @@ class TestSystemPromptComposition:
             import agents.goal_driven_planner as gdp_mod
             importlib.reload(gdp_mod)
             prompt = gdp_mod.V8_GOAL_DRIVEN_SYSTEM_PROMPT
-            assert "When to Use" not in prompt
+            assert "subagent" not in prompt.lower()
 
     def test_base_prompts_preserved_regardless_of_flag(self):
         """Base prompt content is unchanged regardless of SUBAGENT_ENABLED."""

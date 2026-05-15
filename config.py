@@ -76,6 +76,11 @@ SUBPROCESS_MAX_OUTPUT_BYTES = int(os.getenv("SUBPROCESS_MAX_OUTPUT_BYTES", str(5
 SHELL_MAX_CONCURRENT = int(os.getenv("SHELL_MAX_CONCURRENT", "3"))                    # 最大并发 Shell 子进程数
 CODE_MAX_CONCURRENT = int(os.getenv("CODE_MAX_CONCURRENT", "3"))                      # 最大并发代码执行子进程数
 
+# --- User Location Resolution ---
+# --- 用户位置解析（fallback 链：env > memory > IP；不再使用系统时区，因 IANA zone 不是地理位置）---
+USER_LOCATION = (os.getenv("USER_LOCATION", "") or "").strip()                       # 用户显式指定的城市（最高优先级，工具内部仍以 os.getenv 直读以兼容运行时切换）
+LOCATION_IP_LOOKUP_ENABLED = os.getenv("LOCATION_IP_LOOKUP_ENABLED", "true").lower() == "true"   # 是否允许调用公网 IP 接口（ipapi.co + ip.sb fallback）推断位置；默认开启，隐私敏感用户可显式设为 false 关闭
+
 # --- Web Search (v10) ---
 # --- 网络搜索（v10：基于 DDGS/DuckDuckGo 的真实搜索）---
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))  # 单次搜索返回最大结果数

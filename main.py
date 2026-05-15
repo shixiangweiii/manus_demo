@@ -38,6 +38,7 @@ from schema import LLMCallRecord, NodeType, Plan, Reflection, Step, StepResult, 
 from tools.code_executor import CodeExecutorTool
 from tools.file_ops import FileOpsTool
 from tools.shell_tool import ShellTool
+from tools.user_location import UserLocationTool
 from tools.web_search import WebSearchTool
 from tools.fetch_url import FetchUrlTool
 
@@ -507,7 +508,7 @@ async def run_interactive() -> None:
 
     llm_client = LLMClient()
     # 注册五个工具：网络搜索、URL页面抓取、Python 代码执行、文件读写、Shell 命令执行
-    tools = [WebSearchTool(), FetchUrlTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    tools = [WebSearchTool(), FetchUrlTool(), UserLocationTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
@@ -543,7 +544,7 @@ async def run_single(task: str) -> None:
     用于 `python main.py "任务描述"` 的命令行用法。
     """
     llm_client = LLMClient()
-    tools = [WebSearchTool(), FetchUrlTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    tools = [WebSearchTool(), FetchUrlTool(), UserLocationTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
