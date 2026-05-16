@@ -139,11 +139,11 @@ class SubAgentTool(BaseTool):
 
         tool_whitelist = kwargs.get("tool_whitelist", [])
 
-        # Validate and filter tool whitelist — always exclude "subagent" (depth=1)
+        # Validate and filter tool whitelist — always exclude "subagent" (depth=1) and "ask_user" (HITL isolation)
         validated_whitelist = []
         for name in tool_whitelist:
-            if name == "subagent":
-                continue  # Structural depth=1 enforcement
+            if name in ("subagent", "ask_user"):
+                continue  # Structural depth=1 enforcement + HITL isolation
             if name in self._available_tools:
                 validated_whitelist.append(name)
             else:
@@ -155,12 +155,12 @@ class SubAgentTool(BaseTool):
             if default_whitelist:
                 for name in default_whitelist.split(","):
                     name = name.strip()
-                    if name and name != "subagent" and name in self._available_tools:
+                    if name and name not in ("subagent", "ask_user") and name in self._available_tools:
                         validated_whitelist.append(name)
             if not validated_whitelist:
                 validated_whitelist = [
                     name for name in self._available_tools.keys()
-                    if name != "subagent"
+                    if name not in ("subagent", "ask_user")
                 ]
 
         # Build restricted tool list

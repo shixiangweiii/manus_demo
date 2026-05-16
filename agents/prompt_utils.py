@@ -91,6 +91,39 @@ def get_search_guidance() -> str:
     return _SEARCH_TOOL_GUIDANCE
 
 
+# HITL tool usage guidance (injected when HITL_ENABLED=true)
+# 人机交互工具使用引导（HITL_ENABLED=true 时追加到系统提示词）
+_HITL_GUIDANCE = """
+
+## Tool Selection: When to Use the "ask_user" Tool
+
+You have access to an "ask_user" tool that lets you ask the user
+a question during execution. Use this tool ONLY when:
+- You have APPROXIMATE or ambiguous information that could lead to
+  wrong results (e.g., IP-based location that may be incorrect)
+- You need a user preference or confirmation that no tool can provide
+- The task is unclear and proceeding with assumptions would be risky
+
+DO NOT use the "ask_user" tool for:
+- Questions you can answer with other tools (web_search, etc.)
+- Routine task execution where the user's original instruction is clear
+- Repeatedly asking the same question (max 5 calls per task)
+
+When you do call ask_user, phrase your question clearly and include
+the context of what you already know. For example:
+"I found your location as Beijing via IP geolocation. Is this correct?
+If not, please tell me your city."
+"""
+
+
+def get_hitl_guidance() -> str:
+    """Return HITL guidance string if enabled, empty string otherwise.
+    HITL_ENABLED=true 时返回引导文本，否则返回空字符串。"""
+    if config.HITL_ENABLED:
+        return _HITL_GUIDANCE
+    return ""
+
+
 def build_context_injection() -> str:
     """
     Build runtime context to inject into system prompts: today's date, weekday, etc.
@@ -123,9 +156,10 @@ def build_system_prompt(
     inject_subagent_guidance: bool = True,
     inject_location_guidance: bool = True,
     inject_search_guidance: bool = True,
+    inject_hitl_guidance: bool = True,
 ) -> str:
-    """Compose a system prompt with optional context / location / search / subagent guidance.
-    组合系统提示词，按需注入运行时上下文、位置工具引导、搜索工具引导和子智能体引导。
+    """Compose a system prompt with optional context / location / search / subagent / HITL guidance.
+    组合系统提示词，按需注入运行时上下文、位置工具引导、搜索工具引导、子智能体引导和人机交互引导。
 
     Args:
         base_prompt: The agent's base system prompt.
@@ -140,6 +174,9 @@ def build_system_prompt(
         inject_subagent_guidance: When True (default), append SubAgent tool
             usage guidance (only emitted if SUBAGENT_ENABLED=true). Set False
             for agents that do not call tools (e.g., Planner, Reflector).
+        inject_hitl_guidance: When True (default), append HITL (ask_user) tool
+            usage guidance (only emitted if HITL_ENABLED=true). Set False for
+            agents that do not call tools (e.g., Planner, Reflector).
     """
     parts = [base_prompt]
     if inject_context:
@@ -152,6 +189,10 @@ def build_system_prompt(
         guidance = get_subagent_guidance()
         if guidance:
             parts.append(guidance)
+    if inject_hitl_guidance:
+        hitl_guidance = get_hitl_guidance()
+        if hitl_guidance:
+            parts.append(hitl_guidance)
     return "".join(parts)
 
 

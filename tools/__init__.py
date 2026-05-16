@@ -7,7 +7,8 @@ from .shell_tool import ShellTool
 from .subagent_tool import SubAgentTool
 from .user_location import UserLocationTool
 from .mcp_client import BailianMCPClient
+from .ask_user import AskUserTool
 
 __all__ = ["BaseTool", "WebSearchTool", "FetchUrlTool", "CodeExecutorTool",
            "FileOpsTool", "ShellTool", "SubAgentTool", "UserLocationTool",
-           "BailianMCPClient"]
+           "BailianMCPClient", "AskUserTool"]

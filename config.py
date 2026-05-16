@@ -130,6 +130,12 @@ SUBAGENT_MAX_CALLS_PER_TASK = int(os.getenv("SUBAGENT_MAX_CALLS_PER_TASK", "3"))
 SUBAGENT_MAX_TOKENS_PER_CALL = int(os.getenv("SUBAGENT_MAX_TOKENS_PER_CALL", "50000"))  # 反模式 #8：单次 SubAgent 调用 Token 预算上限
 SUBAGENT_DEFAULT_TOOL_WHITELIST = os.getenv("SUBAGENT_DEFAULT_TOOL_WHITELIST", "")  # 默认工具白名单（逗号分隔，空=全量授权）
 
+# --- v13.0 Human-in-the-Loop Feature Flags ---
+# --- 人机交互（v13 新增）---
+HITL_ENABLED = os.getenv("HITL_ENABLED", "false").lower() == "true"  # 是否启用 HITL 人机交互（默认关闭，向后兼容）
+HITL_MAX_PROMPTS_PER_TASK = int(os.getenv("HITL_MAX_PROMPTS_PER_TASK", "5"))  # 单任务最大 ask_user 调用次数（防止无限提问循环）
+HITL_USER_INPUT_TIMEOUT = int(os.getenv("HITL_USER_INPUT_TIMEOUT", "120"))  # 等待用户输入超时（秒），超时后工具返回 Error 由 LLM 自主继续
+
 # ======================================================================
 # Tracing Configuration (v7)
 # 全链路追踪配置（v7 新增）

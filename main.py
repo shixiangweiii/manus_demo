@@ -446,6 +446,52 @@ def on_event(event: str, data: Any) -> None:
             f"iter {data.get('iteration', 0)} ({data.get('tool_calls_count', 0)} tool calls)"
         )
 
+    # --- v13 HITL: Human-in-the-Loop events ---
+    # --- v13 人机交互事件 ---
+    elif event == "ask_user_prompt":
+        # HITL: LLM is asking the user a question. Collect input and
+        # resolve the Future so the ReAct loop can continue.
+        question = data["question"]
+        response_future = data["response_future"]
+
+        console.print(Panel(
+            f"[bold yellow]{question}[/bold yellow]",
+            title="[bold magenta]Agent Asks[/bold magenta]",
+            border_style="magenta",
+        ))
+
+        async def _collect_and_resolve():
+            try:
+                user_response = await asyncio.to_thread(
+                    console.input, "[bold magenta]You > [/bold magenta]"
+                )
+                user_response = user_response.strip()
+                if not user_response:
+                    user_response = "(no response)"
+                response_future.set_result(user_response)
+                console.print("  [dim]Response sent to agent.[/dim]")
+            except (EOFError, KeyboardInterrupt):
+                if not response_future.done():
+                    response_future.set_result("(user cancelled)")
+            except Exception as exc:
+                if not response_future.done():
+                    response_future.set_result(f"(input error: {exc})")
+
+        asyncio.create_task(_collect_and_resolve())
+
+    elif event == "ask_user_response":
+        # HITL: user has responded to an agent question (info log)
+        console.print(
+            f"  [dim]User responded: {str(data.get('response', ''))[:200]}[/dim]"
+        )
+
+    elif event == "ask_user_timeout":
+        # HITL: user did not respond in time
+        console.print(
+            f"  [yellow]User input timed out ({data.get('timeout', '?')}s). "
+            "Agent will proceed autonomously.[/yellow]"
+        )
+
     elif event == "task_complete":
         # 任务完成：显示绿色边框的最终答案面板
         console.print(Panel(
@@ -527,6 +573,10 @@ async def run_interactive() -> None:
         on_event=on_event,  # 绑定 UI 事件回调
     )
 
+    # v13 HITL: enable interactive mode for ask_user tool
+    if orchestrator._ask_user_tool:
+        orchestrator._ask_user_tool.set_interactive_mode(True)
+
     while True:
         console.print()
         try:
@@ -562,6 +612,11 @@ async def run_single(task: str) -> None:
         tools=tools,
         on_event=on_event,
     )
+
+    # v13 HITL: disable interactive mode for ask_user tool in single-task mode
+    if orchestrator._ask_user_tool:
+        orchestrator._ask_user_tool.set_interactive_mode(False)
+
     await orchestrator.run(task)
 
 

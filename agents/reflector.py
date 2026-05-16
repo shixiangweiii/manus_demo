@@ -50,6 +50,11 @@ you must:
    discovering it via tools, this is a CRITICAL issue — set
    passed=false and clearly call out the assumption in feedback,
    suggesting the plan obtain the data properly.
+   NOTE: If the "ask_user" tool was available and a step encountered
+   ambiguous data but did NOT use it to clarify with the user, note
+   this as a missed opportunity in suggestions. Do not set passed=false
+   solely for this (the step may have had valid reasons to proceed),
+   but suggest using ask_user in the next replan.
 6. LANGUAGE CONSISTENCY: The final results should be in the same
    language as the user's task. If the user wrote in Chinese but
    results are in English, this is a quality issue — flag it in

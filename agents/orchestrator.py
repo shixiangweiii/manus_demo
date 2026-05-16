@@ -36,6 +36,7 @@ v6.0：可选的统一 ReActEngine 集成（ENABLE_REACT_ENGINE_V2 特性开关�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable
 
@@ -128,6 +129,18 @@ class OrchestratorAgent:
             tools = list(tools or []) + [self._subagent_tool]
             logger.info("[Orchestrator] SubAgent tool (v9) enabled")
 
+        # v13 HITL tool (feature-flagged, default off)
+        # v13 人机交互工具（特性开关控制，默认关闭）
+        self._ask_user_tool = None
+        if config.HITL_ENABLED:
+            from tools.ask_user import AskUserTool
+            self._ask_user_tool = AskUserTool(
+                on_user_prompt=self._handle_user_prompt,
+                on_event=self._emit,
+            )
+            tools = list(tools or []) + [self._ask_user_tool]
+            logger.info("[Orchestrator] HITL ask_user tool (v13) enabled")
+
         # Sub-agents（各专用子智能体）
         self.planner = PlannerAgent(self.llm_client, self.context_manager)
         self.executor_agent = ExecutorAgent(
@@ -194,6 +207,10 @@ class OrchestratorAgent:
         # v9: Reset SubAgent per-task state for new task
         if self._subagent_tool:
             self._subagent_tool.reset_task_state()
+
+        # v13: Reset HITL per-task state for new task
+        if self._ask_user_tool:
+            self._ask_user_tool.reset_task_state()
 
         if not config.EMERGENT_PLANNING_ENABLED:
             logger.info("[Orchestrator] Emergent planning mode is disabled via config")
@@ -412,7 +429,11 @@ class OrchestratorAgent:
             "   'could not complete' or similar.\n"
             "3. If any step assumed default values for unspecified data "
             "   (e.g., a default city), explicitly note this caveat to the user.\n"
-            "4. Be concise and directly address the user's question."
+            "4. If the ask_user tool was used during execution and the user "
+            "   provided a correction (e.g., a different city), use the user's "
+            "   corrected information in the final answer, not the original "
+            "   approximate value.\n"
+            "5. Be concise and directly address the user's question."
         )
         try:
             return await self.llm_client.chat(
@@ -697,3 +718,29 @@ class OrchestratorAgent:
             self._on_event(event, data)
         except Exception:
             logger.debug("[Orchestrator] UI callback error for event '%s'", event, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # v13 HITL: User prompt bridging
+    # v13 人机交互：用户提问桥接
+    # ------------------------------------------------------------------
+
+    def _handle_user_prompt(
+        self,
+        question: str,
+        prompt_id: str,
+        response_future: asyncio.Future[str],
+    ) -> None:
+        """
+        Bridge between AskUserTool and the UI layer.
+        桥接 AskUserTool 与 UI 层。
+
+        Emits an ask_user_prompt event carrying the Future so the UI
+        can collect user input and resolve it. The UI layer (main.py)
+        is responsible for resolving the Future.
+        通过 emit 携带 Future 的事件通知 UI 层，由 UI 层收集用户输入并 resolve Future。
+        """
+        self._emit("ask_user_prompt", {
+            "question": question,
+            "prompt_id": prompt_id,
+            "response_future": response_future,
+        })
