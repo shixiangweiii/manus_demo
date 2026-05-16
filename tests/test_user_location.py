@@ -9,10 +9,13 @@ no real network calls.
   1. env var 命中
   2. memory 文件命中（含注释行 / 空行跳过）
   3. memory 文件不存在 → IP 命中（mock urlopen）
-  4. IP 服务降级：ipapi.co 失败 → ip.sb 命中
+  4. IP 服务降级：ip-api.com 失败 → ipapi.co 命中
   5. 全部失败（IP 关闭 或 IP 接口异常）→ Error 字符串
   6. 优先级：env > memory > IP
   7. tool contract（name / description / parameters_schema）
+  8. SSL 降级：verify=True SSL 失败 → verify=False 重试成功
+  9. 非 SSL 错误不触发降级重试
+  10. LOCATION_SSL_VERIFY=false 直接跳过验证
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import ssl
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -160,73 +164,82 @@ class TestIPPath:
         mock_open.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ipapi_co_primary_hits(self, monkeypatch):
+    async def test_ip_api_com_primary_hits(self, monkeypatch):
+        """ip-api.com is the first service and should hit immediately."""
         monkeypatch.delenv("USER_LOCATION", raising=False)
         monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
 
         with patch("os.path.isfile", return_value=False), \
-             patch("urllib.request.urlopen", return_value=_make_urlopen_response(
-                 {"city": "Hangzhou", "country_name": "China"})):
+             patch("urllib.request.urlopen",
+                   return_value=_make_urlopen_response(
+                       {"city": "Hangzhou", "status": "success"})):
             result = await UserLocationTool().execute()
         assert "City: Hangzhou" in result
         assert "source=ip_geolocation" in result
         assert "APPROXIMATE" in result
 
     @pytest.mark.asyncio
-    async def test_ipapi_fails_ipsb_fallback_hits(self, monkeypatch):
-        """ipapi.co raises → ip.sb succeeds → result from ip.sb."""
+    async def test_ip_api_co_fails_ipapi_co_hits(self, monkeypatch):
+        """ip-api.com raises → ipapi.co succeeds → result from ipapi.co."""
         monkeypatch.delenv("USER_LOCATION", raising=False)
         monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
 
-        ipsb_response = _make_urlopen_response({"city": "Hangzhou", "country": "China"})
-        urlopen_mock = MagicMock(side_effect=[OSError("ipapi down"), ipsb_response])
-
-        with patch("os.path.isfile", return_value=False), \
-             patch("urllib.request.urlopen", urlopen_mock):
-            result = await UserLocationTool().execute()
-        assert "City: Hangzhou" in result
-        assert "source=ip_geolocation" in result
-        # Both services should have been attempted
-        assert urlopen_mock.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_ipapi_empty_city_falls_through_to_ipsb(self, monkeypatch):
-        """ipapi.co returns empty city → tool moves on to ip.sb."""
-        monkeypatch.delenv("USER_LOCATION", raising=False)
-        monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
-
-        first = _make_urlopen_response({"city": "", "country_name": ""})
-        second = _make_urlopen_response({"city": "Shanghai"})
-        urlopen_mock = MagicMock(side_effect=[first, second])
+        ipapi_response = _make_urlopen_response(
+            {"city": "Shanghai", "country_name": "China"})
+        urlopen_mock = MagicMock(
+            side_effect=[OSError("ip-api down"), ipapi_response])
 
         with patch("os.path.isfile", return_value=False), \
              patch("urllib.request.urlopen", urlopen_mock):
             result = await UserLocationTool().execute()
         assert "City: Shanghai" in result
+        assert "source=ip_geolocation" in result
+        # ip-api.com failed once, ipapi.co succeeded once
         assert urlopen_mock.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_all_ip_services_fail(self, monkeypatch):
-        """Both ipapi.co and ip.sb fail → final Error string."""
+    async def test_ipapi_empty_city_falls_through(self, monkeypatch):
+        """ip-api.com returns empty city → ipapi.co returns empty → ip.sb hits."""
         monkeypatch.delenv("USER_LOCATION", raising=False)
         monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
+
+        empty = _make_urlopen_response({"city": ""})
+        hit = _make_urlopen_response({"city": "Beijing"})
+        urlopen_mock = MagicMock(side_effect=[empty, empty, hit])
 
         with patch("os.path.isfile", return_value=False), \
-             patch("urllib.request.urlopen", side_effect=OSError("network down")):
+             patch("urllib.request.urlopen", urlopen_mock):
+            result = await UserLocationTool().execute()
+        assert "City: Beijing" in result
+        assert urlopen_mock.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_all_ip_services_fail(self, monkeypatch):
+        """All three services fail → final Error string."""
+        monkeypatch.delenv("USER_LOCATION", raising=False)
+        monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
+
+        with patch("os.path.isfile", return_value=False), \
+             patch("urllib.request.urlopen",
+                   side_effect=OSError("network down")):
             result = await UserLocationTool().execute()
         assert result.startswith("Error:")
         assert "USER_LOCATION" in result
         assert "user_location.md" in result
-        # New error message should mention LOCATION_IP_LOOKUP_ENABLED
         assert "LOCATION_IP_LOOKUP_ENABLED" in result
 
     @pytest.mark.asyncio
     async def test_all_ip_services_return_empty_city(self, monkeypatch):
         monkeypatch.delenv("USER_LOCATION", raising=False)
         monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
 
         empty = _make_urlopen_response({"city": ""})
-        urlopen_mock = MagicMock(side_effect=[empty, empty])
+        urlopen_mock = MagicMock(side_effect=[empty, empty, empty])
 
         with patch("os.path.isfile", return_value=False), \
              patch("urllib.request.urlopen", urlopen_mock):
@@ -261,3 +274,97 @@ class TestPriorityOrder:
         assert "source=memory_file" in result
         # IP path must not have been touched
         mock_open.assert_not_called()
+
+
+# ======================================================================
+# 5. SSL degradation — verify=True fails → verify=False retry
+# ======================================================================
+
+class TestSSLDegradation:
+
+    @pytest.mark.asyncio
+    async def test_ssl_verify_true_degrades_on_cert_error(self, monkeypatch):
+        """
+        verify=True hits CERTIFICATE_VERIFY_FAILED → _last_was_ssl_error=True
+        → retry with verify=False succeeds.
+        """
+        monkeypatch.delenv("USER_LOCATION", raising=False)
+        monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
+
+        ssl_err = OSError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        ok_response = _make_urlopen_response({"city": "Hangzhou"})
+        urlopen_mock = MagicMock(side_effect=[ssl_err, ok_response])
+
+        with patch("os.path.isfile", return_value=False), \
+             patch("urllib.request.urlopen", urlopen_mock):
+            result = await UserLocationTool().execute()
+        assert "City: Hangzhou" in result
+        # verify=True failed, verify=False retry succeeded — 2 calls total
+        assert urlopen_mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_ssl_verify_true_non_ssl_error_skips_degrade(self, monkeypatch):
+        """
+        Non-SSL error (timeout) does NOT trigger verify=False retry;
+        directly moves to next service.
+        """
+        monkeypatch.delenv("USER_LOCATION", raising=False)
+        monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
+
+        timeout_err = OSError("timed out")
+        ok_response = _make_urlopen_response({"city": "Shanghai"})
+        # ip-api.com timeout → no SSL degrade → ipapi.co succeeds
+        urlopen_mock = MagicMock(side_effect=[timeout_err, ok_response])
+
+        with patch("os.path.isfile", return_value=False), \
+             patch("urllib.request.urlopen", urlopen_mock):
+            result = await UserLocationTool().execute()
+        assert "City: Shanghai" in result
+        # ip-api.com: 1 call (timeout, no retry), ipapi.co: 1 call (success)
+        assert urlopen_mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_ssl_verify_false_direct_skip(self, monkeypatch):
+        """
+        LOCATION_SSL_VERIFY=false → directly use unverified context,
+        no verify=True attempt first.
+        """
+        monkeypatch.delenv("USER_LOCATION", raising=False)
+        monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", False)
+
+        ok_response = _make_urlopen_response({"city": "Beijing"})
+
+        with patch("os.path.isfile", return_value=False), \
+             patch("urllib.request.urlopen",
+                   return_value=ok_response) as mock_open, \
+             patch("ssl._create_unverified_context") as mock_ctx:
+            result = await UserLocationTool().execute()
+        assert "City: Beijing" in result
+        # Only 1 urlopen call (no verify=True attempt first)
+        assert mock_open.call_count == 1
+        # unverified context was used
+        mock_ctx.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ssl_degrade_still_fails_across_all_services(self, monkeypatch):
+        """
+        All services fail SSL + degrade retry also fails → Error.
+        """
+        monkeypatch.delenv("USER_LOCATION", raising=False)
+        monkeypatch.setattr("config.LOCATION_IP_LOOKUP_ENABLED", True)
+        monkeypatch.setattr("config.LOCATION_SSL_VERIFY", True)
+
+        ssl_err = OSError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        # 3 services × 2 attempts each = 6 calls, all fail
+        urlopen_mock = MagicMock(side_effect=[ssl_err] * 6)
+
+        with patch("os.path.isfile", return_value=False), \
+             patch("urllib.request.urlopen", urlopen_mock):
+            result = await UserLocationTool().execute()
+        assert result.startswith("Error:")
+        assert urlopen_mock.call_count == 6

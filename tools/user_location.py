@@ -5,13 +5,13 @@ User Location Tool - Resolve current user's city via a fallback chain.
 Resolution order (each step is independent; first hit wins):
   1. USER_LOCATION env var                       (explicit, highest priority)
   2. {MEMORY_DIR}/user_location.md               (persistent user fact file)
-  3. IP geolocation                              (ipapi.co primary + ip.sb fallback)
+  3. IP geolocation                              (ip-api.com primary + ipapi.co/ip.sb fallback)
   4. Error string                                (no source resolved)
 
 解析顺序（按优先级降级）：
   1. USER_LOCATION 环境变量                     （显式配置，最高优先级）
   2. {MEMORY_DIR}/user_location.md              （用户事实文件，可手工维护）
-  3. IP 地理定位                                 （ipapi.co 主 + ip.sb 备份）
+  3. IP 地理定位                                 （ip-api.com 主 / ipapi.co / ip.sb 备份）
   4. Error: ... 字符串                          （所有源均失败）
 
 设计要点：
@@ -20,6 +20,9 @@ Resolution order (each step is independent; first hit wins):
   把 zone tail 当 city 是 hack，对地理大国注定失败。
 - **IP 默认启用**：IP 段的运营商地理注册是真实地理信号，精度通常到城市；
   即便有偏差（如 CGNAT 汇聚到省会），仍比时区推断高一个数量级。
+- **SSL 降级**：LOCATION_SSL_VERIFY=true（默认）时先验证证书，SSL 错误自动
+  降级为跳过验证重试一次；设为 false 则直接跳过验证。ip-api.com 使用 HTTP
+  协议，不受 SSL 问题影响。
 - **错误透传**：所有异常 catch 后转 "Error:" 前缀字符串，配合
   react/engine.py 的 Error: 检测进入 ToolRouter 失败计数。
 """
@@ -39,7 +42,9 @@ logger = logging.getLogger(__name__)
 
 # IP geolocation services tried in order. Each entry: (display_name, url, city_extractor)
 # IP 定位服务列表，按顺序尝试。每项：(显示名, URL, city 字段提取函数)
+# ip-api.com 使用 HTTP 协议（国内可达性好，不受 SSL 证书问题影响）
 _IP_SERVICES: list[tuple[str, str, Any]] = [
+    ("ip-api.com", "http://ip-api.com/json/", lambda d: d.get("city")),
     ("ipapi.co", "https://ipapi.co/json/", lambda d: d.get("city")),
     ("ip.sb", "https://api.ip.sb/geoip", lambda d: d.get("city")),
 ]
@@ -50,6 +55,10 @@ class UserLocationTool(BaseTool):
     Resolve the user's current city via fallback chain.
     通过 fallback 链解析用户当前城市。
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_was_ssl_error: bool = False
 
     @property
     def name(self) -> str:
@@ -147,35 +156,80 @@ class UserLocationTool(BaseTool):
         Try IP geolocation services in order; first non-empty city wins.
         按顺序尝试 IP 定位服务；首个返回非空 city 字段的胜出。
 
-        Service list (in order):
-          1. ipapi.co — well-formed JSON, may be slow/rate-limited from CN
-          2. ip.sb    — CloudFlare-backed, generally reachable from CN
-
-        服务列表（按顺序）：
-          1. ipapi.co — JSON 接口规范，但国内访问可能慢/限频
-          2. ip.sb    — CloudFlare CDN 加速，国内一般可达
+        SSL handling strategy (SSL 处理策略):
+          - LOCATION_SSL_VERIFY=false: skip verification for all requests
+          - LOCATION_SSL_VERIFY=true (default): verify first; on SSL error,
+            retry once with verification disabled for the same service;
+            non-SSL errors skip directly to the next service.
         """
-        import json as _json
-        import urllib.request
-
         for name, url, extract in _IP_SERVICES:
-            try:
-                req = urllib.request.Request(
-                    url,
-                    headers={"User-Agent": "manus-demo/1.0"},
-                )
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    data = _json.loads(resp.read().decode("utf-8"))
-                city = (extract(data) or "").strip()
+            # 若用户主动关闭 SSL 验证，直接使用 unverified context
+            if not config.LOCATION_SSL_VERIFY:
+                city = self._try_service(name, url, extract, verify=False)
                 if city:
                     return city
-                logger.warning(
-                    "[UserLocationTool] %s returned empty city, trying next",
-                    name,
-                )
-            except Exception as exc:  # noqa: BLE001 — best-effort
+                continue
+
+            # 默认: 先正常验证
+            city = self._try_service(name, url, extract, verify=True)
+            if city:
+                return city
+
+            # 仅 SSL 证书错误时降级重试（跳过验证）
+            if self._last_was_ssl_error:
+                city = self._try_service(name, url, extract, verify=False)
+                if city:
+                    logger.info(
+                        "[UserLocationTool] %s: SSL verify failed, "
+                        "succeeded with verification disabled", name,
+                    )
+                    return city
+
+        return None
+
+    def _try_service(
+        self, name: str, url: str, extract: Any, *, verify: bool = True,
+    ) -> str | None:
+        """
+        Try a single IP geolocation service.
+        尝试单个 IP 定位服务。
+
+        Sets self._last_was_ssl_error so callers can decide whether to
+        retry with verification disabled.
+        通过 self._last_was_ssl_error 标记是否为 SSL 错误，
+        供调用方判断是否降级重试。
+        """
+        import json as _json
+        import ssl
+        import urllib.request
+
+        self._last_was_ssl_error = False
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "manus-demo/1.0"},
+            )
+            kwargs: dict[str, Any] = {"timeout": 3}
+            if not verify:
+                kwargs["context"] = ssl._create_unverified_context()
+
+            with urllib.request.urlopen(req, **kwargs) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            city = (extract(data) or "").strip()
+            if city:
+                return city
+            logger.warning(
+                "[UserLocationTool] %s returned empty city", name,
+            )
+        except Exception as exc:
+            self._last_was_ssl_error = (
+                "CERTIFICATE" in str(exc) or "SSL" in str(exc)
+            )
+            if not self._last_was_ssl_error or not verify:
+                # 非 SSL 错误 → 记录并跳下一个服务
+                # 或已经是降级重试仍失败 → 记录并跳下一个服务
                 logger.warning(
                     "[UserLocationTool] IP lookup via %s failed: %s",
                     name, exc,
                 )
+            # SSL 错误 + verify=True → 静默，让外层降级重试
         return None

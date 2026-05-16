@@ -78,6 +78,17 @@ class CodeExecutorTool(BaseTool):
 
     @staticmethod
     async def _run_code(code: str) -> str:
+        # When LOCATION_SSL_VERIFY=false, monkeypatch ssl so all HTTPS
+        # requests in the subprocess skip certificate verification.
+        # 当 LOCATION_SSL_VERIFY=false 时，注入 SSL monkeypatch 让子进程中
+        # 所有 HTTPS 请求跳过证书验证。
+        if not config.LOCATION_SSL_VERIFY:
+            code = (
+                "import ssl as _manus_ssl;"
+                " _manus_ssl._create_default_https_context"
+                " = _manus_ssl._create_unverified_context\n"
+            ) + code
+
         result = await run_with_limits(
             cmd=[sys.executable, "-c", code],
             timeout=config.CODE_EXEC_TIMEOUT,

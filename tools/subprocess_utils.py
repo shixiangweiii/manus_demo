@@ -23,6 +23,8 @@ import os
 import re
 from dataclasses import dataclass
 
+import config
+
 logger = logging.getLogger(__name__)
 
 # Keys matching these patterns (case-insensitive) are stripped from subprocess env.
@@ -49,6 +51,14 @@ def build_safe_env() -> dict[str, str]:
                 break
     for key in keys_to_remove:
         env.pop(key, None)
+
+    # When LOCATION_SSL_VERIFY=false, inject env vars so subprocess tools
+    # (execute_shell, etc.) skip SSL certificate verification.
+    # 当 LOCATION_SSL_VERIFY=false 时，注入环境变量让子进程工具跳过 SSL 证书验证。
+    if not config.LOCATION_SSL_VERIFY:
+        env["CURL_CA_BUNDLE"] = ""                    # curl: skip cert verification
+        env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"     # Node.js: skip TLS verification
+
     return env
 
 

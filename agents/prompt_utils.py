@@ -61,6 +61,36 @@ def get_location_guidance() -> str:
     return _LOCATION_GUIDANCE
 
 
+# Search tool priority guidance (always injected for tool-calling agents)
+# 搜索工具优先级引导（始终注入给工具调用类智能体）
+_SEARCH_TOOL_GUIDANCE = """
+
+## Tool Selection: Prefer Built-in Search Tools for Information Retrieval
+
+For information retrieval tasks (weather, news, facts, stock prices,
+translations, current events, etc.), follow this priority:
+
+1. **web_search** — search the web for relevant information
+2. **fetch_url** — extract content from specific URLs found via search
+3. Only use **execute_python** for HTTP requests if the built-in tools
+   cannot provide the needed data (e.g., a specific REST API with
+   structured JSON output that search cannot find)
+
+**execute_python is best reserved for**: computation, data processing,
+file manipulation, algorithm implementation, and tasks that cannot be
+accomplished with the other tools.
+
+Do NOT use execute_python to call public APIs (weather APIs, news APIs,
+etc.) when web_search + fetch_url can obtain the same information.
+"""
+
+
+def get_search_guidance() -> str:
+    """Return the search tool priority guidance string (always on).
+    返回搜索工具优先级引导（始终启用）。"""
+    return _SEARCH_TOOL_GUIDANCE
+
+
 def build_context_injection() -> str:
     """
     Build runtime context to inject into system prompts: today's date, weekday, etc.
@@ -92,9 +122,10 @@ def build_system_prompt(
     inject_context: bool = True,
     inject_subagent_guidance: bool = True,
     inject_location_guidance: bool = True,
+    inject_search_guidance: bool = True,
 ) -> str:
-    """Compose a system prompt with optional context / location / subagent guidance.
-    组合系统提示词，按需注入运行时上下文、位置工具引导和子智能体引导。
+    """Compose a system prompt with optional context / location / search / subagent guidance.
+    组合系统提示词，按需注入运行时上下文、位置工具引导、搜索工具引导和子智能体引导。
 
     Args:
         base_prompt: The agent's base system prompt.
@@ -103,6 +134,9 @@ def build_system_prompt(
         inject_location_guidance: When True (default), append get_user_location
             tool usage guidance. Set False for agents that do not call tools
             (e.g., Reflector).
+        inject_search_guidance: When True (default), append search tool priority
+            guidance (prefer web_search/fetch_url over execute_python for info
+            retrieval).
         inject_subagent_guidance: When True (default), append SubAgent tool
             usage guidance (only emitted if SUBAGENT_ENABLED=true). Set False
             for agents that do not call tools (e.g., Planner, Reflector).
@@ -112,6 +146,8 @@ def build_system_prompt(
         parts.append(build_context_injection())
     if inject_location_guidance:
         parts.append(get_location_guidance())
+    if inject_search_guidance:
+        parts.append(get_search_guidance())
     if inject_subagent_guidance:
         guidance = get_subagent_guidance()
         if guidance:

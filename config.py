@@ -79,7 +79,8 @@ CODE_MAX_CONCURRENT = int(os.getenv("CODE_MAX_CONCURRENT", "3"))                
 # --- User Location Resolution ---
 # --- 用户位置解析（fallback 链：env > memory > IP；不再使用系统时区，因 IANA zone 不是地理位置）---
 USER_LOCATION = (os.getenv("USER_LOCATION", "") or "").strip()                       # 用户显式指定的城市（最高优先级，工具内部仍以 os.getenv 直读以兼容运行时切换）
-LOCATION_IP_LOOKUP_ENABLED = os.getenv("LOCATION_IP_LOOKUP_ENABLED", "true").lower() == "true"   # 是否允许调用公网 IP 接口（ipapi.co + ip.sb fallback）推断位置；默认开启，隐私敏感用户可显式设为 false 关闭
+LOCATION_IP_LOOKUP_ENABLED = os.getenv("LOCATION_IP_LOOKUP_ENABLED", "true").lower() == "true"   # 是否允许调用公网 IP 接口（ip-api.com / ipapi.co / ip.sb fallback）推断位置；默认开启，隐私敏感用户可显式设为 false 关闭
+LOCATION_SSL_VERIFY = os.getenv("LOCATION_SSL_VERIFY", "true").lower() == "true"     # IP 定位 HTTPS 请求是否校验 SSL 证书；设为 false 可跳过证书验证（解决 macOS CERTIFICATE_VERIFY_FAILED）
 
 # --- Web Search (v10) ---
 # --- 网络搜索（v10：基于 DDGS/DuckDuckGo 的真实搜索）---
