@@ -97,11 +97,19 @@ def _load_all_traces() -> list[dict[str, Any]]:
                     s.get("duration_ms", 0) for s in spans if not s.get("parent_span_id")
                 )
 
-            # Determine overall status: ERROR if any span has ERROR status
-            if any(s.get("status") == "ERROR" for s in spans):
-                status = "ERROR"
+            # Determine overall status from root span (authoritative).
+            # Tool retry-and-recovery cases produce child spans with ERROR but
+            # the root task succeeded; reading any-ERROR would mislabel them ❌.
+            # 顶层 status 取根 span，避免子 span 错误（如工具 retry 后恢复）误标整 trace。
+            if root_span:
+                status = root_span.get("status") or "UNSET"
+                if status not in ("OK", "ERROR", "UNSET"):
+                    status = "UNSET"
             elif not spans:
                 status = "UNSET"
+            elif any(s.get("status") == "ERROR" for s in spans):
+                # Fallback when root span absent (rare): keep legacy any-ERROR rule
+                status = "ERROR"
             else:
                 status = "OK"
 

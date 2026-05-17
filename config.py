@@ -130,6 +130,12 @@ SUBAGENT_MAX_CALLS_PER_TASK = int(os.getenv("SUBAGENT_MAX_CALLS_PER_TASK", "3"))
 SUBAGENT_MAX_TOKENS_PER_CALL = int(os.getenv("SUBAGENT_MAX_TOKENS_PER_CALL", "50000"))  # 反模式 #8：单次 SubAgent 调用 Token 预算上限
 SUBAGENT_DEFAULT_TOOL_WHITELIST = os.getenv("SUBAGENT_DEFAULT_TOOL_WHITELIST", "")  # 默认工具白名单（逗号分隔，空=全量授权）
 
+# --- Wave-3/4 SubAgent UX & resource limits ---
+# Wave-3/4 子智能体 UX 与资源限制
+SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH = int(os.getenv("SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH", "2000"))  # L2：SubAgent task_description 最大字符数,超出则截断 + warning
+SUBAGENT_ITERATION_EVENT_VERBOSITY = os.getenv("SUBAGENT_ITERATION_EVENT_VERBOSITY", "summary").lower()  # L5: subagent_iteration 事件 UI 粒度: summary（仅每 N 轮）/ full（全部）/ silent（关闭渲染）
+SUBAGENT_ITERATION_EVENT_EVERY_N = int(os.getenv("SUBAGENT_ITERATION_EVENT_EVERY_N", "2"))  # L5 summary 模式下每 N 轮渲染一次
+
 # --- v13.0 Human-in-the-Loop Feature Flags ---
 # --- 人机交互（v13 新增）---
 HITL_ENABLED = os.getenv("HITL_ENABLED", "false").lower() == "true"  # 是否启用 HITL 人机交互（默认关闭，向后兼容）

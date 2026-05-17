@@ -136,13 +136,18 @@ class SubAgent:
         self.parent_agent_name = parent_agent_name
         self.sandbox_subdir = sandbox_subdir
 
-        # Build system prompt with v12 context injection (date/time) + optional sandbox isolation
-        # inject_subagent_guidance=False because depth=1 — SubAgent cannot spawn further SubAgents
-        # 用 build_system_prompt 注入 v12 日期/时间上下文；depth=1 故不再附加 SubAgent 引导
+        # Build system prompt with v12 context injection (date/time) + optional sandbox isolation.
+        # inject_subagent_guidance=False because depth=1 — SubAgent cannot spawn further SubAgents.
+        # Wave-2 (M1): inject_hitl_guidance=False because SubAgentTool.execute() structurally
+        # excludes the ask_user tool from the SubAgent's whitelist; injecting the
+        # guidance would have the LLM call a tool that isn't there, wasting iterations.
+        # 用 build_system_prompt 注入 v12 日期/时间上下文；depth=1 不附加 SubAgent 引导;
+        # ask_user 工具被结构性排除,故引导也关掉,避免 LLM 调用不存在的工具。
         system_prompt = build_system_prompt(
             SUBAGENT_SYSTEM_PROMPT,
             inject_context=True,
             inject_subagent_guidance=False,
+            inject_hitl_guidance=False,
         )
         if sandbox_subdir:
             system_prompt += f"\n9. Your working directory is {sandbox_subdir}. All file operations must be within this directory.\n   你的工作目录是 {sandbox_subdir}，所有文件操作应在此目录下进行。"
@@ -182,6 +187,25 @@ class SubAgent:
             self._on_event(event, data)
         except Exception:
             logger.debug("[SubAgent] Event callback error for '%s'", event, exc_info=True)
+
+    def _failure_tool_calls(self) -> list[ToolCallRecord]:
+        """Wave-3 M2: snapshot the most-up-to-date tool_calls_log on failure.
+
+        Prefers ReActEngine._current_log (Wave-3) over the on_iteration
+        snapshot. The live log captures tool calls written mid-iteration —
+        on_iteration only fires at iteration boundaries, so a timeout/budget
+        cancel during iteration N+1 would otherwise lose any calls already
+        appended in N+1.
+
+        Returns a fresh list copy (caller can mutate safely).
+
+        Wave-3 M2: 失败路径取 ReActEngine._current_log 实时快照,而非
+        on_iteration 在迭代末尾的副本——后者在中途取消时会丢最后一轮调用。
+        """
+        live = getattr(self._react_engine, "_current_log", None)
+        if live:
+            return list(live)
+        return list(self._accumulated_tool_calls)
 
     def _on_react_iteration(self, iteration: int, tool_calls: list[ToolCallRecord]) -> None:
         """ReAct iteration callback — snapshot tool calls and check token budget.
@@ -336,12 +360,15 @@ class SubAgent:
             logger.warning("[SubAgent] %s token budget exceeded: %d >= %d (iterations=%d, duration=%.0fms)",
                            self.name, tokens_used, self.max_tokens, self._iterations_so_far, elapsed_ms)
 
+            # Wave-3 M2: read live log so the last in-progress iteration's
+            # tool calls aren't lost.
+            tool_log = self._failure_tool_calls()
             budget_summary = SubAgentSummary(
                 accomplished="",
                 findings="",
                 issues=f"SubAgent token budget exceeded ({tokens_used} >= {self.max_tokens})",
-                artifacts=_extract_artifacts_from_log(self._accumulated_tool_calls),
-                tool_calls_summary=_extract_tool_calls_summary_from_log(self._accumulated_tool_calls) or "Token budget exceeded before completion",
+                artifacts=_extract_artifacts_from_log(tool_log),
+                tool_calls_summary=_extract_tool_calls_summary_from_log(tool_log) or "Token budget exceeded before completion",
             )
             summary_text = budget_summary.model_dump_json(ensure_ascii=False)
 
@@ -351,18 +378,18 @@ class SubAgent:
                 status=SubAgentStatus.FAILED,
                 summary=budget_summary,
                 summary_text=summary_text,
-                tool_calls_count=len(self._accumulated_tool_calls),
+                tool_calls_count=len(tool_log),
                 iterations_used=self._iterations_so_far,
                 duration_ms=round(elapsed_ms, 2),
                 tokens_used=tokens_used,
-                tool_calls_log=list(self._accumulated_tool_calls),
+                tool_calls_log=tool_log,
             )
 
             self._emit("subagent_failed", {
                 "subagent_id": self.name,
                 "error": f"Token budget exceeded: {tokens_used} >= {self.max_tokens}",
                 "iterations_used": self._iterations_so_far,
-                "tool_calls_count": len(self._accumulated_tool_calls),
+                "tool_calls_count": len(tool_log),
                 "duration_ms": result.duration_ms,
                 "tokens_used": tokens_used,
             })
@@ -377,12 +404,14 @@ class SubAgent:
             logger.warning("[SubAgent] %s timed out after %ds (iterations=%d, tokens=%d)",
                            self.name, self.timeout, self._iterations_so_far, tokens_used)
 
+            # Wave-3 M2: live log captures last-iteration calls
+            tool_log = self._failure_tool_calls()
             timeout_summary = SubAgentSummary(
                 accomplished="",
                 findings="",
                 issues=f"SubAgent timed out after {self.timeout}s",
-                artifacts=_extract_artifacts_from_log(self._accumulated_tool_calls),
-                tool_calls_summary=_extract_tool_calls_summary_from_log(self._accumulated_tool_calls) or "Execution exceeded timeout limit",
+                artifacts=_extract_artifacts_from_log(tool_log),
+                tool_calls_summary=_extract_tool_calls_summary_from_log(tool_log) or "Execution exceeded timeout limit",
             )
             summary_text = timeout_summary.model_dump_json(ensure_ascii=False)
 
@@ -392,18 +421,18 @@ class SubAgent:
                 status=SubAgentStatus.TIMED_OUT,
                 summary=timeout_summary,
                 summary_text=summary_text,
-                tool_calls_count=len(self._accumulated_tool_calls),
+                tool_calls_count=len(tool_log),
                 iterations_used=self._iterations_so_far,
                 duration_ms=round(elapsed_ms, 2),
                 tokens_used=tokens_used,
-                tool_calls_log=list(self._accumulated_tool_calls),
+                tool_calls_log=tool_log,
             )
 
             self._emit("subagent_timed_out", {
                 "subagent_id": self.name,
                 "timeout": self.timeout,
                 "iterations_used": self._iterations_so_far,
-                "tool_calls_count": len(self._accumulated_tool_calls),
+                "tool_calls_count": len(tool_log),
                 "duration_ms": result.duration_ms,
                 "tokens_used": tokens_used,
             })
@@ -419,12 +448,14 @@ class SubAgent:
             logger.error("[SubAgent] %s unexpected error: %s (iterations=%d, duration=%.0fms)",
                          self.name, error_msg[:200], self._iterations_so_far, elapsed_ms, exc_info=True)
 
+            # Wave-3 M2: live log captures last-iteration calls
+            tool_log = self._failure_tool_calls()
             error_summary = SubAgentSummary(
                 accomplished="",
                 findings="",
                 issues=error_msg,
-                artifacts=_extract_artifacts_from_log(self._accumulated_tool_calls),
-                tool_calls_summary=_extract_tool_calls_summary_from_log(self._accumulated_tool_calls) or "Unexpected error during execution",
+                artifacts=_extract_artifacts_from_log(tool_log),
+                tool_calls_summary=_extract_tool_calls_summary_from_log(tool_log) or "Unexpected error during execution",
             )
             summary_text = error_summary.model_dump_json(ensure_ascii=False)
 
@@ -434,18 +465,18 @@ class SubAgent:
                 status=SubAgentStatus.FAILED,
                 summary=error_summary,
                 summary_text=summary_text,
-                tool_calls_count=len(self._accumulated_tool_calls),
+                tool_calls_count=len(tool_log),
                 iterations_used=self._iterations_so_far,
                 duration_ms=round(elapsed_ms, 2),
                 tokens_used=tokens_used,
-                tool_calls_log=list(self._accumulated_tool_calls),
+                tool_calls_log=tool_log,
             )
 
             self._emit("subagent_failed", {
                 "subagent_id": self.name,
                 "error": error_msg,
                 "iterations_used": self._iterations_so_far,
-                "tool_calls_count": len(self._accumulated_tool_calls),
+                "tool_calls_count": len(tool_log),
                 "duration_ms": result.duration_ms,
                 "tokens_used": tokens_used,
             })
@@ -482,30 +513,52 @@ class SubAgent:
             logger.debug("[SubAgent] Generating LLM summary: output_truncated=%d chars sent",
                          min(len(output), 8000))
 
+            # Wave-6: tag this summary call so it lands in the SubAgent's bucket
+            # rather than the parent's (the SubAgent already paid for its ReAct
+            # loop tokens — this final summary call should also be SubAgent's).
             response = await self.llm_client.chat_json(
                 messages, temperature=0.2, max_tokens=1500,
+                caller_tag=self.name,
             )
 
+            # Wave-3 M6: pydantic accepts arbitrary dicts because every
+            # SubAgentSummary field has a default — so a fully-irrelevant
+            # response like {"foo": "bar"} validates as an EMPTY summary
+            # without raising. We must explicitly check whether the LLM
+            # actually populated any meaningful field. If everything is
+            # default-empty AND the source dict had no recognized keys, we
+            # treat that as a structure failure rather than silently
+            # returning a "successful but empty" summary.
+            # pydantic 默认值会让 {"foo": "bar"} 静默通过 — 必须显式判定是否
+            # 有实质字段填充,否则 SubAgent 会"成功但啥都没说"骗过父级。
             if isinstance(response, dict):
                 try:
                     summary = SubAgentSummary.model_validate(response)
-                    logger.debug("[SubAgent] LLM summary validated: accomplished='%s', issues='%s'",
-                                 summary.accomplished[:100], summary.issues[:100])
-                    # Override mechanical fields with extracted data for accuracy
-                    if not summary.artifacts and artifacts:
-                        summary = summary.model_copy(update={"artifacts": artifacts})
-                    if not summary.tool_calls_summary and tool_calls_summary:
-                        summary = summary.model_copy(update={"tool_calls_summary": tool_calls_summary})
-                    return summary
                 except ValidationError:
-                    logger.debug("[SubAgent] LLM summary validation failed, using fallback")
+                    summary = None
 
-            # JSON parsed but wrong structure — fallback
-            logger.debug("[SubAgent] LLM returned unexpected structure, using truncated fallback")
+                if summary is not None:
+                    schema_keys = {"accomplished", "findings", "issues", "artifacts", "tool_calls_summary"}
+                    has_recognized_key = bool(set(response.keys()) & schema_keys)
+                    if has_recognized_key:
+                        logger.debug("[SubAgent] LLM summary validated: accomplished='%s', issues='%s'",
+                                     summary.accomplished[:100], summary.issues[:100])
+                        if not summary.artifacts and artifacts:
+                            summary = summary.model_copy(update={"artifacts": artifacts})
+                        if not summary.tool_calls_summary and tool_calls_summary:
+                            summary = summary.model_copy(update={"tool_calls_summary": tool_calls_summary})
+                        return summary
+
+            # JSON parsed but the response did not provide any of the
+            # SubAgentSummary fields — fallback. Keep accomplished EMPTY
+            # (no lying about success); repr goes into `issues` for debug.
+            # 结构不匹配时 accomplished 留空,不谎报成果;repr 进 issues 保留调试信息。
+            repr_short = str(response)[:300]
+            logger.debug("[SubAgent] LLM returned unexpected structure: %s", repr_short)
             return SubAgentSummary(
-                accomplished=str(response)[:500],
+                accomplished="",
                 findings="",
-                issues="Summary structure unexpected",
+                issues=f"Summary structure unexpected: {repr_short}",
                 artifacts=artifacts,
                 tool_calls_summary=tool_calls_summary,
             )

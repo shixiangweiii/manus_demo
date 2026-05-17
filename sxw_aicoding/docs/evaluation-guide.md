@@ -1045,6 +1045,51 @@ GroundTruth(
 
 ---
 
+## 17. Wave-7：SubAgent token 单一数据源（v9.1）
+
+### 17.1 问题背景
+
+v9.0 / v8.0 评测中 `subagent_total_tokens` 是从 `subagent_complete` 事件的 `tokens_used` 字段累加得到的。这意味着评测的 SubAgent token 数据源 **不是** LLMClient 的权威记录,而是 SubAgent 派生流程在事件中的二次报告。这造成两个问题：
+
+1. **双数据源不一致**：UI 显示的 token 表（来自 `LLMClient._call_records`）与评测里的 SubAgent token（来自事件聚合）原则上应一致，但任意一边的统计漏洞都会让两数对不上
+2. **失败 SubAgent 的 token 难统计**：如果 SubAgent 中途崩溃没发出 `subagent_complete`,事件路径会丢这部分 token
+
+### 17.2 Wave-7 改造
+
+`evaluation/runner.py` 在 `EvaluationProbe.on_event` 里多收一个事件处理：
+
+```python
+elif event == "token_usage_summary":
+    summary: TokenUsageSummary = data
+    self.total_tokens = summary.total.total_tokens
+    # Wave-7: 直接从 by_caller 视图聚合 SubAgent token
+    self.subagent_tokens_from_caller = sum(
+        usage.total_tokens
+        for caller, usage in summary.by_caller.items()
+        if caller.startswith("SubAgent")
+    )
+```
+
+`finalize` 时：
+
+```python
+sa_total_tokens_from_events = sum(int(r.get("tokens_used", 0) or 0) for r in self.subagent_results)
+# 优先 caller_tag,事件聚合 fallback
+sa_total_tokens = self.subagent_tokens_from_caller or sa_total_tokens_from_events
+```
+
+### 17.3 数据源单一化的好处
+
+- **与 UI / trace 数字必然一致**：所有 SubAgent token 视图（UI by_caller 表、trace `gen_ai.caller`、评测 `subagent_total_tokens`）都从同一个 `LLMCallRecord.caller_tag` 聚合，没有"为什么三处不一致"的调试场景
+- **崩溃 SubAgent 也能统计**：哪怕 SubAgent 没发 `subagent_complete` 事件，只要它发起过 LLM 调用，`LLMCallRecord` 必然存在,token 不丢
+- **Pre-Wave-6 trace 文件兼容**：如果加载的是 Wave-6 之前的旧 trace（无 caller_tag），`self.subagent_tokens_from_caller=0`，自动 fallback 到事件聚合 —— 老评测 JSON 不会失效
+
+### 17.4 评测使用上没有变化
+
+用户视角没有变化 —— 还是同样的 `--modes` / `--difficulty` / `--repeat`。只是输出更可信。
+
+---
+
 ## 学术参考补充
 
 | 来源 | 借鉴点 |

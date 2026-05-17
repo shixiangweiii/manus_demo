@@ -1609,11 +1609,18 @@ class TestPromptUtilsModule:
         from agents.prompt_utils import build_system_prompt
         base = "You are an agent."
         with patch.object(config, "SUBAGENT_ENABLED", False):
-            # Disable all injections so we can test the pure pass-through path
+            # Disable ALL injections so we can test the pure pass-through path.
+            # NOTE: must include inject_search_guidance=False and
+            # inject_hitl_guidance=False — both default True and would otherwise
+            # append their guidance blocks. This was a latent test-self bug
+            # (not a product bug); fixed during Wave-2 codebase cleanup.
             result = build_system_prompt(
                 base,
                 inject_context=False,
                 inject_location_guidance=False,
+                inject_search_guidance=False,
+                inject_subagent_guidance=False,
+                inject_hitl_guidance=False,
             )
             assert result == base
 
@@ -1634,73 +1641,72 @@ class TestSystemPromptComposition:
         module = importlib.import_module(module_path)
         return getattr(module, constant_name)
 
+    # Wave-2: system prompts are now built per-instance in __init__ rather than
+    # at module import time. The original tests reloaded each agent module to
+    # pick up patched SUBAGENT_ENABLED — that pattern no longer applies because
+    # the module no longer carries a frozen *_SYSTEM_PROMPT constant. Instead
+    # we exercise the same composition behavior by calling build_system_prompt
+    # against the (still-module-level) `_*_BASE_PROMPT` constants directly,
+    # which is the same call the agent's __init__ now performs at runtime.
+
     def test_executor_prompt_includes_guidance_when_enabled(self):
-        """EXECUTOR_SYSTEM_PROMPT includes subagent guidance when enabled."""
+        """Executor base prompt + build_system_prompt yields subagent guidance when enabled."""
+        from agents.executor import _EXECUTOR_BASE_PROMPT
+        from agents.prompt_utils import build_system_prompt
         with patch.object(config, "SUBAGENT_ENABLED", True):
-            # Re-import to pick up the patched config
-            import importlib
-            import agents.executor as executor_mod
-            importlib.reload(executor_mod)
-            prompt = executor_mod.EXECUTOR_SYSTEM_PROMPT
+            prompt = build_system_prompt(_EXECUTOR_BASE_PROMPT)
             assert "subagent" in prompt.lower()
             assert "ReAct paradigm" in prompt
 
     def test_executor_prompt_excludes_guidance_when_disabled(self):
-        """EXECUTOR_SYSTEM_PROMPT has no subagent guidance when disabled."""
+        """Executor prompt has no subagent guidance when disabled."""
+        from agents.executor import _EXECUTOR_BASE_PROMPT
+        from agents.prompt_utils import build_system_prompt
         with patch.object(config, "SUBAGENT_ENABLED", False):
-            import importlib
-            import agents.executor as executor_mod
-            importlib.reload(executor_mod)
-            prompt = executor_mod.EXECUTOR_SYSTEM_PROMPT
+            prompt = build_system_prompt(_EXECUTOR_BASE_PROMPT)
             assert "subagent" not in prompt.lower()
 
     def test_emergent_prompt_includes_guidance_when_enabled(self):
-        """EMERGENT_PLANNER_SYSTEM_PROMPT includes subagent guidance when enabled."""
+        """Emergent base prompt + build_system_prompt yields subagent guidance when enabled."""
+        from agents.emergent_planner import _EMERGENT_BASE_PROMPT
+        from agents.prompt_utils import build_system_prompt
         with patch.object(config, "SUBAGENT_ENABLED", True):
-            import importlib
-            import agents.emergent_planner as ep_mod
-            importlib.reload(ep_mod)
-            prompt = ep_mod.EMERGENT_PLANNER_SYSTEM_PROMPT
+            prompt = build_system_prompt(_EMERGENT_BASE_PROMPT)
             assert "subagent" in prompt.lower()
             assert "TODO list" in prompt
 
     def test_emergent_prompt_excludes_guidance_when_disabled(self):
-        """EMERGENT_PLANNER_SYSTEM_PROMPT has no subagent guidance when disabled."""
+        """Emergent prompt has no subagent guidance when disabled."""
+        from agents.emergent_planner import _EMERGENT_BASE_PROMPT
+        from agents.prompt_utils import build_system_prompt
         with patch.object(config, "SUBAGENT_ENABLED", False):
-            import importlib
-            import agents.emergent_planner as ep_mod
-            importlib.reload(ep_mod)
-            prompt = ep_mod.EMERGENT_PLANNER_SYSTEM_PROMPT
+            prompt = build_system_prompt(_EMERGENT_BASE_PROMPT)
             assert "subagent" not in prompt.lower()
 
     def test_goal_driven_prompt_includes_guidance_when_enabled(self):
-        """V8_GOAL_DRIVEN_SYSTEM_PROMPT includes subagent guidance when enabled."""
+        """GoalDriven base prompt + build_system_prompt yields subagent guidance when enabled."""
+        from agents.goal_driven_planner import _V8_BASE_PROMPT
+        from agents.prompt_utils import build_system_prompt
         with patch.object(config, "SUBAGENT_ENABLED", True):
-            import importlib
-            import agents.goal_driven_planner as gdp_mod
-            importlib.reload(gdp_mod)
-            prompt = gdp_mod.V8_GOAL_DRIVEN_SYSTEM_PROMPT
+            prompt = build_system_prompt(_V8_BASE_PROMPT)
             assert "subagent" in prompt.lower()
             assert "begin with the end in mind" in prompt
 
     def test_goal_driven_prompt_excludes_guidance_when_disabled(self):
-        """V8_GOAL_DRIVEN_SYSTEM_PROMPT has no subagent guidance when disabled."""
+        """GoalDriven prompt has no subagent guidance when disabled."""
+        from agents.goal_driven_planner import _V8_BASE_PROMPT
+        from agents.prompt_utils import build_system_prompt
         with patch.object(config, "SUBAGENT_ENABLED", False):
-            import importlib
-            import agents.goal_driven_planner as gdp_mod
-            importlib.reload(gdp_mod)
-            prompt = gdp_mod.V8_GOAL_DRIVEN_SYSTEM_PROMPT
+            prompt = build_system_prompt(_V8_BASE_PROMPT)
             assert "subagent" not in prompt.lower()
 
     def test_base_prompts_preserved_regardless_of_flag(self):
-        """Base prompt content is unchanged regardless of SUBAGENT_ENABLED."""
+        """Base prompt core content always present, independent of SUBAGENT_ENABLED."""
+        from agents.executor import _EXECUTOR_BASE_PROMPT
+        from agents.prompt_utils import build_system_prompt
         for enabled in (True, False):
             with patch.object(config, "SUBAGENT_ENABLED", enabled):
-                import importlib
-                import agents.executor as executor_mod
-                importlib.reload(executor_mod)
-                prompt = executor_mod.EXECUTOR_SYSTEM_PROMPT
-                # Core content always present
+                prompt = build_system_prompt(_EXECUTOR_BASE_PROMPT)
                 assert "ReAct paradigm" in prompt
                 assert "THINK" in prompt
                 assert "ACT" in prompt
@@ -1920,3 +1926,176 @@ class TestSubAgentConcurrency:
         result = await tool.execute(task_description="")
         assert "task_description is required" in result
         assert tool._call_count == 0  # no slot consumed for invalid input
+
+
+# ======================================================================
+# Wave-1 Cross-Engine Integration Tests
+# Wave-1 跨引擎一致性集成测试
+# ======================================================================
+# These tests lock in the behavioral parity between react.engine.ReActEngine
+# and the agents that maintain their own ReAct loops (GoalDrivenPlanner,
+# EmergentPlanner legacy). They are the regression net for Wave-1.
+#
+# 这组测试锁住三套 ReAct 循环的行为一致性,任何一处再次"漏改"都会被它们捕获。
+
+class TestWave1CrossEngineParity:
+    """GoalDriven path must match ReActEngine on caller / rate-limit / truncation."""
+
+    def _make_planner_with_tool(self, tool):
+        """Build a GoalDrivenPlanner whose only tool is the supplied mock."""
+        from agents.goal_driven_planner import GoalDrivenPlannerAgent
+
+        mock_llm = MagicMock()
+        return GoalDrivenPlannerAgent(
+            llm_client=mock_llm,
+            tools=[tool],
+            max_iterations=2,
+        )
+
+    def _make_goal_doc_and_reflection(self):
+        """Minimal goal_doc / reflection for _execute_todo_goal_guided."""
+        from schema import GoalDocument, GoalReflection
+
+        goal_doc = GoalDocument(
+            original_task="test", success_criteria="done",
+            target_state_description="complete",
+        )
+        reflection = GoalReflection(
+            current_state_summary="", gap_analysis="", next_milestone="",
+        )
+        return goal_doc, reflection
+
+    def _stub_two_round_llm(self, planner, tool_name: str, tool_args: str = "{}"):
+        """Configure the planner's LLM mock to call `tool_name` once, then stop.
+
+        Round 1: emit a single tool_call → triggers the helper-driven loop.
+        Round 2: no tool_calls → loop exits with success.
+        """
+        # Round 1
+        tc = MagicMock()
+        tc.id = "tc_1"
+        tc.function.name = tool_name
+        tc.function.arguments = tool_args
+        round1 = MagicMock()
+        round1.content = ""
+        round1.tool_calls = [tc]
+
+        # Round 2
+        round2 = MagicMock()
+        round2.content = "done"
+        round2.tool_calls = None
+
+        planner.llm_client.chat_with_tools = AsyncMock(
+            side_effect=[round1, round2],
+        )
+
+    @pytest.mark.asyncio
+    async def test_goaldriven_subagent_parent_attribution(self):
+        """Wave-1 H1: GoalDrivenPlanner must call set_caller('GoalDrivenPlanner').
+
+        Without attribute_caller invocation, SubAgent's parent_agent in tracing
+        defaults to the SubAgentTool constructor's hardcoded value
+        ('OrchestratorAgent') — masking the actual caller.
+        """
+        from schema import TodoItem
+
+        # A mock tool that records set_caller invocations
+        mock_tool = _make_tool("subagent")
+        mock_tool.set_caller = MagicMock()
+        mock_tool.traced_execute = AsyncMock(return_value="dummy summary")
+
+        planner = self._make_planner_with_tool(mock_tool)
+        self._stub_two_round_llm(planner, tool_name="subagent")
+
+        goal_doc, reflection = self._make_goal_doc_and_reflection()
+        await planner._execute_todo_goal_guided(
+            TodoItem(id=1, description="test"), goal_doc, reflection,
+        )
+
+        mock_tool.set_caller.assert_called_once_with("GoalDrivenPlanner")
+
+    @pytest.mark.asyncio
+    async def test_goaldriven_rate_limited_does_not_pollute_failures(self):
+        """Wave-1 H2: rate-limited Error: must go to record_rate_limited, not record_failure.
+
+        Without three-state classification, SubAgent call-limit returns would
+        accumulate as failures, eventually triggering ToolRouter's "use a
+        different tool" hint — meaningless for SubAgent (no alternative).
+        """
+        from schema import TodoItem
+
+        rate_limited_msg = (
+            "Error: SubAgent call limit reached (3 per task). "
+            "Please continue without spawning more sub-agents."
+        )
+        mock_tool = _make_tool("subagent")
+        mock_tool.traced_execute = AsyncMock(return_value=rate_limited_msg)
+
+        planner = self._make_planner_with_tool(mock_tool)
+        self._stub_two_round_llm(planner, tool_name="subagent")
+
+        goal_doc, reflection = self._make_goal_doc_and_reflection()
+        todo = TodoItem(id=1, description="test")
+
+        await planner._execute_todo_goal_guided(todo, goal_doc, reflection)
+
+        stats = planner.tool_router._stats[str(todo.id)]["subagent"]
+        assert stats.rate_limited == 1, "rate-limited should increment rate_limited counter"
+        assert stats.failures == 0, "rate-limited must NOT count as failure"
+        assert stats.consecutive_failures == 0, "consecutive_failures must remain 0"
+
+    @pytest.mark.asyncio
+    async def test_goaldriven_truncation_reaches_llm(self):
+        """Wave-1 H3: oversized successful results must be truncated in BOTH the
+        ToolCallRecord AND the LLM-facing tool message.
+
+        Previously GoalDrivenPlanner only truncated the record (`result[:1000]`)
+        while the LLM saw the full payload, causing context bloat for any tool
+        that returns large successful payloads (web_search, fetch_url).
+        """
+        from schema import TodoItem
+
+        big_result = "x" * 5000
+        mock_tool = _make_tool("web_search")
+        mock_tool.traced_execute = AsyncMock(return_value=big_result)
+
+        planner = self._make_planner_with_tool(mock_tool)
+        # Capture every chat_with_tools call's `messages` argument
+        captured: list[list[dict]] = []
+
+        async def capture(messages, **kwargs):
+            captured.append([dict(m) for m in messages])
+            # Round 2 (return after capturing the tool messages)
+            if any(m.get("role") == "tool" for m in messages):
+                resp = MagicMock()
+                resp.content = "done"
+                resp.tool_calls = None
+                return resp
+            # Round 1: ask for the tool
+            tc = MagicMock()
+            tc.id = "tc_1"
+            tc.function.name = "web_search"
+            tc.function.arguments = '{"query": "test"}'
+            resp = MagicMock()
+            resp.content = ""
+            resp.tool_calls = [tc]
+            return resp
+
+        planner.llm_client.chat_with_tools = capture
+
+        goal_doc, reflection = self._make_goal_doc_and_reflection()
+        result = await planner._execute_todo_goal_guided(
+            TodoItem(id=1, description="test"), goal_doc, reflection,
+        )
+
+        # ToolCallRecord must be truncated to TOOL_RESULT_TRUNCATION_LIMIT
+        truncation_limit = config.TOOL_RESULT_TRUNCATION_LIMIT
+        assert len(result.tool_calls_log) == 1
+        assert len(result.tool_calls_log[0].result) == truncation_limit
+
+        # LLM-facing tool message must contain the truncation marker
+        round2_messages = captured[-1]
+        tool_msgs = [m for m in round2_messages if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert "[Tool output truncated at" in tool_msgs[0]["content"]
+        assert "original length=5000" in tool_msgs[0]["content"]

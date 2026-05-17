@@ -48,6 +48,11 @@ from tools.base import BaseTool
 from tools.router import ToolRouter
 
 from agents.prompt_utils import build_system_prompt, build_convergence_hint
+from react.tool_call_helpers import (
+    attribute_caller,
+    classify_result,
+    truncate_for_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +75,7 @@ list. You can suggest new TODOs, modifications, or mark items as blocked
 through your responses. Focus on executing each TODO with the tools available.
 """
 
-EMERGENT_PLANNER_SYSTEM_PROMPT = build_system_prompt(_EMERGENT_BASE_PROMPT)
+# Wave-2: prompt built per-instance in __init__ (see ExecutorAgent for rationale).
 
 
 class EmergentPlannerAgent(BaseAgent):
@@ -102,9 +107,10 @@ class EmergentPlannerAgent(BaseAgent):
         use_react_engine: bool | None = None,
         on_event: Callable[[str, Any], None] | None = None,
     ):
+        # Wave-2: build prompt per-instance, fresh date + HITL gating respected
         super().__init__(
             name="EmergentPlanner",
-            system_prompt=EMERGENT_PLANNER_SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(_EMERGENT_BASE_PROMPT),
             llm_client=llm_client,
             context_manager=context_manager,
         )
@@ -530,7 +536,7 @@ class EmergentPlannerAgent(BaseAgent):
                 prompt=prompt,
                 context="",
                 node_id=str(todo.id),
-                system_hint=EMERGENT_PLANNER_SYSTEM_PROMPT,
+                system_hint=self.system_prompt,
             )
             return result
 
@@ -577,46 +583,69 @@ class EmergentPlannerAgent(BaseAgent):
                     tool_calls_log=tool_calls_log,
                 )
 
-            for tool_call in response_msg.tool_calls:
-                func_name = tool_call.function.name
-                func_args = self._parse_json(tool_call.function.arguments)
-                if func_args is None:
-                    func_args = {}
+            # Wave-1 N1: parallel tool execution + helper-driven classification.
+            # Previously this loop called `record_success` immediately after
+            # `traced_execute`, then re-checked `Error:` AFTER the fact —
+            # tools that swallow exceptions (web_search/fetch_url/ask_user)
+            # were counted as success and only later marked is_error,
+            # leaving the ToolRouter stats permanently polluted. Now we run
+            # in gather, classify once via helper, and write to ToolRouter
+            # in a single accounting pass.
+            # 之前 record_success 先于 Error 检测被调用,污染 router 统计;
+            # 改为 gather + classify_result 后单次入桶。
+            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool, bool]:
+                fn_name = tc.function.name
+                fn_args = self._parse_json(tc.function.arguments)
+                if fn_args is None:
+                    fn_args = {}
+                logger.info("[EmergentPlanner] Tool call: %s(%s)", fn_name, fn_args)
+                t = self.tools.get(fn_name)
+                if t is None:
+                    res = f"Error: Unknown tool '{fn_name}'"
+                    is_err, rl = classify_result(res, None)
+                    return tc, fn_name, fn_args, res, is_err, rl
+                attribute_caller(t, "EmergentPlanner")
+                try:
+                    res = await t.traced_execute(**fn_args)
+                    is_err, rl = classify_result(res, None)
+                    return tc, fn_name, fn_args, res, is_err, rl
+                except Exception as exc:
+                    res = f"Error: Tool execution error: {exc}"
+                    is_err, rl = classify_result(None, exc)
+                    return tc, fn_name, fn_args, res, is_err, rl
 
-                logger.info("[EmergentPlanner] Tool call: %s(%s)", func_name, func_args)
+            executions = await asyncio.gather(
+                *(_exec_one(tc) for tc in response_msg.tool_calls)
+            )
 
-                tool = self.tools.get(func_name)
-                is_error = False
-                if tool is None:
-                    result = f"Error: Unknown tool '{func_name}'"
+            truncation_limit = config_module.TOOL_RESULT_TRUNCATION_LIMIT
+            for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
+                if is_rate_limited:
+                    self.tool_router.record_rate_limited(str(todo.id), func_name)
+                elif is_error:
                     self.tool_router.record_failure(str(todo.id), func_name)
-                    is_error = True
                 else:
-                    try:
-                        result = await tool.traced_execute(**func_args)
-                        self.tool_router.record_success(str(todo.id), func_name)
-                    except Exception as exc:
-                        result = f"Error: Tool execution error: {exc}"
-                        self.tool_router.record_failure(str(todo.id), func_name)
-                        is_error = True
+                    self.tool_router.record_success(str(todo.id), func_name)
 
-                if isinstance(result, str) and result.startswith("Error:"):
-                    is_error = True
+                record_result, llm_result = truncate_for_llm(
+                    result, truncation_limit, is_error,
+                )
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
-                    result=result if is_error else result[:config_module.TOOL_RESULT_TRUNCATION_LIMIT],
+                    result=record_result,
                 ))
+
                 if is_error:
                     result_with_marker = (
-                        f"[TOOL ERROR] {result}\n\n"
+                        f"[TOOL ERROR] {llm_result}\n\n"
                         "IMPORTANT: The tool returned an error. Please analyze "
                         "the error and decide whether to retry with different "
                         "parameters or report the failure."
                     )
                 else:
-                    result_with_marker = result
+                    result_with_marker = llm_result
                 self.add_tool_result(tool_call.id, result_with_marker)
 
         logger.warning("[EmergentPlanner] TODO %d hit max iterations (%d)", todo.id, self.max_iterations)

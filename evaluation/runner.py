@@ -107,6 +107,10 @@ class EvaluationProbe:
         # Token tracking
         self.total_tokens: int = 0
         self.tokens_snapshot_before: int = 0
+        # Wave-7: SubAgent token bucket sourced from LLMCallRecord.caller_tag
+        # (Wave-6 view); preferred over the legacy event-derived sum because it
+        # is the single source of truth (LLMClient itself).
+        self.subagent_tokens_from_caller: int = 0
 
         # Task result
         self.final_answer: str = ""
@@ -310,6 +314,15 @@ class EvaluationProbe:
         elif event == "token_usage_summary":
             summary: TokenUsageSummary = data
             self.total_tokens = summary.total.total_tokens
+            # Wave-7: aggregate SubAgent tokens directly from caller_tag view.
+            # All "SubAgent-N" buckets are summed regardless of how many
+            # SubAgents were spawned; "unknown" / parent agent buckets are
+            # excluded.
+            self.subagent_tokens_from_caller = sum(
+                usage.total_tokens
+                for caller, usage in summary.by_caller.items()
+                if caller.startswith("SubAgent")
+            )
 
         elif event == "task_complete":
             self.execution_end = time.time()
@@ -531,8 +544,16 @@ class EvaluationProbe:
         replan_success = self.replan_count > 0 and task_success
         trajectory_eff = step_sr / max(self.total_react_iterations / max(self.steps_completed, 1), 1)
 
-        # v9 SubAgent total tokens (sum of all subagent_complete events' tokens_used)
-        sa_total_tokens = sum(int(r.get("tokens_used", 0) or 0) for r in self.subagent_results)
+        # v9 SubAgent total tokens.
+        # Wave-7: prefer LLMCallRecord.caller_tag aggregation (single source of
+        # truth — driven by Wave-6's per-agent attribution). Fall back to
+        # event-derived sum when caller_tag yields 0 (pre-Wave-6 traces, or
+        # SubAgent ran without token usage data from the provider).
+        # 优先用 Wave-6 注入的 caller_tag 聚合;事件聚合仅作 fallback。
+        sa_total_tokens_from_events = sum(
+            int(r.get("tokens_used", 0) or 0) for r in self.subagent_results
+        )
+        sa_total_tokens = self.subagent_tokens_from_caller or sa_total_tokens_from_events
 
         efficiency = EfficiencyMetrics(
             total_tokens=self.total_tokens,
@@ -573,10 +594,13 @@ class EvaluationProbe:
         sa_succ = sum(1 for r in sa if r.get("status") == "completed")
         subagent_metrics: dict[str, Any] = {}
         if sa_total > 0 or self.subagent_limits_hit > 0:
+            # Wave-7: tokens_total mirrors the sa_total_tokens decision —
+            # caller_tag-preferred, event-fallback. Same single-source-of-truth
+            # logic as the EfficiencyMetrics field above.
             subagent_metrics = {
                 "count": sa_total,
                 "success_rate": (sa_succ / sa_total) if sa_total else 1.0,
-                "tokens_total": sum(int(r.get("tokens_used", 0) or 0) for r in sa),
+                "tokens_total": sa_total_tokens,
                 "avg_iterations": (
                     sum(int(r.get("iterations_used", 0) or 0) for r in sa) / sa_total
                 ) if sa_total else 0.0,

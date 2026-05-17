@@ -64,7 +64,12 @@ from schema import (
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
-from agents.prompt_utils import build_system_prompt
+from agents.prompt_utils import build_convergence_hint, build_system_prompt
+from react.tool_call_helpers import (
+    attribute_caller,
+    classify_result,
+    truncate_for_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +95,7 @@ For each iteration you follow this sequence:
 - Prefer actions that directly contribute to the current milestone.
 """
 
-V8_GOAL_DRIVEN_SYSTEM_PROMPT = build_system_prompt(_V8_BASE_PROMPT)
+# Wave-2: prompt built per-instance in __init__ (see ExecutorAgent for rationale).
 
 # JSON prompt templates for structured LLM calls
 # 结构化 LLM 调用的 JSON 提示模板
@@ -237,9 +242,10 @@ class GoalDrivenPlannerAgent(BaseAgent):
         tool_router: ToolRouter | None = None,
         on_event: Callable[[str, Any], None] | None = None,
     ):
+        # Wave-2: build prompt per-instance, fresh date + HITL gating respected
         super().__init__(
             name="GoalDrivenPlanner",
-            system_prompt=V8_GOAL_DRIVEN_SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(_V8_BASE_PROMPT),
             llm_client=llm_client,
             context_manager=context_manager,
         )
@@ -607,8 +613,9 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 dep_context = "\n".join(dep_results)
 
         # Initialize bounded message list with system prompt
+        # Wave-2: use the per-instance prompt that was built in __init__
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": V8_GOAL_DRIVEN_SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
         ]
         tool_calls_log: list[ToolCallRecord] = []
 
@@ -630,6 +637,12 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 router_hint = self.tool_router.get_hint(step_id)
                 if router_hint:
                     user_msg += f"\n\nIMPORTANT: {router_hint}"
+                # Wave-1 N2: convergence hint, parity with ReActEngine.
+                # 收敛提示,与 ReActEngine 行为对齐。
+                tool_call_counts: dict[str, int] = {}
+                for tc in tool_calls_log:
+                    tool_call_counts[tc.tool_name] = tool_call_counts.get(tc.tool_name, 0) + 1
+                user_msg += build_convergence_hint(tool_call_counts)
 
             messages.append({"role": "user", "content": user_msg})
 
@@ -650,11 +663,14 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 messages = system_msgs + kept
 
             # Call LLM with tools
+            # Wave-6: caller_tag groups these LLM calls under "GoalDrivenPlanner"
+            # in the by_caller token view.
             try:
                 response_msg = await self.llm_client.chat_with_tools(
                     messages,
                     tools=self.tool_schemas,
                     temperature=0.5,
+                    caller_tag="GoalDrivenPlanner",
                 )
             except Exception as exc:
                 logger.error("[GoalDrivenPlanner] LLM call failed: %s", exc)
@@ -693,57 +709,70 @@ class GoalDrivenPlannerAgent(BaseAgent):
                     tool_calls_log=tool_calls_log,
                 )
 
-            # Execute tool calls
-            tool_messages: list[dict[str, Any]] = []
-            for tool_call in response_msg.tool_calls:
-                func_name = tool_call.function.name
+            # Execute tool calls in parallel via asyncio.gather (Wave-1 N2).
+            # Behavior mirrors react.engine.ReActEngine:
+            #   - attribute_caller(...) before traced_execute (H1)
+            #   - classify_result(...) for three-state semantics (H2)
+            #   - truncate_for_llm(...) so the LLM also sees a bounded payload (H3)
+            # Tool messages are written in original order to preserve
+            # assistant.tool_calls ↔ tool message alignment (OpenAI protocol).
+            # 通过 asyncio.gather 并行执行工具调用,行为与 ReActEngine 对齐。
+            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool, bool]:
+                fn_name = tc.function.name
                 try:
-                    func_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    func_args = {}
+                    fn_args = json.loads(tc.function.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    fn_args = {}
+                logger.info("[GoalDrivenPlanner] Tool call: %s(%s)", fn_name, fn_args)
+                t = self.tools.get(fn_name)
+                if t is None:
+                    res = f"Error: Unknown tool '{fn_name}'"
+                    is_err, rl = classify_result(res, None)
+                    return tc, fn_name, fn_args, res, is_err, rl
+                attribute_caller(t, "GoalDrivenPlanner")
+                try:
+                    res = await t.traced_execute(**fn_args)
+                    is_err, rl = classify_result(res, None)
+                    return tc, fn_name, fn_args, res, is_err, rl
+                except Exception as exc:
+                    res = f"Error: Tool execution error: {exc}"
+                    is_err, rl = classify_result(None, exc)
+                    return tc, fn_name, fn_args, res, is_err, rl
 
-                logger.info("[GoalDrivenPlanner] Tool call: %s(%s)", func_name, func_args)
+            executions = await asyncio.gather(
+                *(_exec_one(tc) for tc in response_msg.tool_calls)
+            )
 
-                # ToolRouter accounting: decide success vs failure AFTER detecting
-                # Error:-prefixed string returns. Mirrors the v12 fix in
-                # react/engine.py:251-261 — without this, tools that swallow
-                # exceptions and return error strings (web_search, fetch_url,
-                # ask_user timeout/cancel/limit) would be silently counted as
-                # success, defeating the failure-threshold mechanism.
-                # 与 v12 ReActEngine 同款：先执行 + 检测 Error: 前缀，再统一一次 record。
-                # 否则 ask_user 等返回 Error 字符串的工具会被误计为成功。
-                tool = self.tools.get(func_name)
-                if tool is None:
-                    result = f"Error: Unknown tool '{func_name}'"
-                    is_error = True
-                else:
-                    try:
-                        result = await tool.traced_execute(**func_args)
-                        is_error = isinstance(result, str) and result.startswith("Error:")
-                    except Exception as exc:
-                        result = f"Error: Tool execution error: {exc}"
-                        is_error = True
+            tool_messages: list[dict[str, Any]] = []
+            truncation_limit = config_module.TOOL_RESULT_TRUNCATION_LIMIT
 
-                if is_error:
+            for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
+                if is_rate_limited:
+                    self.tool_router.record_rate_limited(step_id, func_name)
+                elif is_error:
                     self.tool_router.record_failure(step_id, func_name)
                 else:
                     self.tool_router.record_success(step_id, func_name)
 
+                record_result, llm_result = truncate_for_llm(
+                    result, truncation_limit, is_error,
+                )
+
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,
                     parameters=func_args,
-                    result=result if is_error else result[:1000],
+                    result=record_result,
                 ))
 
                 if is_error:
                     result_with_marker = (
-                        f"[TOOL ERROR] {result}\n\n"
+                        f"[TOOL ERROR] {llm_result}\n\n"
                         "IMPORTANT: The tool returned an error. Please analyze "
                         "the error and decide whether to retry with different "
                         "parameters or report the failure."
                     )
                 else:
-                    result_with_marker = result
+                    result_with_marker = llm_result
 
                 tool_messages.append({
                     "role": "tool",

@@ -35,6 +35,28 @@ from tracing.spans import SpanName, AttrKey, EventName
 logger = logging.getLogger(__name__)
 
 
+# Sub-phase keywords (lowercased substring match).
+# 子组件（emergent_planner / goal_driven_planner / dag.executor 自适应规划）
+# 在 orchestrator 已经发了一个顶层 phase 之后，自身又 emit "phase" 做进度日志。
+# 这些字符串若被当成新 phase 切换，会把外层 execution.* phase span 关掉，
+# 导致后续 TODO/node span 失去父级、trace 树扁平化。
+# 这里把它们识别为「子 phase」：作为 span event 挂在当前 phase span 上，
+# 不切换 phase span，从而保留外层执行阶段的层级结构。
+_SUB_PHASE_KEYWORDS: tuple[str, ...] = (
+    # emergent_planner.py emits
+    "initializing emergent",
+    "emergent planning iteration",
+    "emergent planning completed",
+    # goal_driven_planner.py emits
+    "building goal",
+    "planning backward",
+    "compiling final answer",
+    "goal-driven planning completed",
+    # dag/executor.py adaptive
+    "adaptive planning check",
+)
+
+
 class TracingBridge:
     """
     Event-to-Span bridge for the Manus Demo event system.
@@ -80,6 +102,10 @@ class TracingBridge:
         # SubAgent-level tracking (v9)
         self._subagent_spans: dict[str, tuple[Span, Any]] = {}
 
+        # HITL-level tracking (v13): prompt_id -> (span, token)
+        # HITL 级别追踪（v13）：每次 ask_user 单独建短 span，prompt_id 关联
+        self._hitl_spans: dict[str, tuple[Span, Any]] = {}
+
         # Timing
         self._task_start_time: float = 0.0
 
@@ -105,7 +131,6 @@ class TracingBridge:
             "step_failed": self._on_step_failed,
             "reflection": self._on_reflection,
             "plan_adaptation": self._on_adaptation,
-            "adaptive_planning": self._on_adaptation,
             "token_usage_summary": self._on_token_usage,
             "task_complete": self._on_task_complete,
             "memory_stored": self._on_memory_stored,
@@ -123,6 +148,11 @@ class TracingBridge:
             # Wave C #6/#12: previously unconsumed SubAgent events
             "subagent_limit_exceeded": self._on_subagent_limit_exceeded,
             "subagent_iteration": self._on_subagent_iteration,
+            # v13 HITL events — each ask_user 建一个 hitl.ask_user 短 span
+            "ask_user_prompt": self._on_ask_user_prompt,
+            "ask_user_response": self._on_ask_user_response,
+            "ask_user_timeout": self._on_ask_user_timeout,
+            "ask_user_cancelled": self._on_ask_user_cancelled,
         }
 
     def on_event(self, event: str, data: Any = None) -> None:
@@ -224,17 +254,45 @@ class TracingBridge:
         - "Executing DAG (attempt 1)..."
         - "Reflecting on results..."
         - "Emergent planning completed."
+
+        Three categories (handled differently):
+        三类处理：
+        1. Sub-phase (emergent / goal-driven / adaptive 子组件 emit)：
+           作为 span event 挂在当前 phase span 上，**不切换** phase。
+        2. Mappable top-level phase（orchestrator 顶层切换）：关旧 phase，开新 phase。
+        3. Unmappable phase（未匹配任何规则）：保留当前 phase span 不动，
+           避免 unknown phase 把 phase 抹掉但不重建造成 orphan span。
         """
-        phase_text = str(data) if data else ""
+        phase_text = (str(data) if data else "").strip()
+        if not phase_text:
+            return
+        text_lower = phase_text.lower()
 
-        # End previous phase span if exists
-        self._end_phase_span()
+        # ① Sub-phase：作为 span event 落地，不动 phase span
+        if any(kw in text_lower for kw in _SUB_PHASE_KEYWORDS):
+            target = self._phase_span or self._root_span
+            if target is not None:
+                try:
+                    target.add_event(
+                        "sub_phase",
+                        attributes={"phase": phase_text[:200]},
+                    )
+                except Exception:
+                    logger.debug("[TracingBridge] failed to record sub_phase event", exc_info=True)
+            return
 
-        # Determine span name from phase text
+        # ② Top-level phase：先映射，再决定是否切换
         span_name = self._phase_to_span_name(phase_text)
         if not span_name:
-            return  # Unknown phase, skip
+            # ③ Unknown phase：不动当前 phase span，避免 orphan
+            logger.debug(
+                "[TracingBridge] unmapped phase '%s' kept current phase",
+                phase_text,
+            )
+            return
 
+        # Mapped to a real phase — switch
+        self._end_phase_span()
         self._current_phase = phase_text
 
         # Create new phase span (child of root)
@@ -252,6 +310,12 @@ class TracingBridge:
         for todo_id in list(self._todo_spans.keys()):
             self._end_todo_span(todo_id, StatusCode.OK)
 
+        # End any open HITL spans (defensive — should normally be closed by
+        # ask_user_response/timeout/cancelled events before phase switches)
+        # 防御性清理：HITL span 正常应在 phase 切换前已关闭，兜底防 orphan
+        for prompt_id in list(self._hitl_spans.keys()):
+            self._end_hitl_span(prompt_id, StatusCode.ERROR, description="phase ended without HITL response")
+
         # End any super-step span (DAG mode cleanup)
         self._end_superstep_span()
 
@@ -267,45 +331,58 @@ class TracingBridge:
 
     @staticmethod
     def _phase_to_span_name(phase_text: str) -> str:
-        """Map phase text to a structured span name."""
+        """Map phase text to a structured span name.
+
+        Rule ordering matters. "Executing with emergent planning (TODO list)..."
+        contains both 'planning' and 'emergent', and the user-visible *intent* is
+        execution, not planning — so the 'executing' family is matched FIRST.
+        Same logic for 'partial replan' / 'replan' (more specific first).
+
+        规则顺序很关键：先匹配 'executing X'（执行类），再匹配 'planning X'（规划类），
+        否则 "Executing with emergent planning..." 会被错归为 CREATE_TODO_LIST。
+        """
         text_lower = phase_text.lower()
 
         if "gathering context" in text_lower:
             return SpanName.GATHER_CONTEXT
-        elif "classifying" in text_lower:
+        if "classifying" in text_lower:
             return SpanName.CLASSIFY_TASK
-        elif "planning" in text_lower and "v1" in text_lower:
-            return SpanName.CREATE_PLAN
-        elif "planning" in text_lower and "v2" in text_lower:
-            return SpanName.CREATE_DAG
-        elif "planning" in text_lower and ("dag" in text_lower or "hierarchical" in text_lower):
-            return SpanName.CREATE_DAG
-        elif "planning" in text_lower and "emergent" in text_lower:
-            return SpanName.CREATE_TODO_LIST
-        elif "planning" in text_lower and "todo" in text_lower:
-            return SpanName.CREATE_TODO_LIST
-        elif "executing" in text_lower and "simple" in text_lower:
+        # Execution family — must come before 'planning' so "Executing with emergent
+        # planning..." is recognized as EXECUTION_EMERGENT, not CREATE_TODO_LIST.
+        if "executing" in text_lower and "simple" in text_lower:
             return SpanName.EXECUTION_SIMPLE
-        elif "executing" in text_lower and "dag" in text_lower:
+        if "executing" in text_lower and "dag" in text_lower:
             return SpanName.EXECUTION_DAG
-        elif "executing" in text_lower and "emergent" in text_lower:
+        if "executing" in text_lower and "emergent" in text_lower:
             return SpanName.EXECUTION_EMERGENT
-        elif "executing" in text_lower and ("goal-driven" in text_lower or "v8" in text_lower):
+        if "executing" in text_lower and ("goal-driven" in text_lower or "v8" in text_lower):
             return SpanName.EXECUTION_GOAL_DRIVEN
-        elif "building goal" in text_lower or ("backward" in text_lower and "planning" in text_lower):
+        # Planning family
+        if "planning" in text_lower and "v1" in text_lower:
+            return SpanName.CREATE_PLAN
+        if "planning" in text_lower and "v2" in text_lower:
+            return SpanName.CREATE_DAG
+        if "planning" in text_lower and ("dag" in text_lower or "hierarchical" in text_lower):
+            return SpanName.CREATE_DAG
+        if "planning" in text_lower and "emergent" in text_lower:
+            return SpanName.CREATE_TODO_LIST
+        if "planning" in text_lower and "todo" in text_lower:
+            return SpanName.CREATE_TODO_LIST
+        # Goal-driven scaffolding (most are sub_phases now; kept for back-compat)
+        if "building goal" in text_lower or ("backward" in text_lower and "planning" in text_lower):
             return SpanName.GOAL_ANCHOR
-        elif "compiling" in text_lower:
+        if "compiling" in text_lower:
             return SpanName.GOAL_ANCHOR
-        elif "reflecting" in text_lower:
+        if "reflecting" in text_lower:
             return SpanName.REFLECT
-        elif "re-planning" in text_lower or "replan" in text_lower:
-            return SpanName.REPLAN
-        elif "partial replan" in text_lower:
+        # 'partial replan' must come before 'replan' (more specific first)
+        if "partial replan" in text_lower:
             return SpanName.REPLAN_SUBTREE
-        elif "adaptive" in text_lower:
+        if "re-planning" in text_lower or "replan" in text_lower:
+            return SpanName.REPLAN
+        if "adaptive" in text_lower:
             return SpanName.ADAPTIVE_PLANNING
-        else:
-            return ""
+        return ""
 
     # ------------------------------------------------------------------
     # Plan Events
@@ -913,6 +990,119 @@ class TracingBridge:
                 })
             except Exception:
                 logger.debug("[TracingBridge] failed to record subagent iteration", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # HITL Events (v13)
+    # 人机交互事件（v13 新增）
+    # ------------------------------------------------------------------
+    #
+    # 每次 ask_user 调用建模为一个 hitl.ask_user.<prompt_id> 短 span：
+    #   prompt    -> start
+    #   response  -> end (OK)
+    #   timeout   -> end (ERROR, "HITL timeout")
+    #   cancelled -> end (ERROR, "HITL cancelled by user")
+    #
+    # span 父级 = 当前 phase span（execution.simple/dag/emergent/...）
+    # 或 root span（防御性兜底）。这样 trace 树里能直接看到「等待用户多久」。
+    #
+    # 注意：ask_user_prompt.data 携带 asyncio.Future（response_future），
+    # 不可序列化为 OTel attribute，必须在 set_attribute 之前剥离。
+
+    def _on_ask_user_prompt(self, data: Any) -> None:
+        """Open a short-lived span when LLM calls ask_user."""
+        if not isinstance(data, dict):
+            return
+        prompt_id = data.get("prompt_id", "unknown")
+        question = data.get("question", "")
+
+        span_name = f"{SpanName.HITL_ASK_USER}.{prompt_id}"
+
+        # Parent = current phase span if any, else root
+        parent_span = self._phase_span or self._root_span
+        parent_context = (
+            trace.set_span_in_context(parent_span) if parent_span is not None else None
+        )
+
+        span = self._tracer.start_span(span_name, context=parent_context)
+        token = otel_context.attach(trace.set_span_in_context(span))
+
+        span.set_attribute(AttrKey.HITL_PROMPT_ID, str(prompt_id))
+        if question:
+            self._safe_set_attr(span, AttrKey.HITL_QUESTION, question)
+
+        # response_future is an asyncio.Future — non-serializable, must NOT
+        # be passed to set_attribute. We do not record it.
+        # response_future 是 asyncio.Future，无法序列化，绝不写入 attribute。
+
+        self._hitl_spans[str(prompt_id)] = (span, token)
+
+    def _on_ask_user_response(self, data: Any) -> None:
+        """Close the HITL span with OK status when user replies."""
+        if not isinstance(data, dict):
+            return
+        prompt_id = str(data.get("prompt_id", "unknown"))
+
+        if prompt_id in self._hitl_spans:
+            span, _ = self._hitl_spans[prompt_id]
+            response = data.get("response", "")
+            if response:
+                self._safe_set_attr(span, AttrKey.HITL_RESPONSE, response)
+            prompt_count = data.get("prompt_count")
+            if prompt_count is not None:
+                span.set_attribute(AttrKey.HITL_PROMPT_COUNT, int(prompt_count))
+
+        self._end_hitl_span(prompt_id, StatusCode.OK)
+
+    def _on_ask_user_timeout(self, data: Any) -> None:
+        """Close the HITL span with ERROR status when user input times out."""
+        if not isinstance(data, dict):
+            return
+        prompt_id = str(data.get("prompt_id", "unknown"))
+
+        if prompt_id in self._hitl_spans:
+            span, _ = self._hitl_spans[prompt_id]
+            timeout = data.get("timeout")
+            if timeout is not None:
+                span.set_attribute(AttrKey.HITL_TIMEOUT_SECONDS, int(timeout))
+            prompt_count = data.get("prompt_count")
+            if prompt_count is not None:
+                span.set_attribute(AttrKey.HITL_PROMPT_COUNT, int(prompt_count))
+
+        self._end_hitl_span(prompt_id, StatusCode.ERROR, description="HITL timeout")
+
+    def _on_ask_user_cancelled(self, data: Any) -> None:
+        """Close the HITL span with ERROR status when user cancels (Ctrl+C/EOF)."""
+        if not isinstance(data, dict):
+            return
+        prompt_id = str(data.get("prompt_id", "unknown"))
+
+        if prompt_id in self._hitl_spans:
+            span, _ = self._hitl_spans[prompt_id]
+            prompt_count = data.get("prompt_count")
+            if prompt_count is not None:
+                span.set_attribute(AttrKey.HITL_PROMPT_COUNT, int(prompt_count))
+
+        self._end_hitl_span(
+            prompt_id, StatusCode.ERROR, description="HITL cancelled by user"
+        )
+
+    def _end_hitl_span(
+        self,
+        prompt_id: str,
+        status_code: StatusCode,
+        description: str | None = None,
+    ) -> None:
+        """End a specific HITL span; if missing (e.g. duplicate event), no-op."""
+        if prompt_id in self._hitl_spans:
+            span, token = self._hitl_spans.pop(prompt_id)
+            if description:
+                span.set_status(status_code, description)
+            else:
+                span.set_status(status_code)
+            span.end()
+            # ValueError from cross-Task context detach is caught internally by OTel library
+            # and logged as ERROR. Suppressed via OtelDetachFilter in main.py setup_logging().
+            otel_context.detach(token)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -1,11 +1,11 @@
 # Manus Demo 更新日志
 
-> **更新日期**: 2026-05-14
-> **当前版本**: v9.0
+> **更新日期**: 2026-05-17
+> **当前版本**: v9.1（Wave-1..7 SubAgent overhaul）
 
 ## 概述
 
-Manus Demo 是一个多智能体系统 Demo，经历了 7 个主要版本的演进，从简单的线性规划逐步发展为支持三种规划范式的混合系统，并引入 SubAgent 多智能体协作和全链路 Tracing 可观测性。
+Manus Demo 是一个多智能体系统 Demo，经历了 7 个主要版本的演进，从简单的线性规划逐步发展为支持三种规划范式的混合系统，并引入 SubAgent 多智能体协作和全链路 Tracing 可观测性。v9.1 在 v9 SubAgent 落地一段时间后，通过六波（Wave-1..7）迭代消除上下游一致性裂缝、补齐 Token 归因可观测性。
 
 ## 版本演进
 
@@ -19,7 +19,93 @@ v6 → LLM 重试机制（指数退避）+ ReActEngine 统一引擎 Feature Flag
 v7 → 全链路 Tracing（OpenTelemetry 标准 Span 树）+ 内置 Web Viewer（FastAPI 树形可视化）
 v8 → 目标驱动规划（ReflAct 风格「以终为始」）+ GoalDocument 持久锚定 + 逆向里程碑规划 + 目标状态反思 + 周期性重锚定 + 停滞检测
 v9 → SubAgent 多智能体协作（Claude Code Subagent 模式）+ depth=1 结构隔离 + 纯摘要返回 + Token 预算熔断 + 反模式防御 + Tracing 集成
+v9.1 → ReAct 三循环 helper 共享 + 系统提示运行时化（HITL 双门控真实生效）+ 资源卫生（sandbox 跨任务清理 / 末轮 tool log 恢复）+ 按 caller 的 Token 归因（gen_ai.caller）+ 评测单一数据源
 ```
+
+---
+
+## v9.1 (2026-05-17) — SubAgent 全链路优化（Wave-1..7）
+
+### 背景
+
+v9.0 SubAgent 骨架（depth=1 结构性排除、Token 预算熔断、Semaphore 限并发）设计扎实，但运行一段时间后暴露出**上下游一致性裂缝**：同类修复（set_caller / TOOL_RESULT_TRUNCATION_LIMIT / rate_limited 三态）只在 ReActEngine 路径上彻底落地，迁移到 GoalDrivenPlanner / EmergentPlanner legacy 时是「半迁移」；系统提示又是 import 时一次性烧录，使 v13 HITL 双门控承诺被悄悄破坏。本次以 6 个 wave 系统消除裂缝。
+
+### Wave-1：抽公共 helper 统一三套 ReAct 循环
+
+新建 `react/tool_call_helpers.py` 暴露三个纯函数：
+
+- `attribute_caller(tool, agent_name)` —— 调用前向支持 set_caller 的工具注入 caller 名称
+- `classify_result(result, exc)` → `(is_error, is_rate_limited)` —— 三态分类，常量 `RATE_LIMITED_MARKER="SubAgent call limit reached"`
+- `truncate_for_llm(result, limit, is_error)` → `(record_str, llm_str)` —— 截断 + marker 标记
+
+`react.engine.ReActEngine`、`agents.goal_driven_planner._execute_todo_goal_guided`、`agents.emergent_planner._execute_todo`（legacy）三套循环统一调用 helper。**消灭**：
+
+- **H1** GoalDrivenPlanner 不调 set_caller → SubAgent.parent_agent 恒为 OrchestratorAgent
+- **H2** GoalDrivenPlanner 无 rate_limited 三态 → SubAgent call-limit 错算 failure 污染 ToolRouter
+- **H3** GoalDrivenPlanner 用 `result[:1000]` 仅截 ToolCallRecord，LLM 仍看到原文
+- **N1** EmergentPlanner legacy 同款三项缺失，且 is_error 检测在 record_success 之后污染统计
+- **N2** GoalDrivenPlanner 工具循环串行 + 缺 build_convergence_hint（顺手补齐）
+- **N5** SubAgentTool.execute 入口立即 `local_parent = self._parent_name`，从靠"无 await"假设升级为显式不变量
+
+### Wave-2：系统提示运行时化（消除模块级烧录）
+
+`EXECUTOR_SYSTEM_PROMPT` / `EMERGENT_PLANNER_SYSTEM_PROMPT` / `V8_GOAL_DRIVEN_SYSTEM_PROMPT` / `SIMPLE_PLANNER_SYSTEM_PROMPT` / `PLANNER_SYSTEM_PROMPT` 5 处模块级常量 → 改为各 Agent `__init__` 内调 `build_system_prompt(_BASE_PROMPT, ...)` 写入 `self.system_prompt`。Planner 的 SIMPLE/COMPLEX 切换由 `_build_simple_planner_prompt()` / `_build_planner_prompt()` builder 函数代替模块常量赋值。SubAgent 系统提示加 `inject_hitl_guidance=False`（M1）。**消灭**：
+
+- **H4** 注入的"今日日期"跨午夜陈旧 + HITL 双门控被 import 时机破坏（原 v13 设计在 run_single + HITL_ENABLED=true 时悄悄失效）
+- **M1** SubAgent 看到 `ask_user` 引导但工具被结构性排除，白白消耗一轮迭代调用不存在的工具
+
+### Wave-3 + Wave-4：可观测性 + 资源卫生
+
+- **M2** ReActEngine.tool_calls_log 提升为 `self._current_log` 成员属性。SubAgent 失败路径（timeout/budget/exception）新增 `_failure_tool_calls()` 优先读 `self._react_engine._current_log`（实时 mid-iteration），fallback 到 `_accumulated_tool_calls`（on_iteration 末尾快照），不再丢失最后一轮调用记录。**关键并发不变量**：每次 `execute()` 重新 bind 到新 list，不 `clear()` 旧 list（避免 DAG 并行场景下清空别的 task 在用的 list）
+- **M3** `SubAgentTool.reset_task_state()` 同时清理 `SANDBOX_DIR/subagent_<digits>` 子目录，消除"鬼影 context"（新任务的 SubAgent-1 看到上次任务遗留文件）
+- **M4** `os.makedirs` 改为 `await asyncio.to_thread(os.makedirs, ...)`，慢盘上不阻塞事件循环
+- **M5** SubAgentTool.execute 死代码 `except asyncio.TimeoutError` 删除（外层无 wait_for，该分支永不触发），改为 `except asyncio.CancelledError` re-raise
+- **M6** `SubAgent._summarize_result` unexpected-structure 路径加固：pydantic 默认值会让 `{"foo":"bar"}` 静默通过 `SubAgentSummary.model_validate`，新增"是否含任一已知 schema key"判定，否则把 repr 塞 `issues` 字段，`accomplished` 留空（不再谎报成果）
+- **L2** `task_description` 长度上限 `SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH`（默认 2000），超出截断 + `[Description truncated...]` marker
+- **L5** `subagent_iteration` UI 渲染按 `SUBAGENT_ITERATION_EVENT_VERBOSITY` 配置（`summary` / `full` / `silent`），DAG 并行 + 多 SubAgent 时不再噪声爆炸
+
+### Wave-6：按 caller 的 Token 归因
+
+- **N4 / L1** `LLMCallRecord` 新增 `caller_tag: str = ""` 字段，`TokenUsageSummary` 新增 `by_caller: dict[str, TokenUsage]` 视图（与 `by_engine` 并行，不替换）
+- LLMClient 三入口 `chat` / `chat_with_tools` / `chat_json` 加显式命名参数 `caller_tag`（**不**走 kwargs 防泄漏给 OpenAI API），`_record_call` / `_start_llm_span` 同款透传
+- BaseAgent.think_*() 自动用 `self.name` 作为 caller_tag（`kwargs.setdefault`，显式传值优先），覆盖 Planner / Reflector / EmergentPlanner / SubAgent 的所有 think_* 调用
+- 直接持有 llm_client 的三处显式传：ReActEngine → `self.agent_name`，GoalDrivenPlanner._execute_todo_goal_guided → `"GoalDrivenPlanner"`，SubAgent._summarize_result → `self.name`
+- `Orchestrator._finalize_token_usage` 新增 `by_caller` 聚合，无 caller_tag 的记录进 `"unknown"` 桶
+- LLM span 新增 `gen_ai.caller` 属性
+- `main.py` UI 新增 by_caller 表格（magenta 主题，SubAgent 行排底）
+- 端到端真实跑通，trace 文件直接显示 `GoalDrivenPlanner: 30092 / SubAgent-1: 6377 / SubAgent-2: 5696` 完整分账
+
+### Wave-7：评测 + 文档
+
+- `evaluation/runner.py` SubAgent token 总量优先用 `LLMCallRecord.caller_tag`（以 "SubAgent" 前缀过滤），事件聚合作为 fallback。单一数据源，与 UI/trace 数字必然一致
+- CLAUDE.md 第 20 / 21 条改写，反映 helper 抽取后的实际状态；新增第 30-34 条覆盖 Wave-1..7 的不变量
+
+### Wave-5（待办，风险最高）
+
+`tools/shell_tool.py:130` `_run_shell` 是 `@staticmethod` 直接用 `config.SANDBOX_DIR`，完全绕过 `self._workdir` —— SubAgent 沙箱结构性隔离的前置阻塞项。本次未做，留作后续 cleanup 单独 PR。
+
+### 关键工程不变量（已写入 CLAUDE.md 第 30-34 条）
+
+1. **`caller_tag` 是命名参数，不放 `**kwargs`** —— 否则会作为额外参数传给 OpenAI API
+2. **`ReActEngine._current_log` 每次 execute() 重新 bind 到新 list，不 clear** —— `clear()` 模式在 DAG 并行下会清空另一 task 仍在用的 list 引用
+3. **`SubAgentTool.execute()` 入口的 `local_parent = self._parent_name`** —— Wave-4 引入的 makedirs await 期间另一 task 可能 set_caller 覆盖，局部捕获保归因
+4. **`react.engine` 不能在模块顶部 import `agents.prompt_utils`** —— 触发 `agents/__init__.py` 的 eager subagent import 形成循环，必须在 `execute()` 内延迟 import
+5. **系统提示在 `__init__` 构建，不在模块级** —— 模块级会冻结日期 + 在 OrchestratorAgent 设 HITL override 之前求值，破坏 v13 双门控
+
+### 测试与覆盖
+
+- 新建 `tests/test_tool_call_helpers.py`（21 单元）/ `tests/test_token_attribution.py`（14 单元）/ `tests/test_prompt_freshness.py`（11 单元）/ `tests/test_wave3_wave4.py`（11 单元 + 集成，含 Wave-3 并发安全 + N5/M4 互动）
+- `tests/test_subagent.py` 扩展 3 条跨引擎集成测试 + 重写 7 条 prompt composition（适配 Wave-2 移除模块级常量）+ 修 1 条 pre-existing 测试 bug
+- 全套 490 passed / 1 pre-existing fail（test_medium_parallelism DAG 计数，与本次改动无关）
+- 三次真实 LLM 端到端冒烟，trace 文件证实归因完整
+
+### 新增配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH` | `2000` | Wave-4 L2：超长 task_description 截断 |
+| `SUBAGENT_ITERATION_EVENT_VERBOSITY` | `summary` | Wave-4 L5：UI 渲染粒度（summary/full/silent） |
+| `SUBAGENT_ITERATION_EVENT_EVERY_N` | `2` | Wave-4 L5：summary 模式每 N 轮渲染一次 |
 
 ---
 

@@ -106,11 +106,16 @@ You MUST respond with a valid JSON object in this exact format:
 }
 """
 
-SIMPLE_PLANNER_SYSTEM_PROMPT = build_system_prompt(
-    _SIMPLE_PLANNER_BASE_PROMPT,
-    inject_context=True,
-    inject_subagent_guidance=False,
-)
+# Wave-2: builder functions instead of module-level constants. The Planner's
+# create_plan() / create_dag() / replan() each rebuild the system prompt before
+# use, so the date / HITL guidance reflect runtime state. Module-level
+# evaluation would freeze them at import time.
+def _build_simple_planner_prompt() -> str:
+    return build_system_prompt(
+        _SIMPLE_PLANNER_BASE_PROMPT,
+        inject_context=True,
+        inject_subagent_guidance=False,
+    )
 
 _PLANNER_BASE_PROMPT = """\
 You are a hierarchical task planning agent. Your job is to decompose a
@@ -244,11 +249,12 @@ You MUST respond with a valid JSON object in this exact format:
 }
 """
 
-PLANNER_SYSTEM_PROMPT = build_system_prompt(
-    _PLANNER_BASE_PROMPT,
-    inject_context=True,
-    inject_subagent_guidance=False,
-)
+def _build_planner_prompt() -> str:
+    return build_system_prompt(
+        _PLANNER_BASE_PROMPT,
+        inject_context=True,
+        inject_subagent_guidance=False,
+    )
 
 
 class PlannerAgent(BaseAgent):
@@ -305,9 +311,11 @@ class PlannerAgent(BaseAgent):
     )
 
     def __init__(self, llm_client: LLMClient, context_manager: ContextManager | None = None):
+        # Wave-2: build prompt per-instance (default to DAG/complex form;
+        # create_plan/create_dag below switch as needed).
         super().__init__(
             name="Planner",
-            system_prompt=PLANNER_SYSTEM_PROMPT,
+            system_prompt=_build_planner_prompt(),
             llm_client=llm_client,
             context_manager=context_manager,
         )
@@ -481,7 +489,7 @@ class PlannerAgent(BaseAgent):
         Uses SIMPLE_PLANNER_SYSTEM_PROMPT for a lightweight 2-6 step plan.
         使用 SIMPLE_PLANNER_SYSTEM_PROMPT 生成 2-6 步的轻量级计划。
         """
-        self.system_prompt = SIMPLE_PLANNER_SYSTEM_PROMPT
+        self.system_prompt = _build_simple_planner_prompt()
         self.reset()
 
         prompt = f"Create an execution plan for this task:\n\nTask: {task}"
@@ -492,7 +500,7 @@ class PlannerAgent(BaseAgent):
         result = await self.think_json(prompt, temperature=0.3)
         plan = self._parse_plan(task, result)
 
-        self.system_prompt = PLANNER_SYSTEM_PROMPT
+        self.system_prompt = _build_planner_prompt()
         return plan
 
     async def replan(
@@ -506,7 +514,7 @@ class PlannerAgent(BaseAgent):
         Revise the flat plan based on execution progress and feedback (v1 path).
         基于执行进度和反馈修订扁平计划（v1 路径）。
         """
-        self.system_prompt = SIMPLE_PLANNER_SYSTEM_PROMPT
+        self.system_prompt = _build_simple_planner_prompt()
         self.reset()
 
         completed_summary = "\n".join(
@@ -541,7 +549,7 @@ class PlannerAgent(BaseAgent):
         result = await self.think_json(prompt, temperature=0.3)
         plan = self._parse_plan(task, result)
 
-        self.system_prompt = PLANNER_SYSTEM_PROMPT
+        self.system_prompt = _build_planner_prompt()
         return plan
 
     @staticmethod

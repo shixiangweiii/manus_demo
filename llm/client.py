@@ -75,6 +75,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        caller_tag: str = "",
         **kwargs: Any,
     ) -> str:
         """
@@ -84,10 +85,14 @@ class LLMClient:
 
         v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
         v7.0: Tracing integration — creates llm.chat span when TRACING_ENABLED=true.
+        Wave-6: caller_tag is recorded on the LLMCallRecord and the LLM span so
+                token usage can be attributed per-agent (SubAgent / Executor / ...).
         """
         # Allow internal callers (e.g. chat_json fallback) to suppress duplicate span creation
         skip_tracing = kwargs.pop("_skip_tracing", False)
-        span_ctx = None if skip_tracing else self._start_llm_span("chat", messages, temperature, max_tokens)
+        span_ctx = None if skip_tracing else self._start_llm_span(
+            "chat", messages, temperature, max_tokens, caller_tag=caller_tag,
+        )
         last_error: Exception | None = None
         try:
             for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
@@ -100,7 +105,7 @@ class LLMClient:
                         **kwargs,
                     )
                     if config.TOKEN_TRACKING_ENABLED:
-                        self._record_call(resp.usage, "chat", messages)
+                        self._record_call(resp.usage, "chat", messages, caller_tag=caller_tag)
                     result = resp.choices[0].message.content or ""
                     response_data = self._extract_response_data(resp, "chat")
                     self._end_llm_span(span_ctx, success=True, response_data=response_data)
@@ -129,6 +134,7 @@ class LLMClient:
         tools: list[dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        caller_tag: str = "",
         **kwargs: Any,
     ) -> Any:
         """
@@ -143,8 +149,11 @@ class LLMClient:
 
         v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
         v7.0: Tracing integration — creates llm.chat_with_tools span when TRACING_ENABLED=true.
+        Wave-6: caller_tag is recorded on the LLMCallRecord and the LLM span.
         """
-        span_ctx = self._start_llm_span("chat_with_tools", messages, temperature, max_tokens)
+        span_ctx = self._start_llm_span(
+            "chat_with_tools", messages, temperature, max_tokens, caller_tag=caller_tag,
+        )
         last_error: Exception | None = None
         try:
             for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
@@ -159,7 +168,7 @@ class LLMClient:
                         **kwargs,
                     )
                     if config.TOKEN_TRACKING_ENABLED:
-                        self._record_call(resp.usage, "chat_with_tools", messages)
+                        self._record_call(resp.usage, "chat_with_tools", messages, caller_tag=caller_tag)
                     result = resp.choices[0].message
                     response_data = self._extract_response_data(resp, "chat_with_tools")
                     self._end_llm_span(span_ctx, success=True, response_data=response_data)
@@ -187,6 +196,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        caller_tag: str = "",
         **kwargs: Any,
     ) -> Any:
         """
@@ -199,8 +209,13 @@ class LLMClient:
         用于 Planner 生成计划、Reflector 生成评估结果等结构化输出场景。
 
         v7.0: Tracing integration — creates llm.chat_json span when TRACING_ENABLED=true.
+        Wave-6: caller_tag is recorded on the LLMCallRecord and the LLM span.
+                The fallback path forwards caller_tag to chat() so attribution
+                survives JSON-mode-not-supported degradation.
         """
-        span_ctx = self._start_llm_span("chat_json", messages, temperature, max_tokens)
+        span_ctx = self._start_llm_span(
+            "chat_json", messages, temperature, max_tokens, caller_tag=caller_tag,
+        )
         response_data: dict[str, Any] | None = None
         try:
             try:
@@ -214,14 +229,20 @@ class LLMClient:
                     **kwargs,
                 )
                 if config.TOKEN_TRACKING_ENABLED:
-                    self._record_call(resp.usage, "chat_json", messages)
+                    self._record_call(resp.usage, "chat_json", messages, caller_tag=caller_tag)
                 text = resp.choices[0].message.content or "{}"
                 logger.debug("[chat_json] Raw response: %.500s", text)
                 response_data = self._extract_response_data(resp, "chat_json")
             except Exception:
                 # 部分模型/服务不支持 response_format，降级为普通文本模式
                 logger.warning("JSON mode not supported, falling back to plain text")
-                text = await self.chat(messages, temperature=temperature, max_tokens=max_tokens, _skip_tracing=True)
+                text = await self.chat(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    caller_tag=caller_tag,
+                    _skip_tracing=True,
+                )
                 logger.debug("[chat_json] Fallback response: %.500s", text)
                 response_data = {"response_content": text, "tool_calls": None, "finish_reason": "fallback"}
 
@@ -275,8 +296,19 @@ class LLMClient:
     # Token 消耗追踪
     # ------------------------------------------------------------------
 
-    def _record_call(self, usage: Any, call_type: str, messages: list[dict[str, Any]]) -> None:
-        """Record token usage for a single LLM API call."""
+    def _record_call(
+        self,
+        usage: Any,
+        call_type: str,
+        messages: list[dict[str, Any]],
+        caller_tag: str = "",
+    ) -> None:
+        """Record token usage for a single LLM API call.
+
+        Wave-6: caller_tag identifies which agent issued the call so the
+        Orchestrator can build a by_caller token view (SubAgent gets its
+        own bucket separate from the parent).
+        """
         if not config.TOKEN_TRACKING_ENABLED:
             return
 
@@ -304,6 +336,7 @@ class LLMClient:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             engine=self.model,
+            caller_tag=caller_tag,
         ))
 
     def get_call_records(self) -> list[LLMCallRecord]:
@@ -319,10 +352,20 @@ class LLMClient:
     # 追踪辅助方法（v7 新增）
     # ------------------------------------------------------------------
 
-    def _start_llm_span(self, call_type: str, messages: list[dict], temperature: float, max_tokens: int) -> Any:
+    def _start_llm_span(
+        self,
+        call_type: str,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        caller_tag: str = "",
+    ) -> Any:
         """
         Start a tracing span for an LLM call (if tracing is enabled).
         为 LLM 调用创建追踪 Span（如果 tracing 已启用）。
+
+        Wave-6: caller_tag is set as `gen_ai.caller` so trace consumers can
+        filter/group LLM spans by issuing agent (SubAgent / Executor / ...).
 
         Returns an opaque context object (span + token) or None.
         返回一个不透明的上下文对象（span + token）或 None。
@@ -351,19 +394,42 @@ class LLMClient:
             span.set_attribute("gen_ai.system", "openai")
             span.set_attribute("gen_ai.request.model", self.model)
             span.set_attribute("gen_ai.call_type", call_type)
+            if caller_tag:
+                # Wave-6: per-agent attribution
+                span.set_attribute("gen_ai.caller", caller_tag)
             if temperature is not None:
                 span.set_attribute("gen_ai.request.temperature", temperature)
             if max_tokens is not None:
                 span.set_attribute("gen_ai.request.max_tokens", max_tokens)
 
             # Record prompt content (full, unconditional, no truncation — demo/tutorial use)
+            # v13: include assistant.tool_calls and tool message correlation fields
+            # (tool_call_id / name) so the trace preserves the v12 ReAct chain.
+            # 把 assistant.tool_calls 与 tool 消息关联字段也带上，否则 v12 ReAct 链路在 trace 里看不见。
             if messages:
                 parts = []
                 for msg in messages:
                     role = msg.get("role", "")
                     content = msg.get("content", "")
+                    tool_calls = msg.get("tool_calls")
+                    tool_call_id = msg.get("tool_call_id")
+                    name = msg.get("name")
+                    header = f"[{role}]"
+                    if name:
+                        header += f" name={name}"
+                    if tool_call_id:
+                        header += f" tool_call_id={tool_call_id}"
+                    body_lines: list[str] = []
                     if content:
-                        parts.append(f"[{role}]\n{content}")
+                        body_lines.append(str(content))
+                    if tool_calls:
+                        try:
+                            tc_repr = json.dumps(tool_calls, ensure_ascii=False, default=str)
+                        except (TypeError, ValueError):
+                            tc_repr = str(tool_calls)
+                        body_lines.append(f"tool_calls={tc_repr}")
+                    if body_lines:
+                        parts.append(f"{header}\n" + "\n".join(body_lines))
                 if parts:
                     span.set_attribute("gen_ai.prompt.content", "\n\n".join(parts))
 

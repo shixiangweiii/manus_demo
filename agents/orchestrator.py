@@ -672,19 +672,38 @@ class OrchestratorAgent:
     # ------------------------------------------------------------------
 
     def _finalize_token_usage(self) -> TokenUsageSummary:
-        """Compute token usage summary from per-call records."""
+        """Compute token usage summary from per-call records.
+
+        Wave-6: in addition to the existing by_engine view, build a by_caller
+        view (one bucket per agent that issued LLM calls). Records lacking a
+        caller_tag (legacy / pre-Wave-6) fall into the "unknown" bucket so
+        they remain visible rather than silently dropped.
+        """
         call_records = self.llm_client.get_call_records()
         summary = TokenUsageSummary(call_records=call_records)
 
         # 按引擎汇总
         by_engine: dict[str, TokenUsage] = {}
+        # Wave-6: 按调用者(Agent)汇总
+        by_caller: dict[str, TokenUsage] = {}
         for record in call_records:
             if record.engine not in by_engine:
                 by_engine[record.engine] = TokenUsage(engine=record.engine)
             by_engine[record.engine].prompt_tokens += record.prompt_tokens
             by_engine[record.engine].completion_tokens += record.completion_tokens
             by_engine[record.engine].total_tokens += record.total_tokens
+
+            # by_caller: empty caller_tag → "unknown" bucket so untagged calls
+            # remain visible (any non-zero count there points to a missing
+            # caller_tag wiring upstream).
+            caller_key = record.caller_tag or "unknown"
+            if caller_key not in by_caller:
+                by_caller[caller_key] = TokenUsage(engine=caller_key)
+            by_caller[caller_key].prompt_tokens += record.prompt_tokens
+            by_caller[caller_key].completion_tokens += record.completion_tokens
+            by_caller[caller_key].total_tokens += record.total_tokens
         summary.by_engine = by_engine
+        summary.by_caller = by_caller
 
         # 全局总量
         total = TokenUsage(engine=self.llm_client.model)

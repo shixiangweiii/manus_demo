@@ -1013,16 +1013,36 @@ class TestBridgeDispatchTable:
             bridge = TracingBridge()
             # Events that the bridge should handle
             expected_events = [
+                # Top-level lifecycle
                 "task_start", "task_complexity", "phase", "plan", "dag_created",
+                "task_complete", "memory_stored", "token_usage_summary",
+                # Emergent / TODO
                 "todo_list_initialized", "todo_start", "todo_complete",
-                "todo_failed", "todo_blocked", "superstep", "node_running",
-                "node_completed", "node_failed", "step_start", "step_complete",
-                "step_failed", "reflection", "plan_adaptation", "adaptive_planning",
-                "token_usage_summary", "task_complete", "memory_stored",
+                "todo_failed", "todo_blocked",
+                # DAG
+                "superstep", "node_running", "node_completed", "node_failed",
+                # Simple-path step
+                "step_start", "step_complete", "step_failed",
+                # Reflection / adaptation
+                "reflection", "plan_adaptation",
+                # v8 Goal-driven
+                "goal_anchor", "goal_reflection", "goal_reanchor",
+                "goal_drift_alert", "stagnation_detected",
+                # v9 SubAgent
+                "subagent_start", "subagent_complete", "subagent_failed",
+                "subagent_timed_out", "subagent_limit_exceeded", "subagent_iteration",
+                # v13 HITL
+                "ask_user_prompt", "ask_user_response",
+                "ask_user_timeout", "ask_user_cancelled",
             ]
             for event in expected_events:
                 assert event in bridge._event_handlers, f"Event '{event}' missing from dispatch table"
                 assert callable(bridge._event_handlers[event]), f"Handler for '{event}' is not callable"
+
+            # Dead key removed in v13: adaptive_planning was never emitted by any
+            # producer (all sites emit "plan_adaptation"). Ensure it stays gone.
+            assert "adaptive_planning" not in bridge._event_handlers, \
+                "adaptive_planning is dead — should be removed from dispatch table"
         finally:
             config.TRACING_ENABLED = original
         """Unknown events should be silently ignored."""
@@ -1038,6 +1058,373 @@ class TestBridgeDispatchTable:
             bridge.on_event("another_unknown", None)
         finally:
             config.TRACING_ENABLED = original
+
+
+class TestBridgeHITLEvents:
+    """Test TracingBridge handling of v13 HITL ask_user events."""
+
+    def _make_bridge(self):
+        from tracing.bridge import TracingBridge
+        return TracingBridge()
+
+    def test_ask_user_prompt_creates_span(self, setup_tracing):
+        """ask_user_prompt should create a hitl.ask_user.<id> span as child of phase."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            import asyncio
+            exporter = setup_tracing
+            bridge = self._make_bridge()
+
+            bridge.on_event("task_start", {"task": "hitl test"})
+            bridge.on_event("phase", "Executing simple plan (attempt 1)...")
+
+            fut = asyncio.get_event_loop().create_future() if asyncio.get_event_loop().is_running() else asyncio.new_event_loop().create_future()
+            bridge.on_event("ask_user_prompt", {
+                "question": "What's your favorite color?",
+                "prompt_id": "abc12345",
+                "response_future": fut,  # MUST NOT crash bridge
+            })
+            bridge.on_event("ask_user_response", {
+                "prompt_id": "abc12345",
+                "response": "blue",
+                "prompt_count": 1,
+            })
+            bridge.on_event("task_complete", {"answer": "done"})
+
+            spans = exporter.get_finished_spans()
+            hitl_spans = [s for s in spans if "hitl.ask_user" in s.name]
+            assert len(hitl_spans) == 1, f"expected 1 HITL span, got {[s.name for s in spans]}"
+
+            from opentelemetry.trace import StatusCode
+            assert hitl_spans[0].status.status_code == StatusCode.OK
+            assert hitl_spans[0].attributes.get("hitl.prompt_id") == "abc12345"
+            assert hitl_spans[0].attributes.get("hitl.question") == "What's your favorite color?"
+            assert hitl_spans[0].attributes.get("hitl.response") == "blue"
+            assert hitl_spans[0].attributes.get("hitl.prompt_count") == 1
+
+            # response_future MUST NOT appear in attributes (non-serializable)
+            assert "response_future" not in (hitl_spans[0].attributes or {})
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_ask_user_timeout_marks_span_error(self, setup_tracing):
+        """ask_user_timeout should close the HITL span with ERROR status."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from opentelemetry.trace import StatusCode
+            exporter = setup_tracing
+            bridge = self._make_bridge()
+
+            bridge.on_event("task_start", {"task": "hitl timeout"})
+            bridge.on_event("phase", "Executing simple plan (attempt 1)...")
+
+            bridge.on_event("ask_user_prompt", {
+                "question": "Q?",
+                "prompt_id": "to-1",
+                "response_future": object(),  # any unserializable obj
+            })
+            bridge.on_event("ask_user_timeout", {
+                "prompt_id": "to-1",
+                "timeout": 60,
+                "prompt_count": 1,
+            })
+            bridge.on_event("task_complete", {"answer": "x"})
+
+            spans = exporter.get_finished_spans()
+            hitl = [s for s in spans if "hitl.ask_user" in s.name]
+            assert len(hitl) == 1
+            assert hitl[0].status.status_code == StatusCode.ERROR
+            assert hitl[0].attributes.get("hitl.timeout_seconds") == 60
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_ask_user_cancelled_marks_span_error(self, setup_tracing):
+        """ask_user_cancelled (Ctrl+C/EOF) should close the HITL span with ERROR."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            from opentelemetry.trace import StatusCode
+            exporter = setup_tracing
+            bridge = self._make_bridge()
+
+            bridge.on_event("task_start", {"task": "hitl cancel"})
+            bridge.on_event("phase", "Executing simple plan (attempt 1)...")
+
+            bridge.on_event("ask_user_prompt", {
+                "question": "Q?",
+                "prompt_id": "cx-1",
+                "response_future": object(),
+            })
+            bridge.on_event("ask_user_cancelled", {
+                "prompt_id": "cx-1",
+                "prompt_count": 1,
+            })
+            bridge.on_event("task_complete", {"answer": "x"})
+
+            spans = exporter.get_finished_spans()
+            hitl = [s for s in spans if "hitl.ask_user" in s.name]
+            assert len(hitl) == 1
+            assert hitl[0].status.status_code == StatusCode.ERROR
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_multiple_concurrent_prompts(self, setup_tracing):
+        """Multiple HITL prompts in a row should each get their own span keyed by prompt_id."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            exporter = setup_tracing
+            bridge = self._make_bridge()
+
+            bridge.on_event("task_start", {"task": "multi-hitl"})
+            bridge.on_event("phase", "Executing simple plan (attempt 1)...")
+
+            for pid in ("a1", "b2", "c3"):
+                bridge.on_event("ask_user_prompt", {
+                    "question": f"Q-{pid}",
+                    "prompt_id": pid,
+                    "response_future": object(),
+                })
+            # Resolve out of order
+            bridge.on_event("ask_user_response", {"prompt_id": "b2", "response": "B", "prompt_count": 2})
+            bridge.on_event("ask_user_response", {"prompt_id": "a1", "response": "A", "prompt_count": 1})
+            bridge.on_event("ask_user_cancelled", {"prompt_id": "c3", "prompt_count": 3})
+            bridge.on_event("task_complete", {"answer": "x"})
+
+            spans = exporter.get_finished_spans()
+            hitl = [s for s in spans if "hitl.ask_user" in s.name]
+            assert len(hitl) == 3
+            names = sorted(s.name for s in hitl)
+            assert names == ["hitl.ask_user.a1", "hitl.ask_user.b2", "hitl.ask_user.c3"]
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_unknown_prompt_id_is_silent(self, setup_tracing):
+        """response/timeout/cancelled with unknown prompt_id should not raise."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            bridge = self._make_bridge()
+            # Should not raise even with no matching prompt span
+            bridge.on_event("ask_user_response", {"prompt_id": "ghost", "response": "x"})
+            bridge.on_event("ask_user_timeout", {"prompt_id": "ghost", "timeout": 30})
+            bridge.on_event("ask_user_cancelled", {"prompt_id": "ghost"})
+        finally:
+            config.TRACING_ENABLED = original
+
+
+class TestBridgePhaseNesting:
+    """Test that sub-component phase events do not destroy the parent phase span."""
+
+    def test_emergent_sub_phase_keeps_parent(self, setup_tracing):
+        """When emergent_planner emits 'Initializing emergent planning...' inside an
+        existing 'Executing with emergent planning (TODO list)...' phase, the parent
+        phase span must NOT be ended; the sub_phase should land as a span event.
+        """
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            exporter = setup_tracing
+            from tracing.bridge import TracingBridge
+            bridge = TracingBridge()
+
+            bridge.on_event("task_start", {"task": "emergent"})
+            bridge.on_event("phase", "Executing with emergent planning (TODO list)...")
+            # emergent_planner inside emit:
+            bridge.on_event("phase", "Initializing emergent planning...")
+            bridge.on_event("phase", "Emergent planning iteration 1...")
+
+            # TODO span emitted while we are STILL inside the emergent execution phase
+            todo = MagicMock()
+            todo.id = "t1"
+            todo.description = "x"
+            todo.retry_count = 0
+            bridge.on_event("todo_start", {"todo": todo})
+            bridge.on_event("todo_complete", {"todo": todo})
+
+            bridge.on_event("phase", "Emergent planning completed.")
+            bridge.on_event("task_complete", {"answer": "done"})
+
+            spans = exporter.get_finished_spans()
+            # There should be exactly ONE execution.emergent span (sub_phases must not split it)
+            exec_spans = [s for s in spans if s.name == "execution.emergent"]
+            assert len(exec_spans) == 1, f"expected 1 execution.emergent span, got {[s.name for s in spans]}"
+
+            # The TODO span must be a child of execution.emergent, not of root
+            todo_spans = [s for s in spans if "todo.execute" in s.name]
+            assert len(todo_spans) == 1
+            todo_parent = todo_spans[0].parent.span_id if todo_spans[0].parent else None
+            exec_id = exec_spans[0].context.span_id
+            assert todo_parent == exec_id, "TODO span lost parent — phase nesting broken"
+
+            # Sub-phase events should be recorded on the execution.emergent span
+            event_phase_texts = [
+                e.attributes.get("phase", "") for e in exec_spans[0].events
+                if e.name == "sub_phase"
+            ]
+            assert any("Initializing emergent" in t for t in event_phase_texts)
+            assert any("iteration 1" in t for t in event_phase_texts)
+            assert any("completed" in t for t in event_phase_texts)
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_unknown_phase_keeps_current_phase(self, setup_tracing):
+        """An unrecognized phase string must not close the active phase span."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            exporter = setup_tracing
+            from tracing.bridge import TracingBridge
+            bridge = TracingBridge()
+
+            bridge.on_event("task_start", {"task": "unknown phase test"})
+            bridge.on_event("phase", "Executing simple plan (attempt 1)...")
+            # Some weird phase that no rule maps:
+            bridge.on_event("phase", "Doing something completely unrelated...")
+
+            # Step span emitted while we should STILL be in execution.simple
+            step = MagicMock()
+            step.id = 1
+            step.description = "step"
+            bridge.on_event("step_start", {"step": step})
+            bridge.on_event("step_complete", {"step": step})
+
+            bridge.on_event("task_complete", {"answer": "done"})
+
+            spans = exporter.get_finished_spans()
+            simple_spans = [s for s in spans if s.name == "execution.simple"]
+            assert len(simple_spans) == 1, "execution.simple span was closed by unknown phase"
+
+            step_spans = [s for s in spans if "step.execute" in s.name]
+            assert len(step_spans) == 1
+            assert step_spans[0].parent.span_id == simple_spans[0].context.span_id
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_goal_driven_sub_phase_keeps_parent(self, setup_tracing):
+        """Goal-driven internal phases ('Building goal...', 'Compiling final answer...',
+        'Goal-driven planning completed.') must NOT replace the outer execution.goal_driven span.
+        """
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            exporter = setup_tracing
+            from tracing.bridge import TracingBridge
+            bridge = TracingBridge()
+
+            bridge.on_event("task_start", {"task": "goal-driven"})
+            bridge.on_event("phase", "Executing with goal-driven planning (v8)...")
+            bridge.on_event("phase", "Building goal document...")
+            bridge.on_event("phase", "Planning backward from goal state...")
+            bridge.on_event("phase", "Compiling final answer against goal...")
+            bridge.on_event("phase", "Goal-driven planning completed.")
+            bridge.on_event("task_complete", {"answer": "g"})
+
+            spans = exporter.get_finished_spans()
+            gd_spans = [s for s in spans if s.name == "execution.goal_driven"]
+            assert len(gd_spans) == 1
+            sub_phase_count = sum(1 for e in gd_spans[0].events if e.name == "sub_phase")
+            assert sub_phase_count >= 4, "expected >=4 sub_phase events (building/planning/compiling/completed)"
+        finally:
+            config.TRACING_ENABLED = original
+
+    def test_dag_adaptive_planning_is_sub_phase(self, setup_tracing):
+        """dag/executor.py's 'Adaptive planning check (super-step N)...' must be
+        a sub_phase event, not a real phase swap that wipes execution.dag."""
+        import config
+        original = config.TRACING_ENABLED
+        config.TRACING_ENABLED = True
+        try:
+            exporter = setup_tracing
+            from tracing.bridge import TracingBridge
+            bridge = TracingBridge()
+
+            bridge.on_event("task_start", {"task": "dag adaptive"})
+            bridge.on_event("phase", "Executing DAG (attempt 1)...")
+            bridge.on_event("phase", "Adaptive planning check (super-step 2)...")
+            bridge.on_event("task_complete", {"answer": "g"})
+
+            spans = exporter.get_finished_spans()
+            dag_spans = [s for s in spans if s.name == "execution.dag"]
+            assert len(dag_spans) == 1
+            sub_phase_events = [e for e in dag_spans[0].events if e.name == "sub_phase"]
+            assert any("Adaptive planning check" in (e.attributes.get("phase", "")) for e in sub_phase_events)
+        finally:
+            config.TRACING_ENABLED = original
+
+
+class TestFileSpanExporterDedup:
+    """Test that FileSpanExporter merges multi-batch exports without duplicating spans."""
+
+    def test_multi_batch_dedup_by_span_id(self, tmp_path):
+        """Re-exporting the same span (defensive scenario) must not produce duplicates."""
+        from tracing.exporters import FileSpanExporter
+        import json
+
+        out_dir = tmp_path / "traces"
+        exporter = FileSpanExporter(output_dir=str(out_dir))
+
+        # Build two fake spans sharing trace_id; second batch repeats the first one
+        # plus introduces a new one (out-of-order start_time to verify sorting).
+        class _FakeContext:
+            def __init__(self, trace_id, span_id):
+                self.trace_id = trace_id
+                self.span_id = span_id
+
+        class _FakeStatus:
+            def __init__(self, name):
+                from opentelemetry.trace import StatusCode
+                self.status_code = StatusCode[name]
+
+        class _FakeSpan:
+            def __init__(self, span_id, name, start_ns, end_ns, status="OK"):
+                self.context = _FakeContext(0xdeadbeef, span_id)
+                self.parent = None
+                self.name = name
+                self.start_time = start_ns
+                self.end_time = end_ns
+                self.attributes = {}
+                self.events = []
+                self.status = _FakeStatus(status)
+
+        # Batch 1: span A (start later) + span B (start earlier)
+        a = _FakeSpan(0x1, "a", 2_000_000_000, 3_000_000_000)
+        b = _FakeSpan(0x2, "b", 1_000_000_000, 1_500_000_000)
+        result1 = exporter.export([a, b])
+
+        # Batch 2: span A repeated + span C (latest)
+        a_again = _FakeSpan(0x1, "a", 2_000_000_000, 3_000_000_000)
+        c = _FakeSpan(0x3, "c", 4_000_000_000, 5_000_000_000)
+        result2 = exporter.export([a_again, c])
+
+        # Read back the file
+        from opentelemetry.sdk.trace.export import SpanExportResult
+        assert result1 == SpanExportResult.SUCCESS
+        assert result2 == SpanExportResult.SUCCESS
+
+        files = list(out_dir.glob("*.json"))
+        assert len(files) == 1
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+
+        # 3 unique spans, not 4 (a is deduped)
+        assert data["span_count"] == 3
+        names = [s["name"] for s in data["spans"]]
+        assert names.count("a") == 1
+        assert names.count("b") == 1
+        assert names.count("c") == 1
+
+        # Sorted by start_time → b, a, c
+        assert names == ["b", "a", "c"], f"spans not sorted by start_time: {names}"
 
 
 class TestProviderShutdown:

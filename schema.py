@@ -315,6 +315,14 @@ class LLMCallRecord(BaseModel):
     """
     Per-LLM-call token consumption record with prompt summary.
     单次 LLM API 调用的 Token 消耗记录（含提示词摘要）。
+
+    Wave-6 (v9 SubAgent token attribution):
+      - caller_tag identifies which agent issued the call (e.g. "ExecutorAgent",
+        "GoalDrivenPlanner", "SubAgent-1"). Default "" preserves backward
+        compatibility for old trace JSON files; missing field -> "" via pydantic.
+      - All shared LLMClient calls thread caller_tag through; aggregation in
+        Orchestrator._finalize_token_usage builds a by_caller view alongside
+        by_engine.
     """
     call_type: str = ""          # "chat" / "chat_with_tools" / "chat_json"
     prompt_summary: str = ""     # 首条 user message 截断至 200 字符
@@ -322,15 +330,21 @@ class LLMCallRecord(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     engine: str = ""
+    caller_tag: str = ""         # Wave-6: agent that issued the call (ExecutorAgent / SubAgent-1 / ...)
 
 
 class TokenUsageSummary(BaseModel):
     """
     Aggregated token consumption across all agents and engines.
     跨所有智能体和引擎的 Token 消耗汇总。
+
+    Wave-6: by_caller is a NEW view alongside by_engine (not a replacement).
+    Tools/dashboards that already depend on by_engine continue to work; new
+    consumers (eval / UI by-caller table) read by_caller.
     """
     call_records: list[LLMCallRecord] = Field(default_factory=list)  # 每次LLM调用明细
     by_engine: dict[str, TokenUsage] = Field(default_factory=dict)   # 按推理引擎汇总
+    by_caller: dict[str, TokenUsage] = Field(default_factory=dict)   # Wave-6: 按调用者(Agent)汇总
     total: TokenUsage = Field(default_factory=TokenUsage)            # 全局总量
 
 

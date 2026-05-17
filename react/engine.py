@@ -33,9 +33,19 @@ import logging
 from typing import Any, Callable
 
 import config
-from agents.prompt_utils import build_convergence_hint
+# NOTE: `build_convergence_hint` is imported lazily inside execute() to break a
+# latent circular import: react.engine -> agents.prompt_utils -> agents/__init__.py
+# (eager) -> agents.subagent -> react.engine. The top-level import worked under
+# specific test orderings but failed for direct `from react.engine import X`
+# probes. Lazy import keeps the module load graph acyclic.
+# 延迟导入,打破 react.engine ↔ agents 包的潜在循环依赖。
 from context.manager import ContextManager
 from llm.client import LLMClient
+from react.tool_call_helpers import (
+    attribute_caller,
+    classify_result,
+    truncate_for_llm,
+)
 from schema import StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
@@ -93,6 +103,16 @@ class ReActEngine:
         available_tool_names = list(self.tools.keys())
         self.tool_router = tool_router or ToolRouter(available_tools=available_tool_names)
 
+        # Wave-3 M2: tool_calls_log lifted to a member attribute so external
+        # observers (notably SubAgent timeout/budget paths) can read the
+        # in-progress log when execute() does not return its StepResult.
+        # `on_iteration` only fires at iteration boundaries — if a timeout fires
+        # mid-iteration, on_iteration's snapshot misses the most recent calls.
+        # Reading self._current_log instead recovers them.
+        # 把 tool_calls_log 升为成员属性,timeout/budget cancel 时外部可读最新状态;
+        # on_iteration 只在迭代末触发,中途取消会丢最后一轮——成员属性兜底。
+        self._current_log: list[ToolCallRecord] = []
+
     async def execute(
         self,
         prompt: str,
@@ -122,7 +142,21 @@ class ReActEngine:
         if context:
             prompt = f"{prompt}\n\nContext from previous steps:\n{context}"
 
+        # Wave-3 M2 (concurrency-safe): create a FRESH local list and rebind
+        # self._current_log to it. Do NOT reuse + clear the previous list —
+        # if the same ReActEngine instance is invoked concurrently (e.g.
+        # DAG_SERIAL_EXECUTION=false where ExecutorAgent.create_for_node()
+        # shares self._react_engine across parallel nodes), clearing would
+        # wipe a list that the other in-flight execute() is still appending
+        # to. New list per call isolates lifetimes. Outsiders reading
+        # self._current_log see whichever execute() rebound it last; the
+        # canonical "SubAgent failure path" reader is safe because SubAgent
+        # owns a PRIVATE ReActEngine (created in SubAgent.__init__) so at
+        # most one execute() is in flight on it at a time.
+        # 每次 execute() 用新 list,避免并发 execute() 的 clear 互相清空。
+        # SubAgent 路径安全:SubAgent 自己 new 的私有 engine,无并发。
         tool_calls_log: list[ToolCallRecord] = []
+        self._current_log = tool_calls_log
         iteration = 0
         messages: list[dict[str, Any]] = []
         if system_hint:
@@ -141,7 +175,11 @@ class ReActEngine:
                 if router_hint:
                     continue_msg += f"\n\nIMPORTANT: {router_hint}"
 
-                # Dynamic convergence guidance based on tool call frequency
+                # Dynamic convergence guidance based on tool call frequency.
+                # Lazy import (see module header) — breaks circular dep with
+                # agents package. After first call the import is cached in
+                # sys.modules so subsequent calls are zero-cost.
+                from agents.prompt_utils import build_convergence_hint
                 tool_call_counts: dict[str, int] = {}
                 for tc in tool_calls_log:
                     tool_call_counts[tc.tool_name] = tool_call_counts.get(tc.tool_name, 0) + 1
@@ -164,6 +202,7 @@ class ReActEngine:
                     messages,
                     tools=self.tool_schemas,
                     temperature=0.5,
+                    caller_tag=self.agent_name or "ReActEngine",
                 )
 
                 assistant_msg: dict[str, Any] = {
@@ -211,6 +250,9 @@ class ReActEngine:
             # asyncio.gather; results are then processed in original order to
             # preserve assistant.tool_calls ↔ tool messages alignment required
             # by the OpenAI protocol.
+            # Wave-1: classify_result / attribute_caller / truncate_for_llm
+            # extracted into react.tool_call_helpers so GoalDrivenPlanner and
+            # EmergentPlanner legacy paths share the exact same behavior.
             async def _exec_one(tc) -> tuple[Any, str, dict, str, bool, bool]:
                 fn_name = tc.function.name
                 try:
@@ -220,26 +262,19 @@ class ReActEngine:
                 logger.info("[ReActEngine] Tool call: %s(%s)", fn_name, fn_args)
                 t = self.tools.get(fn_name)
                 if t is None:
-                    return tc, fn_name, fn_args, f"Error: Unknown tool '{fn_name}'", True, False
-                # Wave C #7: notify the tool of its caller (sync, no await) so
-                # SubAgentTool / similar tools can attribute correctly. asyncio
-                # single-threaded model guarantees no preemption between this
-                # set_caller and the synchronous prologue of traced_execute.
-                # set_caller→execute 之间无 await，asyncio 单线程下原子。
-                if self.agent_name and hasattr(t, "set_caller"):
-                    try:
-                        t.set_caller(self.agent_name)
-                    except Exception:
-                        logger.debug("[ReActEngine] set_caller failed for %s", fn_name, exc_info=True)
+                    res = f"Error: Unknown tool '{fn_name}'"
+                    is_err, rl = classify_result(res, None)
+                    return tc, fn_name, fn_args, res, is_err, rl
+                # set_caller -> traced_execute 之间无 await,asyncio 单线程下原子。
+                attribute_caller(t, self.agent_name)
                 try:
                     res = await t.traced_execute(**fn_args)
-                    err = isinstance(res, str) and res.startswith("Error:")
-                    # Distinguish business rate-limit (e.g. SubAgent call cap)
-                    # from real tool failure — see tools/router.record_rate_limited.
-                    rate_limited = err and isinstance(res, str) and "SubAgent call limit reached" in res
-                    return tc, fn_name, fn_args, res, err, rate_limited
+                    is_err, rl = classify_result(res, None)
+                    return tc, fn_name, fn_args, res, is_err, rl
                 except Exception as exc:
-                    return tc, fn_name, fn_args, f"Error: Tool execution error: {exc}", True, False
+                    res = f"Error: Tool execution error: {exc}"
+                    is_err, rl = classify_result(None, exc)
+                    return tc, fn_name, fn_args, res, is_err, rl
 
             executions = await asyncio.gather(
                 *(_exec_one(tc) for tc in response_msg.tool_calls)
@@ -249,9 +284,7 @@ class ReActEngine:
             truncation_limit = config.TOOL_RESULT_TRUNCATION_LIMIT
 
             for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
-                # Single ToolRouter accounting point — record after error detection
-                # so that Error:-prefixed returns are counted as failures (not successes).
-                # Three-state precedence: rate_limited > error > success.
+                # Three-state ToolRouter accounting (rate_limited > error > success).
                 # 业务限流（如 SubAgent 调用上限）单独入桶，不污染 failure 阈值。
                 if is_rate_limited:
                     self.tool_router.record_rate_limited(str(step_id), func_name)
@@ -260,26 +293,11 @@ class ReActEngine:
                 else:
                     self.tool_router.record_success(str(step_id), func_name)
 
-                # Apply truncation BOTH to record (UI/stats) AND to LLM
-                # context. Previously only ToolCallRecord was truncated, which
-                # let oversized successful results (e.g., 39k-char wttr.in JSON)
-                # blow up subsequent prompts.
-                if is_error:
-                    # Keep full error text — debugging value high, size usually small
-                    record_result = result
-                    llm_result = result
-                else:
-                    if isinstance(result, str) and len(result) > truncation_limit:
-                        truncated = result[:truncation_limit]
-                        record_result = truncated
-                        llm_result = (
-                            truncated
-                            + f"\n\n[Tool output truncated at {truncation_limit} characters "
-                              f"to control context size; original length={len(result)}]"
-                        )
-                    else:
-                        record_result = result
-                        llm_result = result
+                # Apply truncation BOTH to record (UI/stats) AND to LLM context
+                # via the shared helper — single source of truth.
+                record_result, llm_result = truncate_for_llm(
+                    result, truncation_limit, is_error,
+                )
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,

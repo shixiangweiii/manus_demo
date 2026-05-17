@@ -70,12 +70,26 @@ class FileSpanExporter(SpanExporter):
                     except (json.JSONDecodeError, OSError):
                         existing_spans = []
 
-                all_spans = existing_spans + span_dicts
+                # Merge existing + new, dedup by span_id (defensive against
+                # any pathological re-export), then sort by start_time so the
+                # file content is stable and the viewer reads in chronological order.
+                # 多批合并按 span_id 去重 + 按 start_time 排序，避免重复 export 与文件膨胀。
+                seen_span_ids: set[str] = set()
+                merged: list[dict] = []
+                for s in existing_spans + span_dicts:
+                    sid = s.get("span_id")
+                    if sid and sid in seen_span_ids:
+                        continue
+                    if sid:
+                        seen_span_ids.add(sid)
+                    merged.append(s)
+                merged.sort(key=lambda s: s.get("start_time", "") or "")
+
                 output = {
                     "trace_id": trace_id,
                     "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                    "span_count": len(all_spans),
-                    "spans": all_spans,
+                    "span_count": len(merged),
+                    "spans": merged,
                 }
 
                 with open(filepath, "w", encoding="utf-8") as f:

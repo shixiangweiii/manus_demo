@@ -56,7 +56,15 @@ Tool parameters (search queries, code, shell commands) can be in any
 language as needed for the underlying API.
 """
 
-EXECUTOR_SYSTEM_PROMPT = build_system_prompt(_EXECUTOR_BASE_PROMPT)
+# Wave-2: system prompt is built lazily in __init__ rather than at module
+# import time. Two reasons:
+#   (1) build_system_prompt injects today's date — module-level evaluation
+#       freezes it for the life of the process (stale after midnight).
+#   (2) get_hitl_guidance() depends on `_HITL_RUNTIME_OVERRIDE` which is set
+#       by OrchestratorAgent.__init__ — a value not yet known at import time.
+#       Module-level computation defaults to config.HITL_ENABLED and silently
+#       breaks the v13 double-gating contract for run_single mode.
+# 系统提示运行时构建：消除 import-time 烧录引发的"日期陈旧"和"HITL 双门控失效"。
 
 
 class ExecutorAgent(BaseAgent):
@@ -65,6 +73,7 @@ class ExecutorAgent(BaseAgent):
     ReAct 执行智能体，委托给统一 ReActEngine 执行计划步骤/节点。
 
     v12: legacy `_react_loop` 已移除；始终走 ReActEngine。
+    Wave-2: system prompt built per-instance in __init__.
     """
 
     def __init__(
@@ -76,9 +85,12 @@ class ExecutorAgent(BaseAgent):
         tool_router: ToolRouter | None = None,
         use_react_engine: bool | None = None,  # deprecated, accepted for backward compat
     ):
+        # Wave-2: build prompt per-instance, after OrchestratorAgent has had a
+        # chance to set _HITL_RUNTIME_OVERRIDE based on `interactive` mode.
+        system_prompt = build_system_prompt(_EXECUTOR_BASE_PROMPT)
         super().__init__(
             name="Executor",
-            system_prompt=EXECUTOR_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             llm_client=llm_client,
             context_manager=context_manager,
         )
@@ -143,7 +155,7 @@ class ExecutorAgent(BaseAgent):
             prompt=prompt,
             context=context,
             node_id=node.id,
-            system_hint=EXECUTOR_SYSTEM_PROMPT,
+            system_hint=self.system_prompt,
         )
 
     # ------------------------------------------------------------------
@@ -162,5 +174,5 @@ class ExecutorAgent(BaseAgent):
             prompt=prompt,
             context=context,
             node_id=str(step.id),
-            system_hint=EXECUTOR_SYSTEM_PROMPT,
+            system_hint=self.system_prompt,
         )

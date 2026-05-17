@@ -1,7 +1,7 @@
 # Manus Demo - 代码地图
 
-> **生成时间**: 2026-05-14
-> **版本**: v9（含 SubAgent 多智能体协作 + 目标驱动规划 GoalDrivenPlanner + 全链路 Tracing + Web Viewer + LLM 重试机制 + ReActEngine + ShellTool + 评测模块）
+> **生成时间**: 2026-05-17
+> **版本**: v9.1（v9 SubAgent + Wave-1..7 overhaul：helper 共享 ReAct 三循环 / 系统提示运行时构建 / Token 按 caller 归因 / 评测单一数据源）
 > **目的**: 当前代码库的综合架构地图
 
 ## 目录
@@ -118,9 +118,10 @@ manus_demo/
 │   ├── executor.py           # DAGExecutor Super-step执行器 (702行)
 │   └── state_machine.py      # NodeStateMachine 节点状态机 (113行)
 │
-├── react/                     # ReAct 统一引擎 (v6)
+├── react/                     # ReAct 统一引擎 (v6) + Wave-1 公共 helper
 │   ├── __init__.py
-│   └── engine.py             # ReActEngine 统一 ReAct 循环引擎 (262行)
+│   ├── engine.py             # ReActEngine 统一 ReAct 循环引擎
+│   └── tool_call_helpers.py  # Wave-1 共享 helper：attribute_caller / classify_result / truncate_for_llm
 │
 ├── llm/                       # LLM 客户端
 │   ├── __init__.py
@@ -490,10 +491,10 @@ graph TD
 **反模式防御**:
 - #2 上下文泄漏: 独立 messages，只回传结构化 summary
 - #3 Depth=1: 结构性白名单过滤排除 subagent 工具
-- #4 双写冲突: 沙箱目录隔离
-- #5 Self-Critique: 结构化摘要模板强制 issues 字段
-- #6 Summary Loss: SubAgentSummary 结构化 artifact + 完整 tool_calls_log 保留
-- #8 Token Explosion: per-call token 预算 + 调用次数限制
+- #4 双写冲突: 沙箱目录隔离（Wave-4 M3 进一步：reset_task_state 跨任务清理 `subagent_<N>` 子目录消除"鬼影 context"）
+- #5 Self-Critique: 结构化摘要模板强制 issues 字段（Wave-3 M6 加固：pydantic 全 default 静默通过的漏洞已堵，必须含任一已知 schema key 才视为合法）
+- #6 Summary Loss: SubAgentSummary 结构化 artifact + 完整 tool_calls_log 保留（Wave-3 M2：失败路径优先读 ReActEngine._current_log，不丢末轮调用）
+- #8 Token Explosion: per-call token 预算 + 调用次数限制 + Wave-4 L2 task_description 长度上限（默认 2000）
 
 **主要方法签名**:
 ```python
@@ -760,13 +761,22 @@ class LLMClient:
         backoff_factor: float | None = None,
     )
 
-    async def chat(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> str
-    async def chat_with_tools(self, messages: list[dict], tools: list[dict], temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> Any
-    async def chat_json(self, messages: list[dict], temperature: float = 0.3, max_tokens: int = 4096, **kwargs) -> Any
+    # Wave-6: caller_tag 是显式命名参数(不进 kwargs,避免泄漏给 OpenAI API)
+    async def chat(self, messages, temperature=0.7, max_tokens=4096, caller_tag="", **kwargs) -> str
+    async def chat_with_tools(self, messages, tools, temperature=0.7, max_tokens=4096, caller_tag="", **kwargs) -> Any
+    async def chat_json(self, messages, temperature=0.3, max_tokens=4096, caller_tag="", **kwargs) -> Any
     def parse_json(text: str) -> Any  # staticmethod
-    def get_call_records() -> list[LLMCallRecord]
+    def get_call_records() -> list[LLMCallRecord]  # 含 caller_tag 字段(Wave-6)
     def reset_usage() -> None
 ```
+
+**Wave-6 caller_tag 透传链**：
+
+- `BaseAgent.think_*()` 自动 `kwargs.setdefault("caller_tag", self.name)` —— 默认用 agent 名称,显式传值优先
+- 直接持有 llm_client 的三处显式传：ReActEngine→`self.agent_name`、GoalDrivenPlanner._execute_todo_goal_guided→`"GoalDrivenPlanner"`、SubAgent._summarize_result→`self.name`
+- chat_json fallback 路径(JSON mode 不支持时降级到 chat())也透传 caller_tag,不在降级路径丢标签
+- `_record_call(usage, call_type, messages, caller_tag="")` 写入 `LLMCallRecord.caller_tag`
+- `_start_llm_span(..., caller_tag)` 设置 OTel span 属性 `gen_ai.caller`
 
 **v6 重试机制流程**:
 ```mermaid
@@ -1342,6 +1352,26 @@ subagent = SubAgent(name=..., task_description=task_description, tools=restricte
 result = await subagent.run(context=task_description)
 return result.summary_text  # JSON string of SubAgentSummary
 ```
+
+### 6+3. SubAgent 全链路优化 (v9.1 / Wave-1..7)
+
+**描述**: 在 v9 SubAgent 落地后，通过六波迭代消除上下游一致性裂缝、补齐 Token 归因可观测性。详见 `CHANGELOG.md` v9.1 节与 `CLAUDE.md` 第 30-34 条。
+
+**核心交付物**:
+
+1. **公共 helper 统一三套 ReAct 循环**（Wave-1）：`react/tool_call_helpers.py` 暴露 `attribute_caller` / `classify_result` / `truncate_for_llm`，由 ReActEngine、GoalDrivenPlanner、EmergentPlanner legacy 三处共同调用。三态精度：`rate_limited > error > success`，`record_rate_limited` 单独计数避免业务限流污染失败阈值。
+2. **系统提示运行时化**（Wave-2）：5 处模块级 `*_SYSTEM_PROMPT` 常量取消，改在各 Agent `__init__` 中调 `build_system_prompt(_BASE, ...)`。修复 v13 HITL 双门控被 import-time 烧录破坏的隐藏 bug（run_single + HITL_ENABLED=true 时原本悄悄失效）。
+3. **失败可观测性 + 资源卫生**（Wave-3+4）：
+   - ReActEngine `tool_calls_log` 提升为 `self._current_log` 成员属性，SubAgent 失败路径通过 `_failure_tool_calls()` 优先读 live log 恢复末轮 tool 调用。**关键并发不变量**：每次 `execute()` 重新 bind 到新 list，**不 clear** 旧 list（避免 DAG 并行场景下清空别的 task 在用的 list）
+   - SubAgentTool `reset_task_state()` 跨任务清理 `subagent_<digits>` 子目录
+   - `os.makedirs` 改 `await asyncio.to_thread(...)` 不阻塞事件循环
+   - `task_description` 长度上限（`SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH`）
+   - `_summarize_result` unexpected-structure 路径加固（pydantic 全 default 静默通过的漏洞已堵）
+   - `subagent_iteration` UI 渲染粒度按 `SUBAGENT_ITERATION_EVENT_VERBOSITY` 配置
+4. **按 caller 的 Token 归因**（Wave-6）：`LLMCallRecord` 增加 `caller_tag` 字段，`TokenUsageSummary.by_caller` 新视图（与 `by_engine` 并行），LLM span 增加 `gen_ai.caller` 属性，UI 渲染 by_caller 表格，evaluation 切到 caller_tag 优先聚合（单一数据源）。
+5. **Wave-1 N5 + Wave-4 M4 互动**：`SubAgentTool.execute` 入口立即 `local_parent = self._parent_name`。Wave-1 设计为预防性，Wave-4 引入的 `await asyncio.to_thread(makedirs, ...)` 让该不变量真正 load-bearing —— 没有它，并发 set_caller 会改 `self._parent_name` 导致归因漂移。
+
+**配套测试**: `tests/test_tool_call_helpers.py`(21) / `test_token_attribution.py`(14) / `test_prompt_freshness.py`(11) / `test_wave3_wave4.py`(11) / `test_subagent.py::TestWave1CrossEngineParity`(3) —— 共 60 条新测试覆盖 Wave-1..7 不变量。
 
 ### 7. 事件驱动 UI
 

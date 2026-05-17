@@ -91,6 +91,10 @@ class BaseAgent:
 
         将 user_input 连同完整对话上下文发送给 LLM，返回文本响应。
         若消息总量超过 Token 上限，自动触发上下文压缩。
+
+        Wave-6: caller_tag defaults to self.name (e.g. "PlannerAgent",
+        "Reflector", "SubAgent-1"). Callers may override by passing caller_tag
+        explicitly in kwargs.
         """
         self.add_message("user", user_input)
 
@@ -99,6 +103,7 @@ class BaseAgent:
             self._messages, self.llm_client
         )
 
+        kwargs.setdefault("caller_tag", self.name)
         response = await self.llm_client.chat(self._messages, **kwargs)
         self.add_message("assistant", response)
         logger.debug("[%s] Response: %s", self.name, response[:200])
@@ -109,6 +114,8 @@ class BaseAgent:
         Send user_input and expect a JSON response.
         发送 user_input，要求 LLM 返回 JSON 格式的响应。
         用于 Planner 生成结构化计划、Reflector 生成评估结果等场景。
+
+        Wave-6: caller_tag defaults to self.name; override via kwargs.
         """
         self.add_message("user", user_input)
 
@@ -116,6 +123,7 @@ class BaseAgent:
             self._messages, self.llm_client
         )
 
+        kwargs.setdefault("caller_tag", self.name)
         result = await self.llm_client.chat_json(self._messages, **kwargs)
         self.add_message("assistant", str(result))
         return result
@@ -133,6 +141,8 @@ class BaseAgent:
         发送 user_input 并附带工具定义，返回原始响应消息对象。
         调用方需自行检查 response.tool_calls 来决定后续执行哪个工具。
         这是 ReAct 循环的核心：LLM 选择并调用工具。
+
+        Wave-6: caller_tag defaults to self.name; override via kwargs.
         """
         self.add_message("user", user_input)
 
@@ -140,6 +150,7 @@ class BaseAgent:
             self._messages, self.llm_client
         )
 
+        kwargs.setdefault("caller_tag", self.name)
         response_msg = await self.llm_client.chat_with_tools(
             self._messages, tools, **kwargs
         )

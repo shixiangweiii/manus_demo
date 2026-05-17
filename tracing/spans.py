@@ -66,6 +66,9 @@ class SpanName:
     # --- SubAgent (v9) ---
     SUBAGENT_EXECUTE = "subagent.execute"
 
+    # --- HITL (v13) ---
+    HITL_ASK_USER = "hitl.ask_user"
+
     # --- LLM Calls ---
     LLM_CHAT = "llm.chat"
     LLM_CHAT_WITH_TOOLS = "llm.chat_with_tools"
@@ -172,6 +175,13 @@ class AttrKey:
     SUBAGENT_TOKENS_USED = "subagent.tokens_used"
     SUBAGENT_CALL_COUNT = "subagent.call_count"
 
+    # --- HITL (v13) ---
+    HITL_PROMPT_ID = "hitl.prompt_id"
+    HITL_QUESTION = "hitl.question"
+    HITL_RESPONSE = "hitl.response"
+    HITL_PROMPT_COUNT = "hitl.prompt_count"
+    HITL_TIMEOUT_SECONDS = "hitl.timeout_seconds"
+
     # --- Reflection ---
     REFLECTION_PASSED = "reflection.passed"
     REFLECTION_SCORE = "reflection.score"
@@ -260,6 +270,7 @@ SPAN_ICONS: dict[str, str] = {
     "todo": "\U0001f4dd",
     "subagent": "\U0001f916",
     "step": "\U0001f463",
+    "hitl": "\U0001f64b",
 }
 
 DEFAULT_SPAN_ICON = "\U0001f4cc"

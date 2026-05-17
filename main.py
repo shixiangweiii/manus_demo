@@ -191,6 +191,37 @@ def _render_token_summary(summary: TokenUsageSummary) -> None:
             )
         console.print(engine_table)
 
+    # --- Wave-6: Per-caller totals (SubAgent / Executor / Planner / ...) ---
+    # Only render when there is more than one caller bucket OR when the only
+    # bucket is something other than "unknown" — single-bucket "unknown" means
+    # caller_tag wiring isn't in play and the table would be redundant.
+    if summary.by_caller and (
+        len(summary.by_caller) > 1 or "unknown" not in summary.by_caller
+    ):
+        caller_table = Table(
+            title="Token Consumption by Caller (Wave-6)",
+            border_style="magenta",
+            show_lines=True,
+        )
+        caller_table.add_column("Caller / Agent", style="cyan", width=24)
+        caller_table.add_column("Prompt Tokens", justify="right", width=15)
+        caller_table.add_column("Completion Tokens", justify="right", width=15)
+        caller_table.add_column("Total Tokens", style="bold magenta", justify="right", width=15)
+
+        # Sort: SubAgents to the bottom, others alphabetical for stable display
+        def _caller_sort_key(item: tuple[str, Any]) -> tuple[int, str]:
+            name = item[0]
+            return (1 if name.startswith("SubAgent") else 0, name)
+
+        for caller, usage in sorted(summary.by_caller.items(), key=_caller_sort_key):
+            caller_table.add_row(
+                caller,
+                str(usage.prompt_tokens),
+                str(usage.completion_tokens),
+                str(usage.total_tokens),
+            )
+        console.print(caller_table)
+
     # --- Grand total ---
     console.print(Panel(
         f"[bold]Total Tokens: {summary.total.total_tokens}[/bold]\n"
@@ -446,11 +477,26 @@ def on_event(event: str, data: Any) -> None:
             f"({data.get('call_count', 0)}/{data.get('max_calls', 0)})"
         )
     elif event == "subagent_iteration":
-        # Wave C #12: dim mid-execution progress so the user can see SubAgent activity
-        console.print(
-            f"      [dim][SubAgent][/dim] {data.get('subagent_id', '?')} "
-            f"iter {data.get('iteration', 0)} ({data.get('tool_calls_count', 0)} tool calls)"
-        )
+        # Wave C #12 + Wave-4 L5: render with config-controlled verbosity.
+        # When DAG runs in parallel with multiple SubAgents, "full" emits N×M
+        # lines that drown out other events. The default "summary" mode shows
+        # iteration progress at every Nth iteration only; "silent" turns it off
+        # entirely; "full" preserves the legacy per-iteration line.
+        # 默认 summary 模式:每 N 轮渲染一次,避免并行 SubAgent 时 UI 噪声。
+        verbosity = getattr(config, "SUBAGENT_ITERATION_EVENT_VERBOSITY", "summary").lower()
+        if verbosity == "silent":
+            pass  # render nothing
+        else:
+            iteration = int(data.get("iteration", 0))
+            should_render = (verbosity == "full")
+            if not should_render and verbosity == "summary":
+                every_n = max(getattr(config, "SUBAGENT_ITERATION_EVENT_EVERY_N", 2), 1)
+                should_render = (iteration % every_n == 0)
+            if should_render:
+                console.print(
+                    f"      [dim][SubAgent][/dim] {data.get('subagent_id', '?')} "
+                    f"iter {iteration} ({data.get('tool_calls_count', 0)} tool calls)"
+                )
 
     # --- v13 HITL: Human-in-the-Loop events ---
     # --- v13 人机交互事件 ---

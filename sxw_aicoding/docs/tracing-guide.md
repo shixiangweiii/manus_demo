@@ -462,10 +462,24 @@ Trace: task_execution/{task_id}
 | `gen_ai.system` | string | `"openai"` |
 | `gen_ai.request.model` | string | `"deepseek-chat"` |
 | `gen_ai.request.temperature` | float | `0.7` |
+| `gen_ai.caller` | string | `"GoalDrivenPlanner"` / `"SubAgent-1"` / `"ExecutorAgent"`（**Wave-6 新增**） |
 | `gen_ai.usage.input_tokens` | int | `512` |
 | `gen_ai.usage.output_tokens` | int | `256` |
 | `gen_ai.usage.total_tokens` | int | `768` |
 | `latency_ms` | float | `350.0` |
+
+**SubAgent 调用**（v9 新增）：
+
+| Attribute | 类型 | 示例 |
+|---|---|---|
+| `subagent.id` | string | `"SubAgent-1"` |
+| `subagent.task_description` | string | `"Search the codebase for X"` |
+| `subagent.parent_agent` | string | `"GoalDrivenPlanner"` / `"ExecutorAgent"`（**Wave-1 H1 修复**：之前因 GoalDrivenPlanner 不调 set_caller 而恒为 `OrchestratorAgent`） |
+| `subagent.tool_whitelist` | string | `"file_ops, web_search"` |
+| `subagent.status` | string | `"completed"` / `"failed"` / `"timed_out"` |
+| `subagent.iterations_used` | int | `3` |
+| `subagent.tokens_used` | int | `4818` |
+| `subagent.duration_ms` | float | `9249.37` |
 
 **工具调用**：
 
@@ -999,8 +1013,109 @@ async def run_new_tool(tool: MyNewTool) -> str:
 
 ---
 
+## 15. Wave-6：按 caller 的 LLM Token 分账（v9.1）
+
+### 15.1 新属性
+
+每个 `llm.*` span 现在都带 `gen_ai.caller` 属性,标识发起该 LLM 调用的 agent。值由 LLMClient 三入口的命名参数 `caller_tag` 透传：
+
+- `BaseAgent.think_*()` 自动用 `self.name`（PlannerAgent / Reflector / EmergentPlanner / SubAgent 等）
+- `ReActEngine.execute()` 用 `self.agent_name`（ExecutorAgent / EmergentPlannerAgent / SubAgent-N）
+- `GoalDrivenPlannerAgent._execute_todo_goal_guided` 显式传 `"GoalDrivenPlanner"`
+- `SubAgent._summarize_result` 显式传 `self.name`
+
+无 caller_tag 的旧路径会显示为缺失（默认空字符串）—— 任何没透传的位置都是潜在的"漏接"。
+
+### 15.2 用例：按 caller 拆 token 看主-子分账
+
+```bash
+# 跑一次带 SubAgent + GoalDriven 的任务,持久化 trace
+SUBAGENT_ENABLED=true ENABLE_GOAL_DRIVEN_PLANNER=true PLAN_MODE=emergent \
+TRACING_ENABLED=true TRACING_BACKEND=file \
+python main.py "复杂任务"
+```
+
+完成后用 Python 一行汇总：
+
+```python
+import json, glob, os
+from collections import Counter
+
+trace = sorted(glob.glob('traces/*.json'), key=os.path.getmtime)[-1]
+data = json.load(open(trace))
+
+caller_tokens = Counter()
+for span in data.get('spans', []):
+    if span.get('name', '').startswith('llm.'):
+        caller = span['attributes'].get('gen_ai.caller', '(missing)')
+        caller_tokens[caller] += span['attributes'].get('gen_ai.usage.total_tokens', 0)
+
+for c, t in caller_tokens.most_common():
+    print(f'{c:30s} {t:>6} tokens')
+```
+
+输出：
+
+```
+GoalDrivenPlanner               30092 tokens
+SubAgent-1                       6377 tokens
+SubAgent-2                       5696 tokens
+```
+
+加和等于 `task.*` span 上的 `task.token_total`(因为同一 LLMClient,同一 LLMCallRecord 数据源)。
+
+### 15.3 用例：找漏接 caller_tag 的代码路径
+
+如果 `gen_ai.caller` 出现 `(missing)` / 空字符串,说明某条 LLM 调用路径漏了 caller_tag 透传。grep:
+
+```bash
+# 找 trace 里的 (missing)
+grep -o '"gen_ai.caller":"[^"]*"' traces/<id>.json | sort | uniq -c
+```
+
+或在 web viewer 里展开任意 `llm.*` span,看 `gen_ai.caller` 字段是否为空。然后 grep 源码：
+
+```bash
+# 找直接调 llm_client 但没传 caller_tag 的调用点
+grep -rn "llm_client\.\(chat\|chat_with_tools\|chat_json\)" agents/ react/ tools/ \
+  | grep -v "caller_tag"
+```
+
+应该只剩 BaseAgent 的内部封装（自动 setdefault `caller_tag=self.name`）。其它直接调用都应显式传值。
+
+### 15.4 为何不放在 `**kwargs`
+
+LLMClient 的 `chat` / `chat_with_tools` / `chat_json` 把 `caller_tag` 设计为**显式命名参数**。原因：内部最终会 `await self._client.chat.completions.create(..., **kwargs)` 把剩余 kwargs 透给 OpenAI SDK。如果 caller_tag 落进 kwargs,会被作为额外参数传给 OpenAI API,触发 `unknown_parameter` 错误。
+
+也即:**新写直接调用 LLMClient 的代码时，必须把 `caller_tag` 作为命名参数传入,不可塞进 dict-style kwargs**。
+
+### 15.5 与 SubAgent 父级归因的协同
+
+每个 `subagent.execute.*` span 还有 `subagent.parent_agent` 属性（v9 既有）。Wave-6 后两个属性配合形成完整端到端归因证据：
+
+- **谁派生了谁**：`subagent.parent_agent` 标识哪个 agent 派生了 SubAgent-N
+- **谁花了多少 token**：`gen_ai.caller` 标识每次 LLM 调用归属哪个 agent
+
+下面这个组合拳能在调试时回答「父-子整条链路花了多少 token,哪一段贵」：
+
+```python
+# 同一脚本,两个维度都看
+for span in data.get('spans', []):
+    name = span.get('name', '')
+    attrs = span.get('attributes', {})
+    if name.startswith('subagent.execute'):
+        print(f'{name}: parent={attrs.get("subagent.parent_agent")}, '
+              f'tokens={attrs.get("subagent.tokens_used")}')
+    elif name.startswith('llm.'):
+        print(f'  {name}: caller={attrs.get("gen_ai.caller")}, '
+              f'tokens={attrs.get("gen_ai.usage.total_tokens")}')
+```
+
+---
+
 > **相关文档**：
 > - [Tracing 设计文档](./tracing-design.md) — 详细的架构设计和技术决策
 > - [评测模块使用指南](./evaluation-guide.md) — 离线基准测试
 > - [代码地图](./codemap.md) — 项目整体结构
+> - [多智能体模式快速上手](./多智能体模式快速上手.md) — SubAgent 启用与归因证据
 > - [更新日志](./CHANGELOG.md) — 版本变更记录

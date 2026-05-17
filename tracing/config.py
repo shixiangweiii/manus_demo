@@ -46,9 +46,9 @@ MAX_ATTRIBUTE_LENGTH: int = root_config.TRACING_MAX_ATTRIBUTE_LENGTH
 # --- Derived Settings ---
 # --- 派生设置 ---
 
-SERVICE_VERSION: str = "7.0.0"
+SERVICE_VERSION: str = "13.0.0"
 """Current service version, embedded in Resource.
-当前服务版本，嵌入到 Resource 中。"""
+当前服务版本，嵌入到 Resource 中。Bump alongside CLAUDE.md project version."""
 
 TRACE_OUTPUT_DIR: str = "traces"
 """Directory for FileSpanExporter output (relative to project root).
