@@ -173,12 +173,22 @@ class ReflectorAgent(BaseAgent):
             f"  {nid} [{'OK' if output else 'empty'}]: {output[:300]}"
             for nid, output in dag.state.node_results.items()
         )
+        # 工具调用摘要：让 Reflector 能判断"ask_user 等关键工具是否被合理使用"。
+        # 软引导 (line ~53-57) 依赖此数据，否则规则等于空话。
+        tool_calls_summary = "\n".join(
+            f"  {r.step_id}: " + (
+                ", ".join(tc.tool_name for tc in r.tool_calls_log)
+                if r.tool_calls_log else "(no tool calls)"
+            )
+            for r in results
+        ) or "  (no execution results)"
 
         prompt = (
             f"Evaluate the following task execution:\n\n"
             f"TASK: {task}\n\n"
             f"PLAN (DAG nodes):\n{nodes_summary}\n\n"
             f"RESULTS:\n{results_summary}\n\n"
+            f"TOOL CALLS PER NODE:\n{tool_calls_summary}\n\n"
             f"Provide your evaluation as JSON."
         )
 
@@ -234,12 +244,22 @@ class ReflectorAgent(BaseAgent):
             f"  Step {r.step_id} [{'OK' if r.success else 'FAIL'}]: {r.output[:300]}"
             for r in results
         )
+        # 工具调用摘要：让 Reflector 能判断"ask_user 等关键工具是否被合理使用"。
+        # 软引导 (line ~53-57) 依赖此数据，否则规则等于空话。
+        tool_calls_summary = "\n".join(
+            f"  Step {r.step_id}: " + (
+                ", ".join(tc.tool_name for tc in r.tool_calls_log)
+                if r.tool_calls_log else "(no tool calls)"
+            )
+            for r in results
+        ) or "  (no execution results)"
 
         prompt = (
             f"Evaluate the following task execution:\n\n"
             f"TASK: {task}\n\n"
             f"PLAN:\n{steps_summary}\n\n"
             f"RESULTS:\n{results_summary}\n\n"
+            f"TOOL CALLS PER STEP:\n{tool_calls_summary}\n\n"
             f"Provide your evaluation as JSON.\n"
             f"Note: The user's task is in the language above. "
             f"Provide \"feedback\" and \"suggestions\" values in the same language."

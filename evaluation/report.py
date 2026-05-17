@@ -71,6 +71,19 @@ def render_comparison_table(
             return f"[bold green]{value:{fmt}}[/bold green]"
         return f"{value:{fmt}}"
 
+    # Detect whether pass^k / new-feature data is present (conditional rows)
+    has_passk = any(
+        m.avg_pass_at_k > 0 or any(r.trial_count > 1 for r in m.results)
+        for m in metrics_by_mode.values()
+    )
+    has_subagent = any(m.avg_subagent_calls > 0 for m in metrics_by_mode.values())
+    has_hitl = any(m.avg_hitl_calls > 0 for m in metrics_by_mode.values())
+    has_goal_driven = any(
+        m.avg_goal_anchor_count > 0 or m.stagnation_rate > 0
+        for m in metrics_by_mode.values()
+    )
+    has_judge = any(m.judge_override_count > 0 for m in metrics_by_mode.values())
+
     # Row data
     rows = [
         ("Total Tasks / 总任务数", "total_tasks", "d", False),
@@ -93,6 +106,25 @@ def render_comparison_table(
         ("False Positive Rate / 误判通过率", "false_positive_rate", ".1%", False),
         ("False Negative Rate / 误判拒绝率", "false_negative_rate", ".1%", False),
     ]
+    # v8 conditional rows — only add when relevant data exists
+    if has_passk:
+        rows.append(("Avg Pass^k (Reliability) / 平均通过率", "avg_pass_at_k", ".1%", True))
+        rows.append(("Pass^k Std Dev / 通过率标准差", "pass_at_k_std", ".3f", False))
+    if has_subagent:
+        rows.append(("Avg SubAgent Calls / 子智能体调用次数", "avg_subagent_calls", ".2f", False))
+        rows.append(("SubAgent Success Rate / 子智能体成功率", "avg_subagent_success_rate", ".1%", True))
+        rows.append(("Avg SubAgent Tokens / 子智能体平均Token", "avg_subagent_tokens", ".0f", False))
+    if has_hitl:
+        rows.append(("Avg HITL Calls / 人机交互调用次数", "avg_hitl_calls", ".2f", False))
+        rows.append(("Avg HITL Wait (ms) / 人机交互等待", "avg_hitl_wait_ms", ".0f", False))
+        rows.append(("HITL Timeouts / 人机交互超时总数", "hitl_timeout_total", "d", False))
+        rows.append(("HITL Cancelled / 人机交互取消总数", "hitl_cancelled_total", "d", False))
+    if has_goal_driven:
+        rows.append(("Avg Goal Anchors / 目标锚定次数", "avg_goal_anchor_count", ".2f", False))
+        rows.append(("Avg Goal Re-anchors / 目标重锚定次数", "avg_goal_reanchor_count", ".2f", False))
+        rows.append(("Stagnation Rate / 停滞触发率", "stagnation_rate", ".1%", False))
+    if has_judge:
+        rows.append(("LLM Judge Overrides / 裁判覆盖次数", "judge_override_count", "d", False))
 
     for label, attr, fmt, higher_better in rows:
         values = {}
@@ -193,24 +225,38 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
 
     # Per-task results
     if metrics.results:
+        # v8: detect feature presence to decide conditional columns
+        show_passk = any(r.trial_count > 1 for r in metrics.results)
+        show_subagent = any(r.execution.subagent_calls > 0 for r in metrics.results)
+        show_hitl = any(r.execution.hitl_calls > 0 for r in metrics.results)
+        show_judge = any(r.judge_overrode for r in metrics.results)
+
         task_table = Table(
             title=f"Per-Task Results ({mode})",
             border_style="blue",
             show_lines=True,
         )
-        task_table.add_column("Task ID", style="cyan", width=12)
+        task_table.add_column("Task ID", style="cyan", width=18)
         task_table.add_column("Difficulty", width=10)
         task_table.add_column("Success", width=8)
         task_table.add_column("Score", justify="right", width=8)
-        task_table.add_column("Plan Score", justify="right", width=10)
-        task_table.add_column("Exec Score", justify="right", width=10)
-        task_table.add_column("Eff. Score", justify="right", width=10)
+        task_table.add_column("Plan", justify="right", width=8)
+        task_table.add_column("Exec", justify="right", width=8)
+        task_table.add_column("Eff.", justify="right", width=8)
         task_table.add_column("Tokens", justify="right", width=8)
-        task_table.add_column("Steps Done", justify="right", width=10)
+        task_table.add_column("Steps", justify="right", width=8)
+        if show_passk:
+            task_table.add_column("Pass^k", justify="center", width=10)
+        if show_subagent:
+            task_table.add_column("SubAgent", justify="center", width=10)
+        if show_hitl:
+            task_table.add_column("HITL", justify="center", width=8)
+        if show_judge:
+            task_table.add_column("Judge", justify="center", width=6)
 
         for r in metrics.results:
             success_str = "[green]✓[/green]" if r.execution.task_success else "[red]✗[/red]"
-            task_table.add_row(
+            row = [
                 r.task_id,
                 r.task_difficulty.value,
                 success_str,
@@ -220,7 +266,25 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
                 f"{r.efficiency_score:.3f}",
                 str(r.efficiency.total_tokens),
                 f"{r.execution.steps_completed}/{r.execution.total_steps_planned}",
-            )
+            ]
+            if show_passk:
+                if r.trial_count > 1 and r.pass_at_k is not None:
+                    row.append(f"{sum(r.trial_results)}/{r.trial_count} ({r.pass_at_k:.1%})")
+                else:
+                    row.append("-")
+            if show_subagent:
+                if r.execution.subagent_calls > 0:
+                    row.append(f"{r.execution.subagent_success_count}/{r.execution.subagent_calls}")
+                else:
+                    row.append("-")
+            if show_hitl:
+                if r.execution.hitl_calls > 0:
+                    row.append(str(r.execution.hitl_calls))
+                else:
+                    row.append("-")
+            if show_judge:
+                row.append("[yellow]Y[/yellow]" if r.judge_overrode else "-")
+            task_table.add_row(*row)
         console.print(task_table)
 
 

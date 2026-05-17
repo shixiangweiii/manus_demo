@@ -129,6 +129,7 @@ async def run_evaluation(args: argparse.Namespace) -> None:
         f"Tasks: {len(tasks)} ({', '.join(t.task_id for t in tasks[:5])}"
         f"{'...' if len(tasks) > 5 else ''})\n"
         f"Difficulty filter: {args.difficulty or 'all'}\n"
+        f"Repeat (pass^k): {args.repeat}\n"
         f"Output: {args.output or 'console only'}",
         title="[bold blue]Manus Demo Evaluation[/bold blue]",
         border_style="blue",
@@ -136,7 +137,9 @@ async def run_evaluation(args: argparse.Namespace) -> None:
 
     # Run evaluation
     runner = EvaluationRunner()
-    metrics_by_mode = await runner.evaluate_all_modes(tasks=tasks, modes=modes)
+    metrics_by_mode = await runner.evaluate_all_modes(
+        tasks=tasks, modes=modes, repeat=args.repeat,
+    )
 
     # Render report
     render_full_report(metrics_by_mode, output_json=args.output)
@@ -170,8 +173,15 @@ def main() -> None:
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--repeat", "-k", type=int, default=1,
+        help="v8: re-run each (task, mode) k times and report pass^k (TauBench-style reliability). Default: 1 (no repetition).",
+    )
 
     args = parser.parse_args()
+    if args.repeat < 1:
+        console.print("[red]--repeat must be >= 1[/red]")
+        sys.exit(1)
     setup_logging(args.verbose)
 
     if args.dry_run:

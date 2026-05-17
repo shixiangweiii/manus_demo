@@ -91,9 +91,32 @@ def get_search_guidance() -> str:
     return _SEARCH_TOOL_GUIDANCE
 
 
-# HITL tool usage guidance (injected when HITL_ENABLED=true)
-# 人机交互工具使用引导（HITL_ENABLED=true 时追加到系统提示词）
-_HITL_GUIDANCE = """
+# HITL tool usage guidance (injected when HITL is active)
+# 人机交互工具使用引导（HITL 激活时追加到系统提示词）
+#
+# Activation gating uses a runtime override (set by OrchestratorAgent based on
+# interactive mode) with fallback to config.HITL_ENABLED. This avoids injecting
+# the guidance in non-interactive single-task mode where ask_user would only
+# return Error: anyway — preventing wasted LLM calls on a tool the LLM cannot
+# usefully invoke.
+# 通过运行时开关 + config 兜底门控；非交互模式下既不注册工具也不注入引导，
+# 避免 LLM 调用一个注定返回 Error 的工具。
+_HITL_RUNTIME_OVERRIDE: bool | None = None
+
+
+def set_hitl_runtime_enabled(enabled: bool) -> None:
+    """Runtime override for HITL guidance injection.
+
+    Set by OrchestratorAgent.__init__ based on interactive mode + config.
+    Pass None (or never call) to fall back to config.HITL_ENABLED.
+
+    OrchestratorAgent 在 __init__ 中根据 interactive 模式 + config 设置此开关。
+    None 表示回退到 config.HITL_ENABLED。"""
+    global _HITL_RUNTIME_OVERRIDE
+    _HITL_RUNTIME_OVERRIDE = enabled
+
+
+_HITL_GUIDANCE_TEMPLATE = """
 
 ## Tool Selection: When to Use the "ask_user" Tool
 
@@ -107,7 +130,7 @@ a question during execution. Use this tool ONLY when:
 DO NOT use the "ask_user" tool for:
 - Questions you can answer with other tools (web_search, etc.)
 - Routine task execution where the user's original instruction is clear
-- Repeatedly asking the same question (max 5 calls per task)
+- Repeatedly asking the same question (max {max_prompts} calls per task)
 
 When you do call ask_user, phrase your question clearly and include
 the context of what you already know. For example:
@@ -117,11 +140,23 @@ If not, please tell me your city."
 
 
 def get_hitl_guidance() -> str:
-    """Return HITL guidance string if enabled, empty string otherwise.
-    HITL_ENABLED=true 时返回引导文本，否则返回空字符串。"""
-    if config.HITL_ENABLED:
-        return _HITL_GUIDANCE
-    return ""
+    """Return HITL guidance string if HITL is active, empty string otherwise.
+
+    Active when runtime override is True, or (override unset AND config.HITL_ENABLED).
+    The max-prompts limit is interpolated from config.HITL_MAX_PROMPTS_PER_TASK
+    so the LLM always sees the actual configured value.
+
+    HITL 激活时返回引导文本，否则返回空字符串。max-prompts 从 config 动态注入。"""
+    enabled = (
+        _HITL_RUNTIME_OVERRIDE
+        if _HITL_RUNTIME_OVERRIDE is not None
+        else config.HITL_ENABLED
+    )
+    if not enabled:
+        return ""
+    return _HITL_GUIDANCE_TEMPLATE.format(
+        max_prompts=config.HITL_MAX_PROMPTS_PER_TASK
+    )
 
 
 def build_context_injection() -> str:

@@ -704,23 +704,30 @@ class GoalDrivenPlannerAgent(BaseAgent):
 
                 logger.info("[GoalDrivenPlanner] Tool call: %s(%s)", func_name, func_args)
 
+                # ToolRouter accounting: decide success vs failure AFTER detecting
+                # Error:-prefixed string returns. Mirrors the v12 fix in
+                # react/engine.py:251-261 — without this, tools that swallow
+                # exceptions and return error strings (web_search, fetch_url,
+                # ask_user timeout/cancel/limit) would be silently counted as
+                # success, defeating the failure-threshold mechanism.
+                # 与 v12 ReActEngine 同款：先执行 + 检测 Error: 前缀，再统一一次 record。
+                # 否则 ask_user 等返回 Error 字符串的工具会被误计为成功。
                 tool = self.tools.get(func_name)
-                is_error = False
                 if tool is None:
                     result = f"Error: Unknown tool '{func_name}'"
-                    self.tool_router.record_failure(step_id, func_name)
                     is_error = True
                 else:
                     try:
                         result = await tool.traced_execute(**func_args)
-                        self.tool_router.record_success(step_id, func_name)
+                        is_error = isinstance(result, str) and result.startswith("Error:")
                     except Exception as exc:
                         result = f"Error: Tool execution error: {exc}"
-                        self.tool_router.record_failure(step_id, func_name)
                         is_error = True
 
-                if isinstance(result, str) and result.startswith("Error:"):
-                    is_error = True
+                if is_error:
+                    self.tool_router.record_failure(step_id, func_name)
+                else:
+                    self.tool_router.record_success(step_id, func_name)
 
                 tool_calls_log.append(ToolCallRecord(
                     tool_name=func_name,

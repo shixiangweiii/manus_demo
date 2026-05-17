@@ -62,6 +62,12 @@ class OtelDetachFilter(logging.Filter):
 
 console = Console()
 
+# Strong references for fire-and-forget input-collection tasks. asyncio loops
+# only hold WEAK refs to tasks, so unkept references can be GC'd mid-execution
+# (Python docs: "save a reference to the result of this function").
+# 维持 asyncio.create_task 创建的输入收集任务的强引用，防止被 GC 中断。
+_pending_input_tasks: set[asyncio.Task] = set()
+
 # Status -> Rich style mapping
 # 节点状态 -> Rich 样式映射（用于 DAG 树形可视化中的颜色标注）
 _STATUS_STYLES = {
@@ -477,7 +483,9 @@ def on_event(event: str, data: Any) -> None:
                 if not response_future.done():
                     response_future.set_result(f"(input error: {exc})")
 
-        asyncio.create_task(_collect_and_resolve())
+        task = asyncio.create_task(_collect_and_resolve())
+        _pending_input_tasks.add(task)
+        task.add_done_callback(_pending_input_tasks.discard)
 
     elif event == "ask_user_response":
         # HITL: user has responded to an agent question (info log)
@@ -489,6 +497,13 @@ def on_event(event: str, data: Any) -> None:
         # HITL: user did not respond in time
         console.print(
             f"  [yellow]User input timed out ({data.get('timeout', '?')}s). "
+            "Agent will proceed autonomously.[/yellow]"
+        )
+
+    elif event == "ask_user_cancelled":
+        # HITL: user explicitly cancelled (Ctrl+C / EOF)
+        console.print(
+            "  [yellow]User cancelled the prompt. "
             "Agent will proceed autonomously.[/yellow]"
         )
 
@@ -571,11 +586,8 @@ async def run_interactive() -> None:
         llm_client=llm_client,
         tools=tools,
         on_event=on_event,  # 绑定 UI 事件回调
+        interactive=True,   # v13 HITL: 交互模式可同步收集用户输入
     )
-
-    # v13 HITL: enable interactive mode for ask_user tool
-    if orchestrator._ask_user_tool:
-        orchestrator._ask_user_tool.set_interactive_mode(True)
 
     while True:
         console.print()
@@ -611,11 +623,8 @@ async def run_single(task: str) -> None:
         llm_client=llm_client,
         tools=tools,
         on_event=on_event,
+        interactive=False,  # v13 HITL: 单任务模式无法收集用户输入，HITL 自动失活
     )
-
-    # v13 HITL: disable interactive mode for ask_user tool in single-task mode
-    if orchestrator._ask_user_tool:
-        orchestrator._ask_user_tool.set_interactive_mode(False)
 
     await orchestrator.run(task)
 

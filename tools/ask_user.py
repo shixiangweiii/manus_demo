@@ -136,6 +136,23 @@ class AskUserTool(BaseTool):
                     response_future,
                     timeout=self._timeout,
                 )
+                # User cancellation (Ctrl+C / EOF) is signalled by the UI layer
+                # via the sentinel "(user cancelled)". Convert to Error: prefix
+                # so ReActEngine treats it as a tool failure (ToolRouter accounting,
+                # evaluation distinguishability) — matching the timeout/limit paths.
+                # 用户取消（Ctrl+C / EOF）由 UI 层通过 "(user cancelled)" sentinel 传达；
+                # 转为 Error 前缀以与 timeout/上限路径风格一致，并让 ToolRouter / evaluation 可区分。
+                if user_response == "(user cancelled)":
+                    logger.info("[AskUserTool] User cancelled prompt %s", prompt_id)
+                    self._on_event("ask_user_cancelled", {
+                        "prompt_id": prompt_id,
+                        "prompt_count": self._prompt_count,
+                    })
+                    return (
+                        "Error: User cancelled the prompt. "
+                        "Proceed with your best judgment using available tools."
+                    )
+
                 logger.info(
                     "[AskUserTool] Response received for prompt %s: %s",
                     prompt_id, user_response[:100],

@@ -68,6 +68,15 @@ class FailureCategory(str, Enum):
     LLM_CALL_FAILURE = "llm_call_failure"                   # LLM 调用失败
     PARSE_FAILURE = "parse_failure"                          # LLM 输出解析失败
 
+    # v9/v13 execution failures
+    SUBAGENT_FAILED = "subagent_failed"                     # v9: SubAgent 执行失败 / 超时 / 上限
+    HITL_TIMEOUT = "hitl_timeout"                           # v13: ask_user 等待超时
+    HITL_CANCELLED = "hitl_cancelled"                       # v13: 用户主动取消 ask_user
+
+    # v8 Goal-driven planning failures
+    GOAL_STAGNATION = "goal_stagnation"                     # v8: 检测到目标停滞，无法推进
+    TODO_BLOCKED_PERSISTENT = "todo_blocked"               # v5/v8: TODO 持续 blocked 未解决
+
 
 # ======================================================================
 # Per-Task Metrics (collected during a single task run)
@@ -92,6 +101,11 @@ class PlanningMetrics(BaseModel):
     # Step/subgoal coverage (vs. ground truth)
     expected_step_count: int = 0                # 参考答案的步骤数
     step_coverage_ratio: float = 0.0            # 步骤覆盖率 = |covered| / |expected|
+
+    # v8 Goal-driven planning specifics
+    # v8 目标驱动规划专属指标（仅在 ENABLE_GOAL_DRIVEN_PLANNER=true 时非零）
+    goal_anchor_count: int = 0                  # goal_anchor 事件次数
+    goal_reanchor_count: int = 0                # goal_reanchor 事件次数（目标漂移后重锚定）
 
 
 class ExecutionMetrics(BaseModel):
@@ -121,6 +135,22 @@ class ExecutionMetrics(BaseModel):
 
     execution_time_ms: float = 0.0              # 执行阶段总耗时
 
+    # v9 SubAgent specifics (mirror of subagent_metrics for scoring access)
+    # v9 子智能体专属指标（与 subagent_metrics 字典镜像，便于评分公式访问）
+    subagent_calls: int = 0                     # SubAgent 调用总次数
+    subagent_success_count: int = 0             # SubAgent 成功完成次数（status=completed）
+
+    # v13 HITL specifics
+    # v13 人机交互专属指标（仅在 HITL_ENABLED + interactive=True 时非零）
+    hitl_calls: int = 0                         # ask_user 调用总次数
+    hitl_timeout_count: int = 0                 # ask_user 超时次数
+    hitl_cancelled_count: int = 0               # 用户主动取消 ask_user 次数
+
+    # v2 DAG specifics
+    # v2 DAG 执行细节
+    dag_rollback_count: int = 0                 # 节点回滚次数
+    condition_eval_count: int = 0               # 条件边评估次数
+
 
 class EfficiencyMetrics(BaseModel):
     """
@@ -135,6 +165,11 @@ class EfficiencyMetrics(BaseModel):
     # Replan metrics
     replan_count: int = 0                       # 重规划次数
     replan_success: bool = False                # 重规划后是否最终成功
+
+    # v9/v13 cost specifics
+    # v9/v13 成本细节（参与 efficiency 报告但不直接影响评分）
+    subagent_total_tokens: int = 0              # v9: 所有 SubAgent 调用累计 token 消耗
+    hitl_total_wait_ms: float = 0.0             # v13: ask_user 累计等待时间（毫秒）
 
 
 class ReflectionMetrics(BaseModel):
@@ -152,6 +187,11 @@ class ReflectionMetrics(BaseModel):
 
     is_false_positive: bool = False             # 反思通过但 GT 认为失败
     is_false_negative: bool = False             # 反思拒绝但 GT 认为成功
+
+    # v8 Goal-driven reflection specifics
+    # v8 目标驱动反思专属指标
+    goal_reflection_count: int = 0              # goal_reflection 事件次数
+    stagnation_detected: bool = False           # 是否触发停滞检测
 
 
 class FailureRecord(BaseModel):
@@ -197,6 +237,21 @@ class TaskEvaluationResult(BaseModel):
     # v9 SubAgent metrics (Wave C #9: previously collected but unused)
     # 子智能体相关指标（采集后聚合，便于评估 SubAgent 路径的 ROI）
     subagent_metrics: dict[str, Any] = Field(default_factory=dict)
+
+    # v8 Pass^k reliability (TauBench-style; only populated when --repeat k>1)
+    # v8 借鉴 TauBench：单任务多次重跑度量稳定性
+    trial_count: int = 1                                # 本任务实际重跑次数 k
+    trial_results: list[bool] = Field(default_factory=list)  # 每次试验的 task_success 列表
+    pass_at_k: Optional[float] = None                    # successes / k；k=1 时为 None
+
+    # v8 LLM-as-Judge fallback (only set when keyword check fails AND judge runs)
+    # v8 LLM 兜底裁判：仅在 must_include 关键词缺失且 LLM judge 被调用时记录
+    judge_overrode: bool = False                # judge 是否覆盖了关键词失败判定
+    judge_reasoning: str = ""                   # judge 给出的语义判定理由（一句话）
+
+    # Final answer (surfaced for transparency and LLM judge access)
+    # 最终答案（供 transparency 输出和 LLM judge 访问）
+    final_answer: str = ""
 
     # Metadata
     run_timestamp: float = Field(default_factory=time.time)
@@ -252,6 +307,33 @@ class AggregatedMetrics(BaseModel):
     # Failure analysis
     failure_distribution: dict[str, int] = Field(default_factory=dict)  # 失败类别分布
 
+    # v9 SubAgent aggregates
+    avg_subagent_calls: float = 0.0             # 平均 SubAgent 调用次数
+    avg_subagent_success_rate: float = 0.0      # 平均 SubAgent 成功率
+    avg_subagent_tokens: float = 0.0            # 平均 SubAgent 累计 token
+
+    # v13 HITL aggregates
+    avg_hitl_calls: float = 0.0                 # 平均 ask_user 调用次数
+    avg_hitl_wait_ms: float = 0.0               # 平均 ask_user 等待时间
+    hitl_timeout_total: int = 0                 # ask_user 超时总次数
+    hitl_cancelled_total: int = 0               # ask_user 取消总次数
+
+    # v8 Goal-driven aggregates
+    avg_goal_anchor_count: float = 0.0          # 平均 goal_anchor 次数
+    avg_goal_reanchor_count: float = 0.0        # 平均 goal_reanchor 次数
+    stagnation_rate: float = 0.0                # 触发停滞检测的任务比例
+
+    # v8 DAG detail aggregates
+    avg_dag_rollback_count: float = 0.0         # 平均节点回滚次数
+    avg_condition_eval_count: float = 0.0       # 平均条件边评估次数
+
+    # v8 Pass^k aggregates (only meaningful when any task has trial_count > 1)
+    avg_pass_at_k: float = 0.0                  # 平均 pass^k
+    pass_at_k_std: float = 0.0                  # pass^k 标准差（稳定性指标）
+
+    # v8 LLM Judge usage
+    judge_override_count: int = 0               # LLM judge 覆盖关键词失败的次数
+
     # Raw results for drill-down
     results: list[TaskEvaluationResult] = Field(default_factory=list)
 
@@ -303,23 +385,43 @@ def compute_execution_score(em: ExecutionMetrics) -> float:
     Compute execution quality score (0-1).
     执行质量评分。
 
-    Weight breakdown:
+    Weight breakdown (when no SubAgent called — backward compatible):
       50% - Task success
       30% - Step success rate
       20% - Tool accuracy
+
+    Weight breakdown (v8 update: when SubAgent is called, subagent_calls > 0):
+      45% - Task success
+      25% - Step success rate
+      15% - Tool accuracy
+      15% - SubAgent success rate (subagent_success_count / subagent_calls)
+
+    Rationale: prevents "SubAgent all failed but task looks superficially OK" inflation.
+    设计原则：SubAgent 未触发时不影响打分（向后兼容）；触发后扣分逻辑生效。
     """
     score = 0.0
-    # Task success (50%)
-    score += 0.5 if em.task_success else 0.0
-    # Step success rate (30%)
-    if em.total_steps_planned > 0:
-        score += 0.3 * em.step_success_rate
-    # Tool accuracy (20%)
-    if em.total_tool_calls > 0:
-        score += 0.2 * em.tool_accuracy
+
+    if em.subagent_calls > 0:
+        # v8 SubAgent-aware weighting
+        subagent_sr = em.subagent_success_count / em.subagent_calls
+        score += 0.45 if em.task_success else 0.0
+        if em.total_steps_planned > 0:
+            score += 0.25 * em.step_success_rate
+        if em.total_tool_calls > 0:
+            score += 0.15 * em.tool_accuracy
+        else:
+            score += 0.075  # neutral 50% of the 15% slot
+        score += 0.15 * subagent_sr
     else:
-        # No tool calls needed: neutral (don't penalize)
-        score += 0.1
+        # Original 50/30/20 (backward compatible for existing 12 benchmarks)
+        score += 0.5 if em.task_success else 0.0
+        if em.total_steps_planned > 0:
+            score += 0.3 * em.step_success_rate
+        if em.total_tool_calls > 0:
+            score += 0.2 * em.tool_accuracy
+        else:
+            score += 0.1
+
     return min(score, 1.0)
 
 
@@ -405,17 +507,28 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
     mode = results[0].planning_mode
     n = len(results)
 
-    # Basic aggregates
-    successful = sum(1 for r in results if r.execution.task_success)
-    task_sr = successful / n if n > 0 else 0.0
+    # v8 Pass^k-aware success rate:
+    # - When k=1: r.execution.task_success is the ONLY trial result (binary)
+    # - When k>1: r.pass_at_k = successes/k captures the trial-aggregated rate
+    #            but r.execution.task_success snapshot is only the LAST trial.
+    # Using the per-task pass rate (or 1.0/0.0 for k=1) makes
+    # task_success_rate consistent with avg_pass_at_k under repetition.
+    # 当 k>1 时，aggregate 用每任务的 pass_at_k 而非最后一次试验的 task_success，
+    # 避免 "task_success_rate=0% 但 avg_pass_at_k=66.7%" 的矛盾报告。
+    def _success_score(r: TaskEvaluationResult) -> float:
+        if r.trial_count > 1 and r.pass_at_k is not None:
+            return r.pass_at_k
+        return 1.0 if r.execution.task_success else 0.0
 
-    # By difficulty
+    task_sr = sum(_success_score(r) for r in results) / n if n > 0 else 0.0
+
+    # By difficulty (same pass^k-aware logic)
     by_diff: dict[str, list[TaskEvaluationResult]] = {}
     for r in results:
         key = r.task_difficulty.value
         by_diff.setdefault(key, []).append(r)
     sr_by_diff = {
-        k: sum(1 for r in v if r.execution.task_success) / len(v)
+        k: sum(_success_score(r) for r in v) / len(v)
         for k, v in by_diff.items()
     }
 
@@ -449,6 +562,52 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
             key = f.category.value
             failure_dist[key] = failure_dist.get(key, 0) + 1
 
+    # v8 SubAgent aggregates (only meaningful when any task triggered SubAgent)
+    subagent_results = [r for r in results if r.execution.subagent_calls > 0]
+    if subagent_results:
+        avg_sa_calls = sum(r.execution.subagent_calls for r in subagent_results) / len(subagent_results)
+        avg_sa_sr = sum(
+            r.execution.subagent_success_count / max(r.execution.subagent_calls, 1)
+            for r in subagent_results
+        ) / len(subagent_results)
+        avg_sa_tokens = sum(r.efficiency.subagent_total_tokens for r in subagent_results) / len(subagent_results)
+    else:
+        avg_sa_calls = avg_sa_sr = avg_sa_tokens = 0.0
+
+    # v13 HITL aggregates
+    hitl_results = [r for r in results if r.execution.hitl_calls > 0]
+    if hitl_results:
+        avg_hitl_calls = sum(r.execution.hitl_calls for r in hitl_results) / len(hitl_results)
+        avg_hitl_wait = sum(r.efficiency.hitl_total_wait_ms for r in hitl_results) / len(hitl_results)
+    else:
+        avg_hitl_calls = avg_hitl_wait = 0.0
+    hitl_to_total = sum(r.execution.hitl_timeout_count for r in results)
+    hitl_cancel_total = sum(r.execution.hitl_cancelled_count for r in results)
+
+    # v8 Goal-driven aggregates
+    avg_anchor = sum(r.planning.goal_anchor_count for r in results) / n
+    avg_reanchor = sum(r.planning.goal_reanchor_count for r in results) / n
+    stagnation_rate = sum(1 for r in results if r.reflection.stagnation_detected) / n
+
+    # v2 DAG aggregates
+    avg_rollback = sum(r.execution.dag_rollback_count for r in results) / n
+    avg_cond_eval = sum(r.execution.condition_eval_count for r in results) / n
+
+    # v8 Pass^k aggregates (only when some task has trial_count > 1)
+    repeated = [r for r in results if r.trial_count > 1 and r.pass_at_k is not None]
+    if repeated:
+        pk_values = [r.pass_at_k for r in repeated]
+        avg_pk = sum(pk_values) / len(pk_values)
+        mean = avg_pk
+        variance = sum((p - mean) ** 2 for p in pk_values) / len(pk_values) if len(pk_values) > 1 else 0.0
+        pk_std = variance ** 0.5
+    else:
+        avg_pk = 0.0
+        pk_std = 0.0
+
+    # v8 LLM Judge usage count
+    judge_overrides = sum(1 for r in results if r.judge_overrode)
+
     return AggregatedMetrics(
         planning_mode=mode,
         total_tasks=n,
@@ -474,5 +633,20 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
         false_negative_rate=fnr,
         reflection_coverage_rate=reflection_coverage,
         failure_distribution=failure_dist,
+        avg_subagent_calls=avg_sa_calls,
+        avg_subagent_success_rate=avg_sa_sr,
+        avg_subagent_tokens=avg_sa_tokens,
+        avg_hitl_calls=avg_hitl_calls,
+        avg_hitl_wait_ms=avg_hitl_wait,
+        hitl_timeout_total=hitl_to_total,
+        hitl_cancelled_total=hitl_cancel_total,
+        avg_goal_anchor_count=avg_anchor,
+        avg_goal_reanchor_count=avg_reanchor,
+        stagnation_rate=stagnation_rate,
+        avg_dag_rollback_count=avg_rollback,
+        avg_condition_eval_count=avg_cond_eval,
+        avg_pass_at_k=avg_pk,
+        pass_at_k_std=pk_std,
+        judge_override_count=judge_overrides,
         results=results,
     )

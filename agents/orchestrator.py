@@ -97,7 +97,15 @@ class OrchestratorAgent:
         llm_client: LLMClient | None = None,
         tools: list[BaseTool] | None = None,
         on_event: Callable[[str, Any], None] | None = None,
+        interactive: bool = True,
     ):
+        # interactive: whether the host environment can collect user input
+        # synchronously. main.run_interactive passes True, run_single passes False.
+        # When False AND HITL_ENABLED, the ask_user tool is NOT registered and
+        # its system-prompt guidance is NOT injected — preventing wasted LLM
+        # calls on a tool that would only return Error: in non-interactive mode.
+        # interactive 控制宿主能否同步收集用户输入；False + HITL_ENABLED 时
+        # ask_user 工具与引导都不注入，避免无意义调用。
         self.llm_client = llm_client or LLMClient()  # 共享 LLM 客户端
         self.context_manager = ContextManager()       # 上下文压缩管理器
 
@@ -130,9 +138,18 @@ class OrchestratorAgent:
             logger.info("[Orchestrator] SubAgent tool (v9) enabled")
 
         # v13 HITL tool (feature-flagged, default off)
-        # v13 人机交互工具（特性开关控制，默认关闭）
+        # Double-gated by config.HITL_ENABLED AND interactive: HITL only makes
+        # sense when the host can actually collect user input. Tool registration
+        # AND prompt-guidance injection are gated together — see
+        # agents/prompt_utils.set_hitl_runtime_enabled.
+        # v13 人机交互工具：config.HITL_ENABLED + interactive 双门控；
+        # 工具注册和引导注入同步开关，避免非交互模式下 LLM 看到一个注定 Error 的工具。
+        from agents.prompt_utils import set_hitl_runtime_enabled
+        self._hitl_active = config.HITL_ENABLED and interactive
+        set_hitl_runtime_enabled(self._hitl_active)
+
         self._ask_user_tool = None
-        if config.HITL_ENABLED:
+        if self._hitl_active:
             from tools.ask_user import AskUserTool
             self._ask_user_tool = AskUserTool(
                 on_user_prompt=self._handle_user_prompt,
@@ -140,6 +157,10 @@ class OrchestratorAgent:
             )
             tools = list(tools or []) + [self._ask_user_tool]
             logger.info("[Orchestrator] HITL ask_user tool (v13) enabled")
+        elif config.HITL_ENABLED and not interactive:
+            logger.info(
+                "[Orchestrator] HITL configured but suppressed (non-interactive mode)"
+            )
 
         # Sub-agents（各专用子智能体）
         self.planner = PlannerAgent(self.llm_client, self.context_manager)

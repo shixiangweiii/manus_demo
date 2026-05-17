@@ -58,6 +58,13 @@ class GroundTruth(BaseModel):
     # Reference output (optional, for similarity comparison)
     reference_output: str = ""                  # 参考输出文本
 
+    # v8 GroundTruth for new feature coverage (HITL / SubAgent / Goal-Driven)
+    # v8 新特性覆盖的 GroundTruth 字段（None = 不验证该维度）
+    expected_hitl_calls: tuple[int, int] | None = None       # (min, max) ask_user 调用次数区间
+    expected_subagent_calls: tuple[int, int] | None = None   # (min, max) SubAgent 调用次数区间
+    expected_goal_features: list[str] | None = None          # 期望出现的 goal-driven 事件名列表
+    simulated_responses: list[str] | None = None             # HITL 任务的预设用户回答（按 FIFO 消费）
+
 
 class BenchmarkTask(BaseModel):
     """
@@ -286,6 +293,128 @@ BENCHMARK_TASKS: list[BenchmarkTask] = [
             ],
             success_criteria="功能完整，代码可运行，包含错误处理",
             must_include_keywords=["学生", "成绩", "CSV", "student"],
+        ),
+    ),
+
+    # ==================================================================
+    # v8 HITL tasks — require ask_user clarification (auto-answered by SimulatedUser)
+    # v8 人机交互任务：要求 ask_user 澄清，模拟用户自动回答
+    # Tag "hitl" triggers HITL_ENABLED=true + interactive=True + SimulatedUser injection
+    # ==================================================================
+    BenchmarkTask(
+        task_id="hitl_easy_001",
+        task_description="帮我查询附近的咖啡馆推荐",
+        difficulty=TaskDifficulty.EASY,
+        tags=["hitl", "search", "ambiguous_location"],
+        ground_truth=GroundTruth(
+            expected_complexity="simple",
+            expected_step_count_range=(2, 4),
+            expected_tools=["get_user_location", "ask_user", "web_search"],
+            expected_subtasks=["确认用户城市", "搜索咖啡馆"],
+            success_criteria="使用用户确认的城市进行搜索，返回咖啡馆列表",
+            must_include_keywords=["上海", "咖啡"],  # 模拟用户回答上海
+            expected_hitl_calls=(1, 3),
+            simulated_responses=["上海", "中山公园附近"],
+        ),
+    ),
+    BenchmarkTask(
+        task_id="hitl_hard_001",
+        task_description="为我推荐一篇近期会让我感兴趣的论文",
+        difficulty=TaskDifficulty.HARD,
+        tags=["hitl", "search", "preference_required"],
+        ground_truth=GroundTruth(
+            expected_complexity="emergent",
+            expected_step_count_range=(2, 5),
+            expected_tools=["ask_user", "web_search"],
+            expected_subtasks=["询问研究兴趣方向", "根据兴趣搜索论文"],
+            success_criteria="根据用户偏好返回相关论文",
+            must_include_keywords=["LLM", "agent"],
+            expected_hitl_calls=(1, 3),
+            simulated_responses=[
+                "我对大语言模型的智能体方向感兴趣，特别是 LLM agent 的评测与推理",
+                "近 6 个月内的工作",
+            ],
+        ),
+    ),
+
+    # ==================================================================
+    # v9 SubAgent tasks — should trigger SubAgent delegation
+    # v9 子智能体任务：应触发 SubAgent 委托独立调研
+    # Tag "subagent" triggers SUBAGENT_ENABLED=true at runtime
+    # ==================================================================
+    BenchmarkTask(
+        task_id="subagent_easy_001",
+        task_description="分别调研 Flask、FastAPI、Django 三个 Python web 框架的核心特点和适用场景，给出对比总结",
+        difficulty=TaskDifficulty.EASY,
+        tags=["subagent", "search", "delegation"],
+        ground_truth=GroundTruth(
+            expected_complexity="emergent",
+            expected_step_count_range=(3, 7),
+            expected_tools=["subagent", "web_search"],
+            expected_subtasks=["调研 Flask", "调研 FastAPI", "调研 Django", "对比总结"],
+            success_criteria="包含三个框架的对比信息",
+            must_include_keywords=["Flask", "FastAPI", "Django"],
+            expected_subagent_calls=(1, 4),
+        ),
+    ),
+    BenchmarkTask(
+        task_id="subagent_hard_001",
+        task_description=(
+            "对 Manus Demo 项目做架构梳理：(1) 列出 agents/ 目录下的所有 agent 模块及其角色 "
+            "(2) 列出 tools/ 目录下的所有 tool 及其用途 (3) 输出 markdown 格式的架构总结"
+        ),
+        difficulty=TaskDifficulty.HARD,
+        tags=["subagent", "file_ops", "delegation", "multi_step"],
+        ground_truth=GroundTruth(
+            expected_complexity="emergent",
+            expected_step_count_range=(3, 8),
+            expected_tools=["subagent", "shell", "file_ops"],
+            expected_subtasks=["扫描 agents 模块", "扫描 tools 模块", "生成架构总结"],
+            success_criteria="包含 agents 和 tools 的清单及职责",
+            must_include_keywords=["agent", "tool", "架构"],
+            expected_subagent_calls=(1, 3),
+        ),
+    ),
+
+    # ==================================================================
+    # v8 Goal-Driven tasks — should trigger goal_anchor / goal_reflection
+    # v8 目标驱动任务：应触发 goal_anchor / goal_reflection 事件
+    # Tag "goal_driven" triggers ENABLE_GOAL_DRIVEN_PLANNER=true at runtime
+    # ==================================================================
+    BenchmarkTask(
+        task_id="goal_easy_001",
+        task_description="持续生成质数，直到累计找到 30 个为止，输出最后一个质数",
+        difficulty=TaskDifficulty.EASY,
+        tags=["goal_driven", "code", "condition_termination"],
+        ground_truth=GroundTruth(
+            expected_complexity="emergent",
+            expected_step_count_range=(2, 5),
+            expected_tools=["execute_python"],
+            expected_subtasks=["实现质数生成", "累计到 30 个后终止"],
+            success_criteria="正确输出第 30 个质数（113）",
+            must_include_keywords=["113"],
+            expected_goal_features=["goal_anchor"],
+        ),
+    ),
+    BenchmarkTask(
+        task_id="goal_hard_001",
+        task_description=(
+            "优化下面的 fibonacci 函数代码使其计算 fib(35) 用时低于 1 秒（请实施代码、测量、若不达标继续优化）：\n"
+            "def fib(n): return n if n < 2 else fib(n-1) + fib(n-2)"
+        ),
+        difficulty=TaskDifficulty.HARD,
+        tags=["goal_driven", "code", "iterative_optimization"],
+        ground_truth=GroundTruth(
+            expected_complexity="emergent",
+            expected_step_count_range=(3, 8),
+            expected_tools=["execute_python"],
+            expected_subtasks=["测量基线", "优化实现", "重新测量", "达标终止"],
+            # Relaxed: "fib" + ANY of {memoization, 缓存, cache, lru_cache, dp, 动态规划}
+            # 任一同义词命中即可；过严会让 LLM judge 反复兜底，增加 token 成本
+            success_criteria="给出优化后的 fibonacci 代码（如 memoization/lru_cache/迭代/动态规划），并提供测量证据证明用时 <1s",
+            must_include_keywords=["fib"],
+            must_not_include=[],
+            expected_goal_features=["goal_anchor", "goal_reflection"],
         ),
     ),
 ]

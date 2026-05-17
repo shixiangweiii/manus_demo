@@ -1,8 +1,18 @@
 # Manus Demo - 评测模块功能说明与使用指南
 
-> **版本**: v7.0（含深度代码评审 7 项 Bug 修复）
-> **更新日期**: 2026-05-12
+> **版本**: v8.0（覆盖 v8 GoalDriven / v9 SubAgent / v13 HITL；Pass^k + LLM-as-Judge）
+> **更新日期**: 2026-05-16
 > **目的**: 介绍评测模块的整体设计思路、架构、指标体系、使用方法和扩展指南，帮助新加入的开发人员快速上手
+
+> **v8.0 关键升级**（相对 v7.0）：
+> - **事件覆盖扩展**：Probe 新增 14+ 个事件分支（HITL/SubAgent/GoalDriven/DAG 细节）
+> - **新指标维度**：ExecutionMetrics 加 SubAgent / HITL / DAG 字段；EfficiencyMetrics 加 SubAgent token / HITL 等待时间；PlanningMetrics 加 goal anchor 计数；ReflectionMetrics 加 stagnation 检测
+> - **新失败类别**：`subagent_failed` / `hitl_timeout` / `hitl_cancelled` / `goal_stagnation` / `todo_blocked`
+> - **SubAgent 评分纳入**：`compute_execution_score` 在 SubAgent 触发时切换权重（45/25/15/15）
+> - **新 benchmark 任务**：HITL/SubAgent/GoalDriven 各 2 任务（共 +6，总数 12→18）
+> - **TauBench 风格 Pass^k**：`--repeat k` 单任务重跑 k 次，输出 `pass_at_k = successes/k`
+> - **Anthropic 风格 LLM-as-Judge**：`must_include_keywords` 失败时 LLM 兜底语义评估
+> - **SimulatedUser**：HITL 评测的脚本化用户输入模拟器，让 ask_user 任务可在无人工介入下完成
 
 ---
 
@@ -847,3 +857,198 @@ def test_your_new_task():
 | `TOKEN_TRACKING_ENABLED` | `true` | Token 追踪开关 |
 
 评测运行时这些配置会被记录到 `TaskEvaluationResult.config_snapshot` 中，便于回溯每次评测的运行时环境。
+
+---
+
+## 13. v8 引擎覆盖扩展（v9 SubAgent / v13 HITL / v8 GoalDriven）
+
+### 13.1 事件覆盖矩阵
+
+v7 Probe 覆盖 17 个事件；v8 扩展到 31 个事件（新增 14 个）：
+
+| 事件源 | 新增事件 | Probe 处理 |
+|--------|----------|------------|
+| `tools/ask_user.py` (v13 HITL) | `ask_user_prompt` | `hitl_calls++` + 记录 prompt 开始时间 |
+| | `ask_user_response` | 累计 `hitl_total_wait_ms` |
+| | `ask_user_timeout` | `hitl_timeout_count++` + 添加 `HITL_TIMEOUT` failure |
+| | `ask_user_cancelled` | `hitl_cancelled_count++` + 添加 `HITL_CANCELLED` failure |
+| `agents/subagent.py` (v9) | `subagent_start` | `_subagent_starts++`（含启动后失败的情况） |
+| | `subagent_iteration` | 静默（仅用于 tracing） |
+| | `subagent_limit_exceeded` | 添加 `SUBAGENT_FAILED` failure |
+| `agents/goal_driven_planner.py` (v8) | `goal_anchor` | `goal_anchor_count++` |
+| | `goal_reanchor` | `goal_reanchor_count++` |
+| | `goal_reflection` | `goal_reflection_count++` |
+| | `stagnation_detected` | `stagnation_detected=True` + `GOAL_STAGNATION` failure |
+| | `goal_drift_alert` | 静默（信息性） |
+| `dag/executor.py` (v2) | `node_rollback` | `dag_rollback_count++` |
+| | `condition_evaluated` | `condition_eval_count++` |
+| | `execution_error` | 添加 `TOOL_EXECUTION_ERROR` failure |
+| `agents/emergent_planner.py` / `goal_driven_planner.py` | `todo_failed` | `steps_failed++`（之前漏掉） |
+
+### 13.2 SubAgent 评分纳入
+
+`compute_execution_score` 在 `subagent_calls > 0` 时切换权重：
+
+```
+原 (无 SubAgent)：   task_success 50% + step_success 30% + tool_accuracy 20%
+v8 (有 SubAgent)：   task_success 45% + step_success 25% + tool_accuracy 15% + subagent_success_rate 15%
+```
+
+向后兼容：现有 12 任务从未调用 SubAgent，分数不变；新 `subagent_*` 任务会受 SubAgent 成功率影响。
+
+### 13.3 GroundTruth 新字段
+
+```python
+class GroundTruth(BaseModel):
+    expected_hitl_calls: tuple[int, int] | None = None       # 期望 ask_user 调用次数区间
+    expected_subagent_calls: tuple[int, int] | None = None   # 期望 SubAgent 调用次数区间
+    expected_goal_features: list[str] | None = None          # 期望出现的 goal-driven 事件
+    simulated_responses: list[str] | None = None             # HITL 任务的预设用户回答
+```
+
+Runner 在 `build_result` 中校验实际值是否在区间内，否则添加 `PLAN_INCOMPLETE` failure record。
+
+### 13.4 新 benchmark 任务
+
+| ID | 难度 | 触发特性 | 预期工具 |
+|----|------|----------|---------|
+| `hitl_easy_001` | easy | HITL | get_user_location + ask_user + web_search |
+| `hitl_hard_001` | hard | HITL | ask_user + web_search |
+| `subagent_easy_001` | easy | SubAgent | subagent + web_search |
+| `subagent_hard_001` | hard | SubAgent | subagent + shell + file_ops |
+| `goal_easy_001` | easy | GoalDriven | execute_python |
+| `goal_hard_001` | hard | GoalDriven | execute_python |
+
+`tag` 字段驱动 Runner 自动设置环境变量：
+- `tags=["hitl"]`  → `HITL_ENABLED=True` + `interactive=True` + 注入 SimulatedUser
+- `tags=["subagent"]` → `SUBAGENT_ENABLED=True`
+- `tags=["goal_driven"]` → `ENABLE_GOAL_DRIVEN_PLANNER=True`
+
+执行完毕后所有 env 在 `finally` 中恢复。
+
+---
+
+## 14. Pass^k 可靠性（TauBench 风格）
+
+### 14.1 使用
+
+```bash
+# 默认 k=1，等价于原行为
+python -m evaluation.eval_cli --tasks easy_001 --modes simple
+
+# k=3：每个 (task, mode) 跑 3 次，输出 pass_at_k = successes/3
+python -m evaluation.eval_cli --tasks easy_001 --modes simple --repeat 3
+```
+
+### 14.2 输出字段
+
+`TaskEvaluationResult` 新增 3 个字段：
+- `trial_count: int` — 实际重跑次数 k
+- `trial_results: list[bool]` — 每次试验的 task_success
+- `pass_at_k: float | None` — successes / k（k=1 时为 None）
+
+`AggregatedMetrics` 新增聚合：
+- `avg_pass_at_k` — 模式下所有任务的平均 pass^k
+- `pass_at_k_std` — pass^k 标准差，反映稳定性
+
+### 14.3 推荐用法
+
+- **调试性能优化**：`--repeat 3` 验证改动是否提升了稳定性（而不只是单次幸运）
+- **CI 冒烟**：`--repeat 1`（默认）保持快速
+- **完整发布前评测**：`--repeat 5` 跑可靠性基线
+
+### 14.4 报告呈现
+
+启用 `--repeat > 1` 时报告会自动新增列：
+- 对比总表：`Avg Pass^k` + `Pass^k Std Dev`
+- 各模式详表：Per-task 行的 `Pass^k` 列显示 `successes/k (XX%)`
+
+---
+
+## 15. LLM-as-Judge 兜底（Anthropic 风格）
+
+### 15.1 触发条件
+
+仅在满足以下**全部**条件时启用：
+- `must_include_keywords` 中至少一个关键词缺失
+- GT 提供了 `success_criteria`
+- 最终答案非空
+
+### 15.2 判定流程
+
+```
+Agent answer + Task + Success criteria + Missed keywords
+  ↓
+LLM Judge (low temp, JSON-only, 500 tokens)
+  ↓
+{"passes": bool, "confidence": 0-1, "reasoning": "..."}
+  ↓
+若 passes=True 且 confidence ≥ 0.7
+  ↓
+覆盖 task_success=True; 记录 judge_overrode=True + judge_reasoning
+重算 execution_score 和 overall_score
+```
+
+### 15.3 成本
+
+- 单次 judge 调用约 500 input tokens + 100 output tokens
+- 估算开销：失败率 ~30% × 600 tokens × N tasks ≈ 评测总开销 +5%
+- 不会对成功任务额外调用
+
+### 15.4 透明性
+
+- `result.judge_overrode: bool` — judge 是否覆盖了关键词失败
+- `result.judge_reasoning: str` — judge 的一句话理由（即使未覆盖也会记录 `[declined, conf=0.X] ...`）
+- 报告中 Per-task 表条件显示 `Judge` 列（Y/-）
+
+### 15.5 关闭
+
+无显式开关。判定条件天然限制了调用频率：移除 GT 的 `success_criteria` 即可禁用 judge 兜底。
+
+---
+
+## 16. SimulatedUser（HITL 评测的关键支撑）
+
+### 16.1 为什么需要
+
+HITL 任务的 `ask_user` 工具会暂停 ReAct 循环等待用户输入。评测无法人工介入，需要脚本化回答。
+
+### 16.2 工作机制
+
+```
+ask_user_prompt 事件（携带 response_future）
+  ↓
+EvaluationRunner 的 event_callback 拦截
+  ↓
+SimulatedUser.respond(question) → 返回预设回答（FIFO 弹出）
+  ↓
+response_future.set_result(answer) — 直接 resolve Future
+  ↓
+ReAct 循环恢复，与正常运行流程完全一致
+```
+
+注意：拦截器**先 resolve future**，**再让 probe 处理事件**。这样：
+- LLM 立刻拿到答案
+- Probe 正确计算 `hitl_calls` / `hitl_total_wait_ms`
+
+### 16.3 GroundTruth 配置
+
+```python
+GroundTruth(
+    simulated_responses=["上海", "中山公园附近"],  # 按 FIFO 顺序回答
+    expected_hitl_calls=(1, 3),  # 期望 1-3 次 ask_user
+    ...
+)
+```
+
+预设回答用完后，SimulatedUser 兜底返回 `"I don't know — please proceed with your best judgment."`，让 LLM 自主推理。
+
+---
+
+## 学术参考补充
+
+| 来源 | 借鉴点 |
+|------|--------|
+| **τ-bench / TauBench** (Sierra Research, 2024) | Pass^k 可靠性度量；用户模拟器接入 HITL 评测 |
+| **GAIA** (Meta, 2023) | 分级难度（Level 1-3）的实际任务设计原则 |
+| **Anthropic *Demystifying evals for AI agents*** (2026-01) | Task→Trial→Transcript→Outcome→Grader 评测流水线；LLM-as-Judge 作为开放题兜底 |
