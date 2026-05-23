@@ -142,6 +142,24 @@ HITL_ENABLED = os.getenv("HITL_ENABLED", "false").lower() == "true"  # 是否启
 HITL_MAX_PROMPTS_PER_TASK = int(os.getenv("HITL_MAX_PROMPTS_PER_TASK", "5"))  # 单任务最大 ask_user 调用次数（防止无限提问循环）
 HITL_USER_INPUT_TIMEOUT = int(os.getenv("HITL_USER_INPUT_TIMEOUT", "120"))  # 等待用户输入超时（秒），超时后工具返回 Error 由 LLM 自主继续
 
+# --- v13.x Reasoning Model Adaptation (v14 in progress) ---
+# --- 推理模型适配（v14 新增）---
+REASONING_TOKEN_TRACKING = os.getenv("REASONING_TOKEN_TRACKING", "true").lower() == "true"  # 是否追踪 reasoning tokens（默认开启）
+
+# --- v14 Phase 2: Reasoning Engine ---
+# --- 推理引擎（v14 Phase 2 新增）---
+ENABLE_REASONING_ENGINE = os.getenv("ENABLE_REASONING_ENGINE", "false").lower() == "true"  # 启用 ReasoningEngine（默认关闭，灰度切换）
+MAX_THINKING_TOKENS = int(os.getenv("MAX_THINKING_TOKENS", "10000"))  # 推理模型 thinking token 预算上限
+
+# --- v14 Phase 3: Harness Configuration ---
+# --- Harness 配置层（v14 Phase 3 新增）---
+REACT_TEMPERATURE = float(os.getenv("REACT_TEMPERATURE", "0.5"))          # ReActEngine chat_with_tools 温度
+REASONING_TEMPERATURE = float(os.getenv("REASONING_TEMPERATURE", "0.5"))  # ReasoningEngine chat_with_tools 温度
+PLANNER_TEMPERATURE = float(os.getenv("PLANNER_TEMPERATURE", "0.3"))      # PlannerAgent 温度
+REFLECTOR_TEMPERATURE = float(os.getenv("REFLECTOR_TEMPERATURE", "0.1"))  # ReflectorAgent 温度
+CONVERGENCE_ESCALATION_MULTIPLIER = int(os.getenv("CONVERGENCE_ESCALATION_MULTIPLIER", "2"))  # 收敛提示升级倍数（threshold * N 触发 CRITICAL）
+THINKING_AWARE_CONTEXT = os.getenv("THINKING_AWARE_CONTEXT", "true").lower() == "true"  # ContextManager 是否感知 thinking_content
+
 # ======================================================================
 # Tracing Configuration (v7)
 # 全链路追踪配置（v7 新增）

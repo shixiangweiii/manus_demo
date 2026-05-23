@@ -40,7 +40,7 @@ import config
 # probes. Lazy import keeps the module load graph acyclic.
 # 延迟导入,打破 react.engine ↔ agents 包的潜在循环依赖。
 from context.manager import ContextManager
-from llm.client import LLMClient
+from llm.client import LLMClient, _extract_thinking_content, _strip_thinking_from_content
 from react.tool_call_helpers import (
     attribute_caller,
     classify_result,
@@ -201,14 +201,21 @@ class ReActEngine:
                 response_msg = await self.llm_client.chat_with_tools(
                     messages,
                     tools=self.tool_schemas,
-                    temperature=0.5,
+                    temperature=config.REACT_TEMPERATURE,
                     caller_tag=self.agent_name or "ReActEngine",
                 )
 
+                # Extract and separate thinking from response content
+                thinking = getattr(response_msg, "reasoning_content", None) or ""
+                if not thinking:
+                    thinking = _extract_thinking_content(response_msg.content or "")
+                response_text = _strip_thinking_from_content(response_msg.content or "", thinking)
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
-                    "content": response_msg.content or "",
+                    "content": response_text,
                 }
+                if thinking:
+                    assistant_msg["thinking_content"] = thinking
                 if response_msg.tool_calls:
                     assistant_msg["tool_calls"] = [
                         {
@@ -234,7 +241,31 @@ class ReActEngine:
                 )
 
             if not response_msg.tool_calls:
-                final_output = response_msg.content or "Task completed (no output)."
+                if response_text.strip():
+                    # Real answer after thinking was stripped
+                    final_output = response_text
+                elif thinking and not response_text.strip():
+                    # Reasoning-only round: model is still thinking, no final answer yet
+                    logger.info("[ReActEngine] Reasoning-only response, requesting explicit answer")
+                    messages.append({
+                        "role": "user",
+                        "content": "Please provide your final answer based on the reasoning above.",
+                    })
+                    continue
+                else:
+                    # Truly empty response (edge case)
+                    final_output = response_msg.content or "Task completed (no output)."
+                    logger.info("[ReActEngine] Completed in %d iterations", iteration)
+                    if on_iteration:
+                        on_iteration(iteration, tool_calls_log)
+                    return StepResult(
+                        step_id=step_id,
+                        success=True,
+                        output=final_output,
+                        tool_calls_log=tool_calls_log,
+                        iterations_completed=iteration,
+                    )
+
                 logger.info("[ReActEngine] Completed in %d iterations", iteration)
                 if on_iteration:
                     on_iteration(iteration, tool_calls_log)

@@ -692,6 +692,7 @@ class OrchestratorAgent:
             by_engine[record.engine].prompt_tokens += record.prompt_tokens
             by_engine[record.engine].completion_tokens += record.completion_tokens
             by_engine[record.engine].total_tokens += record.total_tokens
+            by_engine[record.engine].reasoning_tokens += record.reasoning_tokens
 
             # by_caller: empty caller_tag → "unknown" bucket so untagged calls
             # remain visible (any non-zero count there points to a missing
@@ -702,6 +703,7 @@ class OrchestratorAgent:
             by_caller[caller_key].prompt_tokens += record.prompt_tokens
             by_caller[caller_key].completion_tokens += record.completion_tokens
             by_caller[caller_key].total_tokens += record.total_tokens
+            by_caller[caller_key].reasoning_tokens += record.reasoning_tokens
         summary.by_engine = by_engine
         summary.by_caller = by_caller
 
@@ -711,6 +713,7 @@ class OrchestratorAgent:
             total.prompt_tokens += record.prompt_tokens
             total.completion_tokens += record.completion_tokens
             total.total_tokens += record.total_tokens
+            total.reasoning_tokens += record.reasoning_tokens
         summary.total = total
         return summary
 

@@ -497,7 +497,7 @@ class PlannerAgent(BaseAgent):
             prompt += f"\n\nRelevant context:\n{context}"
 
         logger.info("[Planner] Creating simple plan for: %s", task[:80])
-        result = await self.think_json(prompt, temperature=0.3)
+        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
         plan = self._parse_plan(task, result)
 
         self.system_prompt = _build_planner_prompt()
@@ -546,7 +546,7 @@ class PlannerAgent(BaseAgent):
         )
 
         logger.info("[Planner] Re-planning (v1) task: %s", task[:80])
-        result = await self.think_json(prompt, temperature=0.3)
+        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
         plan = self._parse_plan(task, result)
 
         self.system_prompt = _build_planner_prompt()
@@ -618,7 +618,7 @@ class PlannerAgent(BaseAgent):
         logger.info("[Planner] Creating DAG for: %s", task[:80])
 
         # 使用 JSON 模式调用 LLM（低温度保证输出结构稳定）
-        result = await self.think_json(prompt, temperature=0.3)
+        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
         dag = self._parse_dag(task, result, context)
 
         logger.info(
@@ -683,7 +683,7 @@ class PlannerAgent(BaseAgent):
 
         logger.info("[Planner] Replanning subtree from %s", parent_id)
         self.reset()  # 清空历史，以全新视角重规划
-        result = await self.think_json(prompt, temperature=0.3)
+        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
         new_dag = self._parse_dag(dag.state.task, result, dag.state.context)
 
         # 将新子树合并回原 DAG（保留已完成节点）
@@ -758,7 +758,7 @@ class PlannerAgent(BaseAgent):
                      dag.get_completed_action_count())
 
         try:
-            data = await self.think_json(prompt, temperature=0.3)
+            data = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
             adaptations = []
             for a in data.get("adaptations", []):
                 action_str = a.get("action", "keep").lower()

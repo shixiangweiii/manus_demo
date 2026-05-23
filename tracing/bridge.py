@@ -750,10 +750,13 @@ class TracingBridge:
                 prompt_tokens = getattr(total, "prompt_tokens", 0)
                 completion_tokens = getattr(total, "completion_tokens", 0)
                 total_tokens = getattr(total, "total_tokens", 0)
+                reasoning_tokens = getattr(total, "reasoning_tokens", 0)
 
                 self._root_span.set_attribute(AttrKey.GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens)
                 self._root_span.set_attribute(AttrKey.GEN_AI_USAGE_OUTPUT_TOKENS, completion_tokens)
                 self._root_span.set_attribute(AttrKey.GEN_AI_USAGE_TOTAL_TOKENS, total_tokens)
+                if reasoning_tokens > 0:
+                    self._root_span.set_attribute(AttrKey.GEN_AI_USAGE_REASONING_TOKENS, reasoning_tokens)
 
     # ------------------------------------------------------------------
     # Memory Events

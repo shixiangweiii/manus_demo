@@ -147,6 +147,7 @@ def _render_token_summary(summary: TokenUsageSummary) -> None:
 
     # --- Per-call records ---
     if summary.call_records:
+        has_reasoning = any(r.reasoning_tokens > 0 for r in summary.call_records)
         table = Table(
             title="Token Consumption Per-Call",
             border_style="cyan",
@@ -157,21 +158,27 @@ def _render_token_summary(summary: TokenUsageSummary) -> None:
         table.add_column("Prompt Summary", style="white", width=40)
         table.add_column("Prompt", justify="right", width=10)
         table.add_column("Completion", justify="right", width=10)
+        if has_reasoning:
+            table.add_column("Reasoning", style="yellow", justify="right", width=10)
         table.add_column("Total", style="bold green", justify="right", width=10)
 
         for i, record in enumerate(summary.call_records, 1):
-            table.add_row(
+            row = [
                 str(i),
                 record.call_type,
                 record.prompt_summary[:40],
                 str(record.prompt_tokens),
                 str(record.completion_tokens),
-                str(record.total_tokens),
-            )
+            ]
+            if has_reasoning:
+                row.append(str(record.reasoning_tokens) if record.reasoning_tokens else "-")
+            row.append(str(record.total_tokens))
+            table.add_row(*row)
         console.print(table)
 
     # --- Per-engine totals ---
     if summary.by_engine:
+        has_reasoning = any(u.reasoning_tokens > 0 for u in summary.by_engine.values())
         engine_table = Table(
             title="Token Consumption by Engine",
             border_style="green",
@@ -180,15 +187,20 @@ def _render_token_summary(summary: TokenUsageSummary) -> None:
         engine_table.add_column("Engine", style="cyan", width=20)
         engine_table.add_column("Prompt Tokens", justify="right", width=15)
         engine_table.add_column("Completion Tokens", justify="right", width=15)
+        if has_reasoning:
+            engine_table.add_column("Reasoning Tokens", style="yellow", justify="right", width=15)
         engine_table.add_column("Total Tokens", style="bold green", justify="right", width=15)
 
         for engine, usage in summary.by_engine.items():
-            engine_table.add_row(
+            row = [
                 engine,
                 str(usage.prompt_tokens),
                 str(usage.completion_tokens),
-                str(usage.total_tokens),
-            )
+            ]
+            if has_reasoning:
+                row.append(str(usage.reasoning_tokens) if usage.reasoning_tokens else "-")
+            row.append(str(usage.total_tokens))
+            engine_table.add_row(*row)
         console.print(engine_table)
 
     # --- Wave-6: Per-caller totals (SubAgent / Executor / Planner / ...) ---
@@ -198,6 +210,7 @@ def _render_token_summary(summary: TokenUsageSummary) -> None:
     if summary.by_caller and (
         len(summary.by_caller) > 1 or "unknown" not in summary.by_caller
     ):
+        has_reasoning = any(u.reasoning_tokens > 0 for u in summary.by_caller.values())
         caller_table = Table(
             title="Token Consumption by Caller (Wave-6)",
             border_style="magenta",
@@ -206,6 +219,8 @@ def _render_token_summary(summary: TokenUsageSummary) -> None:
         caller_table.add_column("Caller / Agent", style="cyan", width=24)
         caller_table.add_column("Prompt Tokens", justify="right", width=15)
         caller_table.add_column("Completion Tokens", justify="right", width=15)
+        if has_reasoning:
+            caller_table.add_column("Reasoning Tokens", style="yellow", justify="right", width=15)
         caller_table.add_column("Total Tokens", style="bold magenta", justify="right", width=15)
 
         # Sort: SubAgents to the bottom, others alphabetical for stable display
@@ -214,20 +229,28 @@ def _render_token_summary(summary: TokenUsageSummary) -> None:
             return (1 if name.startswith("SubAgent") else 0, name)
 
         for caller, usage in sorted(summary.by_caller.items(), key=_caller_sort_key):
-            caller_table.add_row(
+            row = [
                 caller,
                 str(usage.prompt_tokens),
                 str(usage.completion_tokens),
-                str(usage.total_tokens),
-            )
+            ]
+            if has_reasoning:
+                row.append(str(usage.reasoning_tokens) if usage.reasoning_tokens else "-")
+            row.append(str(usage.total_tokens))
+            caller_table.add_row(*row)
         console.print(caller_table)
 
     # --- Grand total ---
+    total_lines = [
+        f"[bold]Total Tokens: {summary.total.total_tokens}[/bold]",
+        f"  Prompt:     {summary.total.prompt_tokens}",
+        f"  Completion: {summary.total.completion_tokens}",
+    ]
+    if summary.total.reasoning_tokens > 0:
+        total_lines.append(f"  [yellow]Reasoning:  {summary.total.reasoning_tokens}[/yellow]")
+        total_lines.append("  [dim](Note: semantics vary by provider — OpenAI: included in Completion; DeepSeek: separate)[/dim]")
     console.print(Panel(
-        f"[bold]Total Tokens: {summary.total.total_tokens}[/bold]\n"
-        f"  Prompt:     {summary.total.prompt_tokens}\n"
-        f"  Completion: {summary.total.completion_tokens}\n"
-        f"  [dim]Note: Total may include reasoning tokens (prompt + completion ≤ total)[/dim]",
+        "\n".join(total_lines),
         title="[bold green]Token Consumption[/bold green]",
         border_style="green",
     ))

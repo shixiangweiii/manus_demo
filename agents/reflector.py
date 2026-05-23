@@ -25,7 +25,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import config
 from agents.base import BaseAgent
+from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from llm.client import LLMClient
 from schema import Plan, Reflection, StepResult, TaskNode
@@ -91,9 +93,10 @@ class ReflectorAgent(BaseAgent):
     """
 
     def __init__(self, llm_client: LLMClient, context_manager: ContextManager | None = None):
+        system_prompt = build_system_prompt(REFLECTOR_SYSTEM_PROMPT)
         super().__init__(
             name="Reflector",
-            system_prompt=REFLECTOR_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             llm_client=llm_client,
             context_manager=context_manager,
         )
@@ -129,7 +132,7 @@ class ReflectorAgent(BaseAgent):
         )
 
         try:
-            data = await self.think_json(prompt, temperature=0.1)
+            data = await self.think_json(prompt, temperature=config.REFLECTOR_TEMPERATURE)
             passed = data.get("passed", True)
             reason = data.get("reason", "")
             logger.info(
@@ -195,7 +198,7 @@ class ReflectorAgent(BaseAgent):
         logger.info("[Reflector] Evaluating DAG results for: %s", task[:80])
 
         try:
-            data = await self.think_json(prompt, temperature=0.2)
+            data = await self.think_json(prompt, temperature=config.REFLECTOR_TEMPERATURE)
             reflection = Reflection(
                 passed=data.get("passed", False),
                 score=float(data.get("score", 0.5)),
@@ -268,7 +271,7 @@ class ReflectorAgent(BaseAgent):
         logger.info("[Reflector] Evaluating results for: %s", task[:80])
 
         try:
-            data = await self.think_json(prompt, temperature=0.2)
+            data = await self.think_json(prompt, temperature=config.REFLECTOR_TEMPERATURE)
             reflection = Reflection(
                 passed=data.get("passed", False),
                 score=float(data.get("score", 0.5)),

@@ -72,12 +72,17 @@ class ContextManager:
           - msg.content (str)
           - msg.tool_calls[].function.name + .arguments (assistant tool-call JSON
             is billed as prompt tokens but has no `content`; previously missed)
+          - msg["thinking_content"] (v14: reasoning model thinking blocks)
           - per-message overhead (~4 tokens for role markers)
         """
         total = 0
         for msg in messages:
             content = msg.get("content", "") or ""
             total += self.estimate_tokens(content) + 4  # 每条消息约 4 个 Token 的固定开销
+            # thinking_content 由 ReasoningEngine（feature flag）和 ReActEngine（Phase 3 起）写入
+            thinking = msg.get("thinking_content", "") or ""
+            if thinking:
+                total += self.estimate_tokens(thinking) + 4
             # Assistant messages may carry tool_calls without textual content —
             # those still consume prompt tokens at the API. Account for them.
             for tc in msg.get("tool_calls", []) or []:
@@ -195,7 +200,13 @@ class ContextManager:
                 split_idx = split_idx - 1
                 continue
 
-            # Safe boundary: user, assistant without tool_calls, etc.
+            # If prev is an assistant with thinking_content, keep it with its subsequent messages
+            # so the reasoning context is not severed from the response it informs.
+            if config.THINKING_AWARE_CONTEXT and prev_role == "assistant" and prev_msg.get("thinking_content"):
+                split_idx = split_idx - 1
+                continue
+
+            # Safe boundary: user, assistant without tool_calls/thinking, etc.
             break
 
         return max(split_idx, 0)
@@ -204,13 +215,19 @@ class ContextManager:
     def _messages_to_text(messages: list[dict[str, Any]]) -> str:
         """
         Convert messages to a readable text block for summarization.
+        Includes thinking_content so reasoning is not lost during compression.
         将消息列表转换为可读文本块，供 LLM 进行摘要。
+        包含 thinking_content，避免压缩时丢失推理过程。
         """
         lines = []
         for msg in messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "") or ""
-            lines.append(f"[{role}]: {content}")
+            thinking = msg.get("thinking_content", "") or ""
+            if thinking:
+                lines.append(f"[{role} thinking]: {thinking}")
+            if content:
+                lines.append(f"[{role}]: {content}")
         return "\n".join(lines)
 
     @staticmethod

@@ -247,7 +247,7 @@ def build_convergence_hint(tool_call_counts: dict[str, int]) -> str:
 
     search_count = tool_call_counts.get("web_search", 0)
     if search_count >= threshold:
-        if search_count >= threshold * 2:
+        if search_count >= threshold * config.CONVERGENCE_ESCALATION_MULTIPLIER:
             hint_parts.append(
                 f"\n\nCRITICAL: You have called web_search {search_count} times. "
                 "Either use fetch_url to access specific pages from results, "

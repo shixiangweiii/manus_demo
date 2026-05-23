@@ -17,16 +17,56 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from openai import AsyncOpenAI, RateLimitError, APIError, APITimeoutError
 
 import config
 from schema import LLMCallRecord
+from tracing.spans import AttrKey
 
 logger = logging.getLogger(__name__)
 
 RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIError)
+
+
+def _extract_thinking_content(content: str | None) -> str:
+    """从 DeepSeek R1 风格的 <think/> 标签中提取推理内容。
+    Extract thinking content from DeepSeek R1 style <think/> tags.
+
+    DeepSeek R1 format: <think\\n...reasoning...\\n</think\\n>actual response
+    Opening tag has no closing > — the newline IS the delimiter.
+    Closing tag is </think\\n>.
+
+    Returns the thinking portion, or "" if no thinking tags found.
+    """
+    if not content or "<think" not in content:
+        return ""
+    # DeepSeek R1: <think\n...content...\n</think\n>
+    match = re.search(r"<think\n(.*?)\n</think\n>", content, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # Fallback: standard <think ...>...</think ...> with > closing
+    match = re.search(r"<think[^>]*>(.*?)</think[^>]*>", content, re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+def _strip_thinking_from_content(content: str, thinking: str) -> str:
+    """Remove the thinking portion from content, returning only the response.
+
+    For DeepSeek official API, content never contains thinking (it's in
+    reasoning_content), so content is returned as-is. For self-hosted R1
+    models where <think/> tags are in content, we strip them out.
+    """
+    if not thinking or not content:
+        return content
+    if "<think" in content:
+        stripped = re.sub(r"<think\n.*?\n</think\n>", "", content, count=1, flags=re.DOTALL)
+        if stripped == content:
+            stripped = re.sub(r"<think[^>]*>.*?</think[^>]*>", "", content, count=1, flags=re.DOTALL)
+        return stripped.strip()
+    return content
 
 
 class LLMClient:
@@ -267,7 +307,6 @@ class LLMClient:
         2. Markdown 代码块（```json ... ``` 或 ``` ... ```）
         无法解析时抛出 ValueError。
         """
-        import re
         text = text.strip()
         # Try direct parse first（先尝试直接解析）
         try:
@@ -329,12 +368,24 @@ class LLMClient:
         completion_tokens = getattr(usage, 'completion_tokens', 0) or 0
         total_tokens = getattr(usage, 'total_tokens', 0) or 0
 
+        # v14: 提取 reasoning tokens（OpenAI o 系列 / DeepSeek R1）
+        reasoning_tokens = 0
+        if config.REASONING_TOKEN_TRACKING:
+            # OpenAI: usage.completion_tokens_details.reasoning_tokens
+            details = getattr(usage, 'completion_tokens_details', None)
+            if details:
+                reasoning_tokens = getattr(details, 'reasoning_tokens', 0) or 0
+            # DeepSeek: usage.reasoning_tokens（部分版本直接暴露）
+            if not reasoning_tokens:
+                reasoning_tokens = getattr(usage, 'reasoning_tokens', 0) or 0
+
         self._call_records.append(LLMCallRecord(
             call_type=call_type,
             prompt_summary=prompt_summary,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            reasoning_tokens=reasoning_tokens,
             engine=self.model,
             caller_tag=caller_tag,
         ))
@@ -470,6 +521,8 @@ class LLMClient:
                     span.set_attribute("gen_ai.usage.output_tokens", last_record.completion_tokens)
                 if last_record.total_tokens > 0:
                     span.set_attribute("gen_ai.usage.total_tokens", last_record.total_tokens)
+                if last_record.reasoning_tokens > 0:
+                    span.set_attribute(AttrKey.GEN_AI_USAGE_REASONING_TOKENS, last_record.reasoning_tokens)
 
             # Record full response data (unconditional, no truncation, no sanitization — demo/tutorial use)
             if response_data:
@@ -482,6 +535,9 @@ class LLMClient:
                 finish_reason = response_data.get("finish_reason", "")
                 if finish_reason:
                     span.set_attribute("gen_ai.response.finish_reason", finish_reason)
+                thinking = response_data.get("thinking_content", "")
+                if thinking:
+                    span.set_attribute(AttrKey.GEN_AI_RESPONSE_THINKING_CONTENT, thinking[:config.TRACING_MAX_ATTRIBUTE_LENGTH])
 
             if success:
                 span.set_status(StatusCode.OK)
@@ -511,13 +567,17 @@ class LLMClient:
         """
         try:
             if not resp or not resp.choices:
-                return {"response_content": "", "tool_calls": None, "finish_reason": ""}
+                return {"response_content": "", "tool_calls": None, "finish_reason": "", "thinking_content": ""}
 
             choice = resp.choices[0]
             message = choice.message
 
             # Response content (text the LLM returned)
             content = getattr(message, "content", None) or ""
+
+            # v14: DeepSeek official API exposes reasoning in message.reasoning_content
+            # v14: DeepSeek 官方 API 将推理内容放在 message.reasoning_content 字段
+            reasoning_content = getattr(message, "reasoning_content", None) or ""
 
             # Finish reason (e.g., "stop", "tool_calls", "length")
             finish_reason = getattr(choice, "finish_reason", "") or ""
@@ -540,7 +600,8 @@ class LLMClient:
                 "response_content": content,
                 "tool_calls": tool_calls,
                 "finish_reason": finish_reason,
+                "thinking_content": reasoning_content if reasoning_content else _extract_thinking_content(content),
             }
         except Exception:
             logger.debug("[LLMClient] Failed to extract response data for tracing", exc_info=True)
-            return {"response_content": "", "tool_calls": None, "finish_reason": ""}
+            return {"response_content": "", "tool_calls": None, "finish_reason": "", "thinking_content": ""}

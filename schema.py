@@ -307,7 +307,8 @@ class TokenUsage(BaseModel):
     """
     prompt_tokens: int = 0        # 输入 prompt 的 token 数
     completion_tokens: int = 0    # 输出 completion 的 token 数
-    total_tokens: int = 0         # 总 token 数（prompt + completion）
+    total_tokens: int = 0         # 总 token 数（具体构成因模型而异：DeepSeek R1 含 reasoning；标准模型 = prompt + completion）
+    reasoning_tokens: int = 0     # 推理 token 数（DeepSeek R1 / OpenAI o 系列）
     engine: str = ""              # 推理引擎标识，如 "deepseek-chat"
 
 
@@ -329,6 +330,7 @@ class LLMCallRecord(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    reasoning_tokens: int = 0    # v14: 推理模型专用 token 计数（DeepSeek R1 / OpenAI o 系列）
     engine: str = ""
     caller_tag: str = ""         # Wave-6: agent that issued the call (ExecutorAgent / SubAgent-1 / ...)
 

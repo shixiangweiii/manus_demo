@@ -100,15 +100,27 @@ class ExecutorAgent(BaseAgent):
         self.tool_router = tool_router or ToolRouter(available_tools=list(self.tools.keys()))
 
         from react.engine import ReActEngine
-        self._react_engine = ReActEngine(
-            llm_client=llm_client,
-            tools=self.tools,
-            max_iterations=self.max_iterations,
-            tool_router=self.tool_router,
-            context_manager=self.context_manager,
-            agent_name="ExecutorAgent",  # Wave C #7: dynamic SubAgent parent attribution
-        )
-        logger.info("[Executor] Using unified ReActEngine")
+        if config_module.ENABLE_REASONING_ENGINE:
+            from react.reasoning_engine import ReasoningEngine
+            self._react_engine = ReasoningEngine(
+                llm_client=llm_client,
+                tools=self.tools,
+                max_iterations=self.max_iterations,
+                tool_router=self.tool_router,
+                context_manager=self.context_manager,
+                agent_name="ExecutorAgent",
+            )
+            logger.info("[Executor] Using ReasoningEngine (ENABLE_REASONING_ENGINE=true)")
+        else:
+            self._react_engine = ReActEngine(
+                llm_client=llm_client,
+                tools=self.tools,
+                max_iterations=self.max_iterations,
+                tool_router=self.tool_router,
+                context_manager=self.context_manager,
+                agent_name="ExecutorAgent",  # Wave C #7: dynamic SubAgent parent attribution
+            )
+            logger.info("[Executor] Using unified ReActEngine")
 
     def create_for_node(self, node_id: str) -> ExecutorAgent:
         """
