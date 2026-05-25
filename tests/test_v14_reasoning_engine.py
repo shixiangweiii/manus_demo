@@ -381,3 +381,238 @@ class TestP4BudgetExceededPartialWork:
         assert "Tools executed: [web_search]" in result.output
         # Pure thinking round has empty response_text
         assert "Last partial response: (empty)" in result.output
+
+
+class TestInfiniteLoopProtection:
+    """Verify ReasoningEngine exits within bounded calls when token tracking is disabled
+    or provider returns no usage data (the infinite loop bug scenario)."""
+
+    def test_max_thinking_rounds_config_default(self):
+        """MAX_THINKING_ROUNDS should exist with a reasonable default."""
+        assert hasattr(config, "MAX_THINKING_ROUNDS")
+        assert config.MAX_THINKING_ROUNDS == 5
+
+    @pytest.mark.asyncio
+    async def test_no_token_tracking_exits_within_bounds(self):
+        """When get_call_records() never grows (simulating TOKEN_TRACKING_ENABLED=false
+        or usage=None), the engine must still exit via MAX_THINKING_ROUNDS guard."""
+        engine = _make_reasoning_engine(max_iterations=100, max_thinking_tokens=999999)
+
+        # Simulate: records list never grows → total_thinking_tokens stays 0
+        static_records = []
+
+        thinking_response = SimpleNamespace(
+            content="", reasoning_content="Deep thoughts...", tool_calls=None,
+        )
+
+        call_count = 0
+
+        def mock_chat(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Do NOT append to static_records (simulates disabled tracking)
+            return thinking_response
+
+        engine.llm_client.chat_with_tools = AsyncMock(side_effect=mock_chat)
+        engine.llm_client.get_call_records = MagicMock(return_value=static_records)
+
+        result = await engine.execute("test task")
+
+        # Must exit (not hang), and within MAX_THINKING_ROUNDS + 1 (initial call)
+        assert result.success is False
+        assert "Max consecutive thinking rounds exceeded" in result.output
+        assert call_count <= config.MAX_THINKING_ROUNDS + 1
+
+    @pytest.mark.asyncio
+    async def test_thinking_rounds_counter_increments(self):
+        """thinking_rounds should increment correctly and trigger exit even
+        when token tracking is working but budget is far from exceeded."""
+        engine = _make_reasoning_engine(max_iterations=100, max_thinking_tokens=999999)
+
+        thinking_response = SimpleNamespace(
+            content="", reasoning_content="Thinking...", tool_calls=None,
+        )
+        # Records grow (normal tracking) but budget is huge so won't trigger
+        _setup_shared_records(engine, [thinking_response] * 20, reasoning_tokens_per_call=10)
+
+        result = await engine.execute("test task")
+
+        # Should exit via MAX_THINKING_ROUNDS, not budget
+        assert result.success is False
+        assert "Max consecutive thinking rounds exceeded" in result.output
+
+    @pytest.mark.asyncio
+    async def test_thinking_rounds_resets_after_tool_call(self):
+        """After a tool call interrupts thinking-only streak, thinking_rounds
+        must reset to 0 (consecutive, not cumulative).
+        3 thinking + tool_call + 4 thinking where MAX=5: must succeed (4 <= 5).
+        Old cumulative impl would fail (3+4=7 > 5)."""
+        engine = _make_reasoning_engine(max_iterations=100, max_thinking_tokens=999999)
+
+        tool_call = SimpleNamespace(
+            id="tc1",
+            function=SimpleNamespace(name="web_search", arguments='{"query": "test"}'),
+        )
+        responses = [
+            # 3 thinking-only rounds (consecutive count: 3, within MAX=5)
+            SimpleNamespace(content="", reasoning_content="Think 1", tool_calls=None),
+            SimpleNamespace(content="", reasoning_content="Think 2", tool_calls=None),
+            SimpleNamespace(content="", reasoning_content="Think 3", tool_calls=None),
+            # Tool call resets counter (iteration 1)
+            SimpleNamespace(content="", reasoning_content="", tool_calls=[tool_call]),
+            # 4 more thinking rounds (consecutive count: 4, still within MAX=5)
+            SimpleNamespace(content="", reasoning_content="Think 4", tool_calls=None),
+            SimpleNamespace(content="", reasoning_content="Think 5", tool_calls=None),
+            SimpleNamespace(content="", reasoning_content="Think 6", tool_calls=None),
+            SimpleNamespace(content="", reasoning_content="Think 7", tool_calls=None),
+            # Final answer
+            SimpleNamespace(content="Done!", reasoning_content=None, tool_calls=None),
+        ]
+        shared_records = []
+
+        def mock_chat(*args, **kwargs):
+            shared_records.append(LLMCallRecord(
+                reasoning_tokens=10, prompt_tokens=50, completion_tokens=200, total_tokens=260,
+            ))
+            return responses.pop(0)
+
+        engine.llm_client.chat_with_tools = AsyncMock(side_effect=mock_chat)
+        engine.llm_client.get_call_records = MagicMock(return_value=shared_records)
+
+        mock_tool = MagicMock()
+        mock_tool.name = "web_search"
+        mock_tool.traced_execute = AsyncMock(return_value="Search results")
+        engine.tools = {"web_search": mock_tool}
+        mock_tool.to_openai_tool = MagicMock(return_value={"type": "function", "function": {"name": "web_search"}})
+        engine.tool_schemas = [mock_tool.to_openai_tool()]
+
+        result = await engine.execute("test task")
+
+        assert result.success is True
+        assert result.iterations_completed == 2  # tool_call + final_answer
+
+    @pytest.mark.asyncio
+    async def test_six_consecutive_thinking_rounds_fails(self):
+        """6 consecutive pure-thinking rounds with MAX=5 must fail."""
+        with patch.object(config, "MAX_THINKING_ROUNDS", 5):
+            engine = _make_reasoning_engine(max_iterations=100, max_thinking_tokens=999999)
+
+            responses = [
+                SimpleNamespace(content="", reasoning_content="Think 1", tool_calls=None),
+                SimpleNamespace(content="", reasoning_content="Think 2", tool_calls=None),
+                SimpleNamespace(content="", reasoning_content="Think 3", tool_calls=None),
+                SimpleNamespace(content="", reasoning_content="Think 4", tool_calls=None),
+                SimpleNamespace(content="", reasoning_content="Think 5", tool_calls=None),
+                SimpleNamespace(content="", reasoning_content="Think 6", tool_calls=None),
+            ]
+            shared_records = []
+
+            def mock_chat(*args, **kwargs):
+                shared_records.append(LLMCallRecord(
+                    reasoning_tokens=10, prompt_tokens=50, completion_tokens=200, total_tokens=260,
+                ))
+                return responses.pop(0)
+
+            engine.llm_client.chat_with_tools = AsyncMock(side_effect=mock_chat)
+            engine.llm_client.get_call_records = MagicMock(return_value=shared_records)
+
+            result = await engine.execute("test task")
+            assert result.success is False
+            assert "thinking rounds" in result.output.lower()
+
+
+class TestBudgetGuardAllBranches:
+    """Budget check should cover tool-call and final-answer branches, not just pure-thinking."""
+
+    @pytest.mark.asyncio
+    async def test_budget_exceeded_on_tool_call_branch(self):
+        """When budget is exceeded and the model returns tool_calls, tools should NOT execute."""
+        engine = _make_reasoning_engine(max_iterations=10, max_thinking_tokens=200)
+
+        tool_call = SimpleNamespace(
+            id="tc1",
+            function=SimpleNamespace(name="web_search", arguments='{"query": "test"}'),
+        )
+        responses = [
+            # Thinking-only to burn budget: 150 + 150 = 300 > 200
+            SimpleNamespace(content="", reasoning_content="Thinking...", tool_calls=None),
+            # Now budget exceeded, but model returns tool_calls
+            SimpleNamespace(content="", reasoning_content="More thinking", tool_calls=[tool_call]),
+        ]
+
+        shared_records = []
+
+        def mock_chat(*args, **kwargs):
+            shared_records.append(LLMCallRecord(
+                reasoning_tokens=150, prompt_tokens=50, completion_tokens=200, total_tokens=400,
+            ))
+            return responses.pop(0)
+
+        engine.llm_client.chat_with_tools = AsyncMock(side_effect=mock_chat)
+        engine.llm_client.get_call_records = MagicMock(return_value=shared_records)
+
+        mock_tool = MagicMock()
+        mock_tool.name = "web_search"
+        mock_tool.traced_execute = AsyncMock(return_value="Search results")
+        engine.tools = {"web_search": mock_tool}
+        mock_tool.to_openai_tool = MagicMock(return_value={"type": "function", "function": {"name": "web_search"}})
+        engine.tool_schemas = [mock_tool.to_openai_tool()]
+
+        result = await engine.execute("test task")
+
+        assert result.success is False
+        assert "Thinking budget exceeded" in result.output
+        # Tool should NOT have been executed (budget guard blocked it)
+        mock_tool.traced_execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_budget_exceeded_on_final_answer_allows_return(self):
+        """When budget is exceeded but model returns a final answer, allow it to succeed."""
+        engine = _make_reasoning_engine(max_iterations=10, max_thinking_tokens=200)
+
+        responses = [
+            # Thinking-only to burn budget: 150 + 150 = 300 > 200
+            SimpleNamespace(content="", reasoning_content="Thinking...", tool_calls=None),
+            # Budget exceeded, but model gives final answer
+            SimpleNamespace(content="Here is the answer", reasoning_content="Final reasoning", tool_calls=None),
+        ]
+
+        shared_records = []
+
+        def mock_chat(*args, **kwargs):
+            shared_records.append(LLMCallRecord(
+                reasoning_tokens=150, prompt_tokens=50, completion_tokens=200, total_tokens=400,
+            ))
+            return responses.pop(0)
+
+        engine.llm_client.chat_with_tools = AsyncMock(side_effect=mock_chat)
+        engine.llm_client.get_call_records = MagicMock(return_value=shared_records)
+
+        result = await engine.execute("test task")
+
+        # Final answer should still succeed even with budget exceeded
+        assert result.success is True
+        assert result.output == "Here is the answer"
+
+
+class TestReasoningEngineEffortTemperature:
+    """Fix 5: ReasoningEngine._apply_effort(MEDIUM) must use REASONING_TEMPERATURE."""
+
+    def _make_engine(self):
+        return _make_reasoning_engine(max_iterations=10, max_thinking_tokens=9999)
+
+    def test_medium_uses_reasoning_temperature(self):
+        engine = self._make_engine()
+        with patch.object(config, "REACT_TEMPERATURE", 0.7), \
+             patch.object(config, "REASONING_TEMPERATURE", 0.3):
+            temp, _ = engine._apply_effort("medium")
+        assert temp == 0.3
+
+    def test_low_high_match_parent(self):
+        engine = self._make_engine()
+        temp_low, iter_low = engine._apply_effort("low")
+        temp_high, iter_high = engine._apply_effort("high")
+        assert temp_low == 0.3
+        assert iter_low == 5  # max(3, 10//2)
+        assert temp_high == 0.7
+        assert iter_high == 10

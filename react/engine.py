@@ -41,12 +41,8 @@ import config
 # 延迟导入,打破 react.engine ↔ agents 包的潜在循环依赖。
 from context.manager import ContextManager
 from llm.client import LLMClient, _extract_thinking_content, _strip_thinking_from_content
-from react.tool_call_helpers import (
-    attribute_caller,
-    classify_result,
-    truncate_for_llm,
-)
-from schema import StepResult, ToolCallRecord
+from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
+from schema import ReasoningEffort, StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -113,6 +109,17 @@ class ReActEngine:
         # on_iteration 只在迭代末触发,中途取消会丢最后一轮——成员属性兜底。
         self._current_log: list[ToolCallRecord] = []
 
+    def _apply_effort(
+        self, effort: ReasoningEffort,
+    ) -> tuple[float, int]:
+        """Return (temperature, max_iterations) for effort level."""
+        if effort == ReasoningEffort.LOW:
+            return 0.3, max(3, self.max_iterations // 2)
+        elif effort == ReasoningEffort.HIGH:
+            return 0.7, self.max_iterations
+        else:  # MEDIUM
+            return config.REACT_TEMPERATURE, self.max_iterations
+
     async def execute(
         self,
         prompt: str,
@@ -120,6 +127,7 @@ class ReActEngine:
         node_id: str | None = None,
         system_hint: str = "",
         on_iteration: Callable[[int, list[ToolCallRecord]], None] | None = None,
+        effort: ReasoningEffort | None = None,
     ) -> StepResult:
         """
         Execute a single task using the ReAct loop.
@@ -131,11 +139,15 @@ class ReActEngine:
             system_hint: Additional system-level hint for the LLM
             on_iteration: Optional callback invoked after each iteration with
                 (iteration_number, current_tool_calls_log). Can raise to abort.
+            effort: Reasoning effort level affecting temperature/iterations/truncation.
 
         Returns:
             StepResult: Contains success status, output text, and tool call log
         """
         step_id = node_id or "default"
+        effective_effort = effort or ReasoningEffort.MEDIUM
+        effective_temp, effective_max_iter = self._apply_effort(effective_effort)
+        effective_policy = ToolExecutionPolicy.for_effort(effective_effort)
         # Note: callers can access self.tool_router.reset_node() to clear
         # per-node failure counts between independent executions.
 
@@ -158,15 +170,16 @@ class ReActEngine:
         tool_calls_log: list[ToolCallRecord] = []
         self._current_log = tool_calls_log
         iteration = 0
+        needs_explicit_answer = False
         messages: list[dict[str, Any]] = []
         if system_hint:
             messages.append({"role": "system", "content": system_hint})
 
         logger.info("[ReActEngine] Starting execution for %s: %s", step_id, prompt[:100])
 
-        while iteration < self.max_iterations:
+        while iteration < effective_max_iter:
             iteration += 1
-            logger.debug("[ReActEngine] Iteration %d/%d", iteration, self.max_iterations)
+            logger.debug("[ReActEngine] Iteration %d/%d", iteration, effective_max_iter)
 
             try:
                 continue_msg = "Continue executing based on the tool results above."
@@ -188,6 +201,9 @@ class ReActEngine:
 
                 if iteration == 1:
                     user_input = prompt
+                elif needs_explicit_answer:
+                    user_input = "Please provide your final answer based on the reasoning above."
+                    needs_explicit_answer = False
                 else:
                     user_input = continue_msg
 
@@ -195,13 +211,13 @@ class ReActEngine:
 
                 if self.context_manager is not None:
                     messages = await self.context_manager.compress_if_needed(
-                        messages, self.llm_client
+                        messages, self.llm_client, caller_tag=self.agent_name or "ReActEngine"
                     )
 
                 response_msg = await self.llm_client.chat_with_tools(
                     messages,
                     tools=self.tool_schemas,
-                    temperature=config.REACT_TEMPERATURE,
+                    temperature=effective_temp,
                     caller_tag=self.agent_name or "ReActEngine",
                 )
 
@@ -247,10 +263,7 @@ class ReActEngine:
                 elif thinking and not response_text.strip():
                     # Reasoning-only round: model is still thinking, no final answer yet
                     logger.info("[ReActEngine] Reasoning-only response, requesting explicit answer")
-                    messages.append({
-                        "role": "user",
-                        "content": "Please provide your final answer based on the reasoning above.",
-                    })
+                    needs_explicit_answer = True
                     continue
                 else:
                     # Truly empty response (edge case)
@@ -278,90 +291,29 @@ class ReActEngine:
                 )
 
             # Execute tool calls. Independent calls run concurrently via
-            # asyncio.gather; results are then processed in original order to
-            # preserve assistant.tool_calls ↔ tool messages alignment required
-            # by the OpenAI protocol.
-            # Wave-1: classify_result / attribute_caller / truncate_for_llm
-            # extracted into react.tool_call_helpers so GoalDrivenPlanner and
-            # EmergentPlanner legacy paths share the exact same behavior.
-            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool, bool]:
-                fn_name = tc.function.name
-                try:
-                    fn_args = json.loads(tc.function.arguments)
-                except (json.JSONDecodeError, TypeError):
-                    fn_args = {}
-                logger.info("[ReActEngine] Tool call: %s(%s)", fn_name, fn_args)
-                t = self.tools.get(fn_name)
-                if t is None:
-                    res = f"Error: Unknown tool '{fn_name}'"
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                # set_caller -> traced_execute 之间无 await,asyncio 单线程下原子。
-                attribute_caller(t, self.agent_name)
-                try:
-                    res = await t.traced_execute(**fn_args)
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                except Exception as exc:
-                    res = f"Error: Tool execution error: {exc}"
-                    is_err, rl = classify_result(None, exc)
-                    return tc, fn_name, fn_args, res, is_err, rl
-
-            executions = await asyncio.gather(
-                *(_exec_one(tc) for tc in response_msg.tool_calls)
+            # Batch 4.1 DRY: shared execute_tool_calls replaces inline _exec_one
+            # + gather + result processing loop. Same behavior, single source.
+            tool_messages = await execute_tool_calls(
+                response_msg.tool_calls,
+                self.tools,
+                self.tool_router,
+                node_id=str(step_id),
+                agent_name=self.agent_name,
+                truncation_limit=effective_policy.truncation_limit,
+                tool_calls_log=tool_calls_log,
+                log_prefix="ReActEngine",
+                policy=effective_policy,
             )
-
-            tool_messages: list[dict[str, Any]] = []
-            truncation_limit = config.TOOL_RESULT_TRUNCATION_LIMIT
-
-            for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
-                # Three-state ToolRouter accounting (rate_limited > error > success).
-                # 业务限流（如 SubAgent 调用上限）单独入桶，不污染 failure 阈值。
-                if is_rate_limited:
-                    self.tool_router.record_rate_limited(str(step_id), func_name)
-                elif is_error:
-                    self.tool_router.record_failure(str(step_id), func_name)
-                else:
-                    self.tool_router.record_success(str(step_id), func_name)
-
-                # Apply truncation BOTH to record (UI/stats) AND to LLM context
-                # via the shared helper — single source of truth.
-                record_result, llm_result = truncate_for_llm(
-                    result, truncation_limit, is_error,
-                )
-
-                tool_calls_log.append(ToolCallRecord(
-                    tool_name=func_name,
-                    parameters=func_args,
-                    result=record_result,
-                ))
-
-                if is_error:
-                    result_with_marker = (
-                        f"[TOOL ERROR] {llm_result}\n\n"
-                        "IMPORTANT: The tool returned an error. Please analyze "
-                        "the error and decide whether to retry with different "
-                        "parameters or report the failure."
-                    )
-                else:
-                    result_with_marker = llm_result
-
-                tool_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_with_marker,
-                })
-
             messages.extend(tool_messages)
 
             if on_iteration:
                 on_iteration(iteration, tool_calls_log)
 
-        logger.warning("[ReActEngine] Hit max iterations (%d)", self.max_iterations)
+        logger.warning("[ReActEngine] Hit max iterations (%d)", effective_max_iter)
         return StepResult(
             step_id=step_id,
             success=False,
-            output=f"Task did not complete within {self.max_iterations} iterations.",
+            output=f"Task did not complete within {effective_max_iter} iterations.",
             tool_calls_log=tool_calls_log,
             iterations_completed=iteration,
         )

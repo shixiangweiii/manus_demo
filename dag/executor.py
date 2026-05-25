@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import config
 from dag.graph import TaskDAG
 from dag.state_machine import NodeStateMachine
-from schema import EdgeType, NodeStatus, NodeType, StepResult, TaskNode
+from schema import EdgeType, NodeStatus, NodeType, ReasoningEffort, StepResult, TaskNode
 
 if TYPE_CHECKING:
     from agents.executor import ExecutorAgent
@@ -91,12 +91,16 @@ class DAGExecutor:
         planner_agent: PlannerAgent | None = None,
         max_parallel: int | None = None,
         on_event: Callable[[str, Any], None] | None = None,
+        effort: ReasoningEffort | None = None,
+        on_checkpoint: Callable[[], None] | None = None,
     ):
         self._executor_agent = executor_agent   # ReAct 执行智能体，负责实际运行 ACTION 节点
         self._reflector = reflector_agent        # 反思智能体，负责验证 exit criteria
         self._planner = planner_agent            # v3: Planner 智能体，用于超步间自适应规划
         self._max_parallel = max_parallel or config.MAX_PARALLEL_NODES  # 每轮最大并行节点数
         self._emit = on_event or (lambda *_: None)  # 事件回调（用于 UI 实时更新）
+        self._effort = effort                    # reasoning_effort 透传到 execute_node
+        self._on_checkpoint = on_checkpoint      # v14.5: callback after each super-step checkpoint
         self._sm = NodeStateMachine(on_transition=self._on_node_transition)  # 节点状态机
         self._adaptive_enabled = config.ADAPTIVE_PLANNING_ENABLED and planner_agent is not None  # v3
         self._processed_conditions: set[tuple[str, str]] = set()  # 已评估条件边缓存 (source_id, target_id)
@@ -259,6 +263,10 @@ class DAGExecutor:
             # --- 保存检查点（灵感来自 LangGraph）---
             dag.save_checkpoint()
 
+            # v14.5: Notify orchestrator to persist checkpoint to disk
+            if self._on_checkpoint:
+                self._on_checkpoint()
+
             logger.info("[DAGExecutor] Super-step %d done. %s", step, dag.summary())
 
         if step >= max_steps:
@@ -304,7 +312,7 @@ class DAGExecutor:
         else:
             executor = self._executor_agent.create_for_node(node.id)
 
-        return await executor.execute_node(node, context)
+        return await executor.execute_node(node, context, effort=self._effort)
 
     async def _run_node_with_timeout(self, node: TaskNode, dag: TaskDAG) -> StepResult:
         """

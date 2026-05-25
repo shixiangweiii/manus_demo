@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from typing import Any, Callable
 
 import config
@@ -52,8 +54,17 @@ from knowledge.retriever import KnowledgeRetriever
 from llm.client import LLMClient
 from memory.long_term import LongTermMemory
 from memory.short_term import ShortTermMemory
-from schema import MemoryEntry, NodeStatus, NodeType, Plan, Reflection, StepResult, StepStatus, TokenUsage, TokenUsageSummary, TodoStatus
+from schema import MemoryEntry, NodeStatus, NodeType, Plan, ReasoningEffort, Reflection, StepResult, StepStatus, TaskRunState, TodoList, TokenUsage, TokenUsageSummary, TodoStatus
 from tools.base import BaseTool
+
+from checkpoint.models import (
+    DAGPathState,
+    EmergentPathState,
+    GoalDrivenPathState,
+    SimplePathState,
+    TaskCheckpoint,
+)
+from checkpoint.store import TaskStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +109,7 @@ class OrchestratorAgent:
         tools: list[BaseTool] | None = None,
         on_event: Callable[[str, Any], None] | None = None,
         interactive: bool = True,
+        task_state_store: TaskStateStore | None = None,
     ):
         # interactive: whether the host environment can collect user input
         # synchronously. main.run_interactive passes True, run_single passes False.
@@ -200,6 +212,15 @@ class OrchestratorAgent:
 
         self.max_replan = config.MAX_REPLAN_ATTEMPTS  # 最大重规划次数
 
+        # v14.5 Task Resume state / 任务恢复状态
+        self._current_task_id: str | None = None
+        self._active_complexity: str | None = None
+        self._checkpoint_task: str = ""
+        self._checkpoint_context: str = ""
+        self._checkpoint_effort: ReasoningEffort | None = None
+        self._checkpoint_created_at: float = 0.0
+        self._task_state_store = task_state_store or TaskStateStore()
+
     # ------------------------------------------------------------------
     # Main entry point
     # 主入口
@@ -220,7 +241,12 @@ class OrchestratorAgent:
              - emergent: v5 emergent planning via TODO list
           4. Store in memory / 存入长期记忆
         """
-        self._emit("task_start", {"task": task})
+        # v14.5: Assign task_id for checkpoint tracking
+        task_id = str(uuid.uuid4())[:8]
+        self._current_task_id = task_id
+        self._checkpoint_task = task
+        self._checkpoint_created_at = time.time()
+        self._emit("task_start", {"task": task, "task_id": task_id})
 
         # Token 追踪：重置记录，开始新任务
         self.llm_client.reset_usage()
@@ -236,48 +262,58 @@ class OrchestratorAgent:
         if not config.EMERGENT_PLANNING_ENABLED:
             logger.info("[Orchestrator] Emergent planning mode is disabled via config")
 
-        # --- Phase 1: Gather context ---
-        # --- 阶段 1：收集上下文 ---
-        self._emit("phase", "Gathering context...")
-        combined_context = await self._gather_context(task)
+        try:
+            # --- Phase 1: Gather context ---
+            # --- 阶段 1：收集上下文 ---
+            self._emit("phase", "Gathering context...")
+            combined_context = await self._gather_context(task)
 
-        # --- Phase 2: Classify & Route ---
-        # --- 阶段 2：分类 & 路由 ---
-        self._emit("phase", "Classifying task complexity...")
-        complexity = await self.planner.classify_task(task)
-        self._emit("task_complexity", {"complexity": complexity, "task": task[:100]})
+            # --- Phase 2: Classify & Route ---
+            # --- 阶段 2：分类 & 路由 ---
+            self._emit("phase", "Classifying task complexity...")
+            complexity, effort = await self.planner.classify_task(task)
+            self._emit("task_complexity", {"complexity": complexity, "effort": effort.value, "task": task[:100]})
 
-        # --- Phase 3: Plan & Execute (routed by complexity) ---
-        # --- 阶段 3：规划 & 执行（按复杂度路由）---
-        if complexity == "simple":
-            self._emit("phase", "Planning (v1 simple flat plan)...")
-            plan = await self.planner.create_plan(task, combined_context)
-            self._emit("plan", plan)
-            final_answer = await self._execute_and_reflect_simple(task, plan, combined_context)
-        elif complexity == "complex":
-            self._emit("phase", "Planning (v2 hierarchical DAG)...")
-            dag = await self.planner.create_dag(task, combined_context)
-            self._emit("dag_created", dag)
-            final_answer = await self._execute_dag_and_reflect(dag)
-        elif complexity == "emergent":
-            self._emit("phase", "Planning (v5 emergent via TODO list)...")
-            final_answer = await self._execute_emergent(task, combined_context)
-        else:
-            logger.error("[Orchestrator] Unknown complexity '%s', degrading to complex", complexity)
-            self._emit("phase", f"Planning (v2 hierarchical DAG) - degraded from '{complexity}'...")
-            dag = await self.planner.create_dag(task, combined_context)
-            self._emit("dag_created", dag)
-            final_answer = await self._execute_dag_and_reflect(dag)
+            # v14.5: Store routing context for checkpoint building
+            self._active_complexity = complexity
+            self._checkpoint_context = combined_context
+            self._checkpoint_effort = effort
 
-        # --- Phase 4: Store in memory ---
-        # --- 阶段 4：存入长期记忆 ---
-        # Token 追踪：输出汇总
-        summary = self._finalize_token_usage()
-        self._emit("token_usage_summary", summary)
-        self._store_memory(task, final_answer)
-        self.short_term.add({"role": "assistant", "content": final_answer})
-        self._emit("task_complete", {"answer": final_answer})
-        return final_answer
+            # --- Phase 3: Plan & Execute (routed by complexity) ---
+            # --- 阶段 3：规划 & 执行（按复杂度路由）---
+            if complexity == "simple":
+                self._emit("phase", "Planning (v1 simple flat plan)...")
+                plan = await self.planner.create_plan(task, combined_context)
+                self._emit("plan", plan)
+                final_answer = await self._execute_and_reflect_simple(task, plan, combined_context, effort)
+            elif complexity == "complex":
+                self._emit("phase", "Planning (v2 hierarchical DAG)...")
+                dag = await self.planner.create_dag(task, combined_context)
+                self._emit("dag_created", dag)
+                final_answer = await self._execute_dag_and_reflect(dag, effort)
+            elif complexity == "emergent":
+                self._emit("phase", "Planning (v5 emergent via TODO list)...")
+                final_answer = await self._execute_emergent(task, combined_context, effort)
+            else:
+                logger.error("[Orchestrator] Unknown complexity '%s', degrading to complex", complexity)
+                self._emit("phase", f"Planning (v2 hierarchical DAG) - degraded from '{complexity}'...")
+                dag = await self.planner.create_dag(task, combined_context)
+                self._emit("dag_created", dag)
+                final_answer = await self._execute_dag_and_reflect(dag, effort)
+
+            # --- Phase 4: Store in memory ---
+            # --- 阶段 4：存入长期记忆 ---
+            # Token 追踪：输出汇总
+            summary = self._finalize_token_usage()
+            self._emit("token_usage_summary", summary)
+            self._store_memory(task, final_answer)
+            self.short_term.add({"role": "assistant", "content": final_answer})
+            self._mark_task_completed()
+            self._emit("task_complete", {"answer": final_answer})
+            return final_answer
+        except Exception:
+            self._mark_task_failed()
+            raise
 
     # ------------------------------------------------------------------
     # Context gathering
@@ -317,6 +353,11 @@ class OrchestratorAgent:
         task: str,
         plan: Plan,
         context: str,
+        effort: ReasoningEffort | None = None,
+        *,
+        _resume_attempt: int = 0,
+        _resume_results: list[StepResult] | None = None,
+        _resume_reflection: Reflection | None = None,
     ) -> str:
         """
         Execute a flat plan sequentially and reflect, with re-planning support.
@@ -327,9 +368,11 @@ class OrchestratorAgent:
         这是 v1 轻量级路径：遍历 plan.steps，
         逐步通过 ReAct 循环执行，然后调用 reflector.reflect()。
         """
-        all_results: list[StepResult] = []
+        all_results: list[StepResult] = _resume_results or []
+        if _resume_reflection and _resume_reflection.passed:
+            return await self._compile_answer(task, all_results)
 
-        for attempt in range(self.max_replan + 1):
+        for attempt in range(_resume_attempt, self.max_replan + 1):
             self._emit("phase", f"Executing simple plan (attempt {attempt + 1})...")
             step_context = context
 
@@ -362,7 +405,7 @@ class OrchestratorAgent:
                     )
                     step_context = f"{context}\n\nPrevious results:\n{prev_summary}"
 
-                result = await self.executor_agent.execute_step(step, step_context)
+                result = await self.executor_agent.execute_step(step, step_context, effort=effort)
                 all_results.append(result)
 
                 if result.success:
@@ -373,20 +416,48 @@ class OrchestratorAgent:
                     step.status = StepStatus.FAILED
                     self._emit("step_failed", {"step": step, "result": result})
 
-                    # 条件性 early-break：若无剩余独立步骤，直接进入反思
-                    failed_ids = {s.id for s in plan.steps if s.status in (StepStatus.FAILED, StepStatus.SKIPPED)}
-                    remaining = [s for s in plan.steps if s.status == StepStatus.PENDING]
-                    independent_remaining = [
-                        s for s in remaining
-                        if not any(d in failed_ids for d in s.dependencies)
-                    ]
-                    if not independent_remaining:
-                        logger.info("[Orchestrator] No independent steps remaining after failure, breaking early")
-                        break
+                # v14.5: Checkpoint after each step completion
+                self._save_path_checkpoint(
+                    resume_metadata={
+                        "boundary": "after_step",
+                        "current_step_id": str(step.id),
+                        "committed_ids": [str(r.step_id) for r in all_results if r.success],
+                    },
+                    simple_state=SimplePathState(
+                        plan=plan.model_dump(),
+                        all_results=[r.model_dump() for r in all_results],
+                        attempt=attempt,
+                        current_step_index=i + 1,
+                    ),
+                )
+
+                # 条件性 early-break：若无剩余独立步骤，直接进入反思
+                failed_ids = {s.id for s in plan.steps if s.status in (StepStatus.FAILED, StepStatus.SKIPPED)}
+                remaining = [s for s in plan.steps if s.status == StepStatus.PENDING]
+                independent_remaining = [
+                    s for s in remaining
+                    if not any(d in failed_ids for d in s.dependencies)
+                ]
+                if not independent_remaining:
+                    logger.info("[Orchestrator] No independent steps remaining after failure, breaking early")
+                    break
 
             self._emit("phase", "Reflecting on results...")
             reflection = await self.reflector.reflect(task, plan, all_results)
             self._emit("reflection", reflection)
+            self._save_path_checkpoint(
+                resume_metadata={
+                    "boundary": "after_reflection",
+                    "committed_ids": [str(r.step_id) for r in all_results if r.success],
+                },
+                simple_state=SimplePathState(
+                    plan=plan.model_dump(),
+                    all_results=[r.model_dump() for r in all_results],
+                    attempt=attempt,
+                    reflection=reflection.model_dump(),
+                    current_step_index=plan.current_step_index,
+                ),
+            )
 
             if reflection.passed:
                 return await self._compile_answer(task, all_results)
@@ -508,7 +579,7 @@ class OrchestratorAgent:
     # 隐式规划执行（v5 路径）
     # ------------------------------------------------------------------
 
-    async def _execute_emergent(self, task: str, context: str) -> str:
+    async def _execute_emergent(self, task: str, context: str, effort: ReasoningEffort | None = None) -> str:
         """
         Execute task using emergent planning (Claude Code style).
         使用隐式规划执行任务（Claude Code 风格）。
@@ -522,7 +593,13 @@ class OrchestratorAgent:
         # v8 Goal-Driven path
         if self.goal_driven_planner:
             self._emit("phase", "Executing with goal-driven planning (v8)...")
-            final_answer = await self.goal_driven_planner.execute(task, context)
+            self._active_complexity = "goal_driven"
+            final_answer = await self.goal_driven_planner.execute(
+                task,
+                context,
+                effort=effort,
+                on_checkpoint=self._checkpoint_goal_driven_progress,
+            )
 
             # Quality gate: check for blocked TODOs
             blocked_todos = []
@@ -548,7 +625,12 @@ class OrchestratorAgent:
 
         # v5 Emergent Planning path (default)
         self._emit("phase", "Executing with emergent planning (TODO list)...")
-        final_answer = await self.emergent_planner.execute(task, context)
+        final_answer = await self.emergent_planner.execute(
+            task,
+            context,
+            effort=effort,
+            on_checkpoint=self._checkpoint_emergent_progress,
+        )
 
         # 轻量级质量门控：检查是否有 BLOCKED TODO
         blocked_todos = []
@@ -577,7 +659,7 @@ class OrchestratorAgent:
     # DAG 执行 - 反思循环（v2 路径）
     # ------------------------------------------------------------------
 
-    async def _execute_dag_and_reflect(self, dag: TaskDAG) -> str:
+    async def _execute_dag_and_reflect(self, dag: TaskDAG, effort: ReasoningEffort | None = None) -> str:
         """
         Execute the DAG and reflect on results, with partial re-planning.
         执行 DAG 并反思结果，支持局部重规划。
@@ -591,6 +673,8 @@ class OrchestratorAgent:
             reflector_agent=self.reflector,
             planner_agent=self.planner,  # v3: 传入 Planner 以支持超步间自适应规划
             on_event=self._emit,  # 将 DAG 执行事件转发给 UI
+            effort=effort,
+            on_checkpoint=lambda: self._save_dag_checkpoint(dag),
         )
 
         for attempt in range(self.max_replan + 1):
@@ -763,6 +847,330 @@ class OrchestratorAgent:
             logger.debug("[Orchestrator] UI callback error for event '%s'", event, exc_info=True)
 
     # ------------------------------------------------------------------
+    # v14.5 Task Resume: Checkpoint & Resume
+    # 任务恢复：Checkpoint 保存与恢复
+    # ------------------------------------------------------------------
+
+    def _save_checkpoint(
+        self,
+        state: TaskRunState = TaskRunState.RUNNING,
+        *,
+        resume_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Save current execution state to disk. Called at each execution boundary.
+        在每个执行边界保存当前执行状态到磁盘。"""
+        if not config.TASK_RESUME_ENABLED or not self._current_task_id:
+            return
+        try:
+            checkpoint = self._build_checkpoint(state, resume_metadata=resume_metadata)
+            self._task_state_store.save(checkpoint)
+            self._emit("checkpoint_saved", {
+                "task_id": self._current_task_id,
+                "state": state.value,
+            })
+        except Exception:
+            logger.debug("[Orchestrator] Checkpoint save failed", exc_info=True)
+
+    def _build_checkpoint(
+        self,
+        state: TaskRunState,
+        *,
+        resume_metadata: dict[str, Any] | None = None,
+    ) -> TaskCheckpoint:
+        """Build a TaskCheckpoint from current execution state.
+        从当前执行状态构建 TaskCheckpoint。"""
+        task_id = self._current_task_id or "unknown"
+        now = time.time()
+        return TaskCheckpoint(
+            task_id=task_id,
+            task=self._checkpoint_task,
+            context=self._checkpoint_context,
+            complexity=self._active_complexity or "simple",
+            effort=self._checkpoint_effort.value if self._checkpoint_effort else "medium",
+            state=state,
+            created_at=self._checkpoint_created_at or now,
+            updated_at=now,
+            hitl_prompt_count=self._current_hitl_prompt_count(),
+            resume_metadata=resume_metadata or {},
+        )
+
+    def _save_path_checkpoint(
+        self,
+        *,
+        resume_metadata: dict[str, Any] | None = None,
+        **path_state_kwargs,
+    ) -> None:
+        """Save a checkpoint with path-specific state.
+        保存包含路径特定状态的 checkpoint。"""
+        if not config.TASK_RESUME_ENABLED or not self._current_task_id:
+            return
+        try:
+            checkpoint = self._build_checkpoint(
+                TaskRunState.RUNNING,
+                resume_metadata=resume_metadata,
+            )
+            for key, value in path_state_kwargs.items():
+                setattr(checkpoint, key, value)
+            self._task_state_store.save(checkpoint)
+            self._emit("checkpoint_saved", {
+                "task_id": self._current_task_id,
+                "state": TaskRunState.RUNNING.value,
+            })
+        except Exception:
+            logger.debug("[Orchestrator] Path checkpoint save failed", exc_info=True)
+
+    def _save_dag_checkpoint(self, dag: TaskDAG) -> None:
+        """Save DAG checkpoint after each super-step.
+        每个 super-step 后保存 DAG checkpoint。"""
+        if not config.TASK_RESUME_ENABLED or not self._current_task_id:
+            return
+        results = [
+            self._node_to_result(nid, dag)
+            for nid in dag.state.node_results
+            if dag.nodes.get(nid) and dag.nodes[nid].node_type == NodeType.ACTION
+        ]
+        results = [r for r in results if r is not None]
+        self._save_path_checkpoint(
+            resume_metadata={
+                "boundary": "after_superstep",
+                "committed_ids": [
+                    str(node_id)
+                    for node_id, node in dag.nodes.items()
+                    if node.node_type == NodeType.ACTION and node.status == NodeStatus.COMPLETED
+                ],
+            },
+            dag_state=DAGPathState(
+                dag=dag.to_dict(),
+                results=[r.model_dump() for r in results],
+            ),
+        )
+
+    def _checkpoint_emergent_progress(self, payload: dict[str, Any]) -> None:
+        """Persist emergent TODO progress at a resume-safe boundary."""
+        self._save_path_checkpoint(
+            resume_metadata={
+                "boundary": payload.get("boundary", "after_todo"),
+                "committed_ids": payload.get("committed_ids", []),
+            },
+            emergent_state=EmergentPathState(
+                todo_list=payload["todo_list"],
+                all_results=payload.get("all_results", []),
+                iteration=payload.get("iteration", 0),
+                stagnation_state=payload.get("stagnation_state", {}),
+            ),
+        )
+
+    def _checkpoint_goal_driven_progress(self, payload: dict[str, Any]) -> None:
+        """Persist goal-driven TODO progress at a resume-safe boundary."""
+        self._save_path_checkpoint(
+            resume_metadata={
+                "boundary": payload.get("boundary", "after_todo"),
+                "committed_ids": payload.get("committed_ids", []),
+            },
+            goal_driven_state=GoalDrivenPathState(
+                todo_list=payload["todo_list"],
+                all_results=payload.get("all_results", []),
+                iteration=payload.get("iteration", 0),
+                stagnation_state=payload.get("stagnation_state", {}),
+                goal_doc=payload["goal_doc"],
+                milestone_plan=payload.get("milestone_plan"),
+                last_reflection=payload.get("last_reflection"),
+                reanchor_counter=payload.get("reanchor_counter", 0),
+            ),
+        )
+
+    def _mark_task_completed(self) -> None:
+        """Mark the current task checkpoint as completed, creating one if needed."""
+        if not config.TASK_RESUME_ENABLED or not self._current_task_id:
+            return
+        try:
+            if self._task_state_store.load(self._current_task_id) is None:
+                self._save_checkpoint(
+                    TaskRunState.COMPLETED,
+                    resume_metadata={"boundary": "task_complete", "committed_ids": []},
+                )
+            else:
+                self._task_state_store.mark_completed(self._current_task_id)
+                self._emit("checkpoint_saved", {
+                    "task_id": self._current_task_id,
+                    "state": TaskRunState.COMPLETED.value,
+                })
+        except Exception:
+            logger.debug("[Orchestrator] Mark task completed failed", exc_info=True)
+
+    def _mark_task_failed(self) -> None:
+        """Mark the current task checkpoint as failed, creating one if needed."""
+        if not config.TASK_RESUME_ENABLED or not self._current_task_id:
+            return
+        try:
+            if self._task_state_store.load(self._current_task_id) is None:
+                self._save_checkpoint(
+                    TaskRunState.FAILED,
+                    resume_metadata={"boundary": "task_failed", "committed_ids": []},
+                )
+            else:
+                self._task_state_store.mark_failed(self._current_task_id)
+                self._emit("checkpoint_saved", {
+                    "task_id": self._current_task_id,
+                    "state": TaskRunState.FAILED.value,
+                })
+        except Exception:
+            logger.debug("[Orchestrator] Mark task failed failed", exc_info=True)
+
+    def _current_hitl_prompt_count(self) -> int:
+        if self._ask_user_tool is None:
+            return 0
+        return getattr(self._ask_user_tool, "_prompt_count", 0)
+
+    async def resume(self, task_id: str) -> str:
+        """
+        Resume a previously interrupted task from its last checkpoint.
+        从最近的 checkpoint 恢复之前中断的任务。
+        """
+        checkpoint = self._task_state_store.load(task_id)
+        if checkpoint is None:
+            raise ValueError(f"No checkpoint found for task_id={task_id}")
+        if checkpoint.state == TaskRunState.COMPLETED:
+            raise ValueError(f"Task {task_id} already completed")
+
+        self._current_task_id = task_id
+        self._checkpoint_task = checkpoint.task
+        self._active_complexity = checkpoint.complexity
+        self._checkpoint_context = checkpoint.context
+        self._checkpoint_effort = ReasoningEffort(checkpoint.effort)
+        self._checkpoint_created_at = checkpoint.created_at
+
+        self.llm_client.reset_usage()
+        if self._subagent_tool:
+            self._subagent_tool.reset_task_state()
+        if self._ask_user_tool:
+            self._ask_user_tool._prompt_count = checkpoint.hitl_prompt_count
+
+        self._emit("task_start", {"task": checkpoint.task, "task_id": task_id, "resumed": True})
+
+        try:
+            # Dispatch to path-specific resume
+            if checkpoint.complexity == "simple" and checkpoint.simple_state:
+                final_answer = await self._resume_simple(checkpoint)
+            elif checkpoint.complexity == "complex" and checkpoint.dag_state:
+                final_answer = await self._resume_dag(checkpoint)
+            elif checkpoint.complexity in ("emergent", "goal_driven"):
+                if checkpoint.goal_driven_state and self.goal_driven_planner:
+                    final_answer = await self._resume_goal_driven(checkpoint)
+                elif checkpoint.emergent_state:
+                    final_answer = await self._resume_emergent(checkpoint)
+                else:
+                    raise ValueError(f"Cannot resume: no path-specific state in checkpoint for {task_id}")
+            else:
+                raise ValueError(f"Cannot resume: unknown complexity '{checkpoint.complexity}' for {task_id}")
+        except Exception:
+            self._mark_task_failed()
+            raise
+
+        self._mark_task_completed()
+        summary = self._finalize_token_usage()
+        self._emit("token_usage_summary", summary)
+        self._store_memory(checkpoint.task, final_answer)
+        self._emit("task_complete", {"answer": final_answer})
+        return final_answer
+
+    async def _resume_simple(self, checkpoint: TaskCheckpoint) -> str:
+        """Resume a simple-path task from checkpoint.
+        从 checkpoint 恢复 simple 路径任务。"""
+        state = checkpoint.simple_state
+        plan = Plan(**state.plan)
+        effort = ReasoningEffort(checkpoint.effort)
+        all_results = [StepResult(**r) for r in state.all_results]
+
+        # Restore step statuses from results
+        completed_ids = {r.step_id for r in all_results if r.success}
+        for step in plan.steps:
+            if step.id in completed_ids:
+                step.status = StepStatus.COMPLETED
+            elif any(r.step_id == step.id and not r.success for r in all_results):
+                step.status = StepStatus.FAILED
+
+        reflection = Reflection(**state.reflection) if state.reflection else None
+        self._emit("phase", f"Resuming simple plan from step {state.current_step_index}...")
+
+        return await self._execute_and_reflect_simple(
+            task=checkpoint.task,
+            plan=plan,
+            context=checkpoint.context,
+            effort=effort,
+            _resume_attempt=state.attempt,
+            _resume_results=all_results,
+            _resume_reflection=reflection,
+        )
+
+    async def _resume_dag(self, checkpoint: TaskCheckpoint) -> str:
+        """Resume a DAG-path task from checkpoint.
+        从 checkpoint 恢复 DAG 路径任务。"""
+        from dag.state_machine import NodeStateMachine
+        state = checkpoint.dag_state
+        sm = NodeStateMachine()
+        dag = TaskDAG.from_dict(state.dag, sm)
+        effort = ReasoningEffort(checkpoint.effort)
+        self._emit("phase", "Resuming DAG execution...")
+        return await self._execute_dag_and_reflect(dag, effort=effort)
+
+    async def _resume_emergent(self, checkpoint: TaskCheckpoint) -> str:
+        """Resume an emergent-path task from checkpoint.
+        从 checkpoint 恢复 emergent 路径任务。"""
+        state = checkpoint.emergent_state
+        effort = ReasoningEffort(checkpoint.effort)
+        todo_list = TodoList(**state.todo_list) if isinstance(state.todo_list, dict) else state.todo_list
+        all_results = [StepResult(**r) for r in state.all_results]
+
+        self.emergent_planner._todo_list = todo_list
+        self.emergent_planner._current_effort = effort
+        self._emit("phase", "Resuming emergent planning...")
+
+        return await self.emergent_planner.resume_execute(
+            task=checkpoint.task,
+            context=checkpoint.context,
+            effort=effort,
+            todo_list=todo_list,
+            all_results=all_results,
+            iteration=state.iteration,
+            stagnation_state=state.stagnation_state,
+            on_checkpoint=self._checkpoint_emergent_progress,
+        )
+
+    async def _resume_goal_driven(self, checkpoint: TaskCheckpoint) -> str:
+        """Resume a goal-driven-path task from checkpoint.
+        从 checkpoint 恢复 goal-driven 路径任务。"""
+        from schema import GoalDocument, GoalReflection
+        state = checkpoint.goal_driven_state
+        effort = ReasoningEffort(checkpoint.effort)
+        todo_list = TodoList(**state.todo_list) if isinstance(state.todo_list, dict) else state.todo_list
+        all_results = [StepResult(**r) for r in state.all_results]
+        goal_doc = GoalDocument(**state.goal_doc) if isinstance(state.goal_doc, dict) else state.goal_doc
+
+        self.goal_driven_planner._todo_list = todo_list
+        self.goal_driven_planner._current_effort = effort
+        self.goal_driven_planner._goal_doc = goal_doc
+        self.goal_driven_planner._reanchor_counter = state.reanchor_counter
+        self._emit("phase", "Resuming goal-driven planning...")
+
+        last_reflection = None
+        if state.last_reflection:
+            last_reflection = GoalReflection(**state.last_reflection)
+
+        return await self.goal_driven_planner.resume_execute(
+            task=checkpoint.task,
+            context=checkpoint.context,
+            effort=effort,
+            goal_doc=goal_doc,
+            todo_list=todo_list,
+            all_results=all_results,
+            iteration=state.iteration,
+            stagnation_state=state.stagnation_state,
+            last_reflection=last_reflection,
+            on_checkpoint=self._checkpoint_goal_driven_progress,
+        )
+
+    # ------------------------------------------------------------------
     # v13 HITL: User prompt bridging
     # v13 人机交互：用户提问桥接
     # ------------------------------------------------------------------
@@ -782,6 +1190,15 @@ class OrchestratorAgent:
         is responsible for resolving the Future.
         通过 emit 携带 Future 的事件通知 UI 层，由 UI 层收集用户输入并 resolve Future。
         """
+        self._save_checkpoint(
+            TaskRunState.PAUSED_WAITING_USER,
+            resume_metadata={
+                "boundary": "hitl_prompt",
+                "prompt_id": prompt_id,
+                "question": question,
+                "prompt_count": self._current_hitl_prompt_count(),
+            },
+        )
         self._emit("ask_user_prompt", {
             "question": question,
             "prompt_id": prompt_id,

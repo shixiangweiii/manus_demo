@@ -635,7 +635,7 @@ class TestSubAgentIntegration:
 
     def test_eval_probe_collects_subagent_metrics(self):
         """Anti-pattern #10: EvaluationProbe collects SubAgent event data."""
-        from evaluation.runner import EvaluationProbe
+        from evaluation.probe import EvaluationProbe
         probe = EvaluationProbe()
 
         probe.on_event("subagent_complete", {
@@ -651,7 +651,7 @@ class TestSubAgentIntegration:
         assert probe.subagent_results[0]["iterations_used"] == 3
 
     def test_eval_probe_collects_subagent_failure(self):
-        from evaluation.runner import EvaluationProbe
+        from evaluation.probe import EvaluationProbe
         probe = EvaluationProbe()
 
         probe.on_event("subagent_failed", {
@@ -663,7 +663,7 @@ class TestSubAgentIntegration:
         assert probe.subagent_results[0]["status"] == "failed"
 
     def test_eval_probe_collects_subagent_timeout(self):
-        from evaluation.runner import EvaluationProbe
+        from evaluation.probe import EvaluationProbe
         probe = EvaluationProbe()
 
         probe.on_event("subagent_timed_out", {
@@ -674,7 +674,7 @@ class TestSubAgentIntegration:
         assert probe.subagent_results[0]["status"] == "timed_out"
 
     def test_eval_probe_multiple_subagent_results(self):
-        from evaluation.runner import EvaluationProbe
+        from evaluation.probe import EvaluationProbe
         probe = EvaluationProbe()
 
         probe.on_event("subagent_complete", {"subagent_id": "SA-1"})

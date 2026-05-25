@@ -1,0 +1,11 @@
+[mcp_servers.WebSearch]
+url = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
+
+[mcp_servers.WebSearch.http_headers]
+Authorization = "Bearer sk-93f7344abdb141d09a6fa1ffd5595e2f"
+
+[mcp_servers.market-cmapi00069848]
+url = "https://dashscope.aliyuncs.com/api/v1/mcps/market-cmapi00069848/mcp"
+
+[mcp_servers.market-cmapi00069848.http_headers]
+Authorization = "Beare sk-93f7344abdb141d09a6fa1ffd5595e2f"

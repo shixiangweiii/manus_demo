@@ -153,6 +153,8 @@ class TracingBridge:
             "ask_user_response": self._on_ask_user_response,
             "ask_user_timeout": self._on_ask_user_timeout,
             "ask_user_cancelled": self._on_ask_user_cancelled,
+            # v14.5 Task Resume events
+            "checkpoint_saved": self._on_checkpoint_saved,
         }
 
     def on_event(self, event: str, data: Any = None) -> None:
@@ -201,6 +203,12 @@ class TracingBridge:
         if isinstance(data, dict):
             task_input = data.get("task", "")
             self._safe_set_attr(self._root_span, AttrKey.TASK_INPUT, task_input)
+            # v14.5: task_id and resumed flag for checkpoint/resume tracing
+            task_id = data.get("task_id", "")
+            if task_id:
+                self._safe_set_attr(self._root_span, AttrKey.CHECKPOINT_TASK_ID, task_id)
+            if data.get("resumed"):
+                self._safe_set_attr(self._root_span, AttrKey.TASK_RESUMED, True)
 
     def _on_task_complexity(self, data: Any) -> None:
         """Record task complexity classification result."""
@@ -1119,3 +1127,20 @@ class TracingBridge:
 
         from tracing.decorators import _safe_set_attribute
         _safe_set_attribute(span, key, value)
+
+    # ------------------------------------------------------------------
+    # v14.5 Task Resume: Checkpoint events
+    # 任务恢复：Checkpoint 事件
+    # ------------------------------------------------------------------
+
+    def _on_checkpoint_saved(self, data: Any) -> None:
+        """Record a checkpoint save event on the root span."""
+        if self._root_span and isinstance(data, dict):
+            task_id = data.get("task_id", "")
+            state = data.get("state", "")
+            if task_id:
+                self._safe_set_attr(self._root_span, AttrKey.CHECKPOINT_TASK_ID, task_id)
+            self._root_span.add_event(EventName.CHECKPOINT_SAVED, {
+                AttrKey.CHECKPOINT_TASK_ID: task_id,
+                AttrKey.CHECKPOINT_STATE: state,
+            })

@@ -100,6 +100,7 @@ class ContextManager:
         self,
         messages: list[dict[str, Any]],
         llm_client: Any,
+        caller_tag: str = "ContextManager",
     ) -> list[dict[str, Any]]:
         """
         Check if messages exceed token limit; if so, compress older messages
@@ -142,7 +143,7 @@ class ContextManager:
         # Build text to summarize（构建待摘要的文本）
         old_text = self._messages_to_text(old_msgs)
 
-        summary = await self._summarize(old_text, llm_client)
+        summary = await self._summarize(old_text, llm_client, caller_tag=caller_tag)
 
         # Construct compressed context（构建压缩后的上下文）
         summary_message = {
@@ -231,7 +232,7 @@ class ContextManager:
         return "\n".join(lines)
 
     @staticmethod
-    async def _summarize(text: str, llm_client: Any) -> str:
+    async def _summarize(text: str, llm_client: Any, caller_tag: str = "ContextManager") -> str:
         """
         Use the LLM to produce a concise summary of conversation history.
         使用 LLM 对对话历史进行简洁摘要。
@@ -255,7 +256,7 @@ class ContextManager:
             },
         ]
         try:
-            summary = await llm_client.chat(summary_prompt, temperature=0.2, max_tokens=1024)
+            summary = await llm_client.chat(summary_prompt, temperature=0.2, max_tokens=1024, caller_tag=caller_tag)
             return summary
         except Exception as exc:
             logger.error("Summarization failed: %s", exc)

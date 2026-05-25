@@ -43,16 +43,12 @@ import config as config_module
 from agents.base import BaseAgent
 from context.manager import ContextManager
 from llm.client import LLMClient
-from schema import StepResult, TodoItem, TodoList, TodoStatus, ToolCallRecord
+from schema import ReasoningEffort, StepResult, TodoItem, TodoList, TodoStatus, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
 from agents.prompt_utils import build_system_prompt, build_convergence_hint
-from react.tool_call_helpers import (
-    attribute_caller,
-    classify_result,
-    truncate_for_llm,
-)
+from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +117,7 @@ class EmergentPlannerAgent(BaseAgent):
         self.tool_router = tool_router or ToolRouter(available_tools=list(self.tools.keys()))
         self._on_event = on_event or (lambda *_: None)
         self._todo_list: TodoList | None = None
+        self._current_effort: ReasoningEffort = ReasoningEffort.MEDIUM
 
         use_engine = use_react_engine if use_react_engine is not None else config_module.ENABLE_REACT_ENGINE_V2
         self._react_engine = None
@@ -143,7 +140,14 @@ class EmergentPlannerAgent(BaseAgent):
     # 主入口
     # ------------------------------------------------------------------
 
-    async def execute(self, task: str, context: str = "") -> str:
+    async def execute(
+        self,
+        task: str,
+        context: str = "",
+        *,
+        effort: ReasoningEffort | None = None,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
         """
         Claude Code-style emergent planning and execution.
 
@@ -167,15 +171,59 @@ class EmergentPlannerAgent(BaseAgent):
         """
         self._emit("phase", "Initializing emergent planning...")
 
+        self._current_effort = effort or ReasoningEffort.MEDIUM
+
         # 初始化 TODO 列表
         self._todo_list = TodoList(task=task)
         await self._init_todo_list(task, context)
 
-        iteration = 0
-        all_results: list[StepResult] = []
-        prev_completed = 0
-        stagnation = 0
+        return await self._run_emergent_loop(
+            task=task,
+            iteration=0,
+            all_results=[],
+            prev_completed=0,
+            stagnation=0,
+            on_checkpoint=on_checkpoint,
+        )
 
+    async def resume_execute(
+        self,
+        task: str,
+        context: str,
+        effort: ReasoningEffort,
+        todo_list: TodoList,
+        all_results: list[StepResult],
+        iteration: int,
+        stagnation_state: dict,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
+        """Resume emergent planning from a restored state (v14.5).
+        从恢复的状态继续隐式规划。"""
+        self._current_effort = effort
+        self._todo_list = todo_list
+        prev_completed = stagnation_state.get("prev_completed", 0)
+        stagnation = stagnation_state.get("stagnation_rounds", 0)
+
+        return await self._run_emergent_loop(
+            task=task,
+            iteration=iteration,
+            all_results=all_results,
+            prev_completed=prev_completed,
+            stagnation=stagnation,
+            on_checkpoint=on_checkpoint,
+        )
+
+    async def _run_emergent_loop(
+        self,
+        task: str,
+        iteration: int,
+        all_results: list[StepResult],
+        prev_completed: int,
+        stagnation: int,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
+        """Core emergent planning loop, shared by execute() and resume_execute().
+        核心隐式规划主循环，execute() 和 resume_execute() 共享。"""
         # 主循环：while(has_pending_todos)
         while self._todo_list.has_pending():
             iteration += 1
@@ -279,6 +327,14 @@ class EmergentPlannerAgent(BaseAgent):
             if should_update:
                 await self._update_todo_list(result)
 
+            self._emit_checkpoint(
+                on_checkpoint,
+                all_results=all_results,
+                iteration=iteration,
+                prev_completed=prev_completed,
+                stagnation=stagnation,
+            )
+
             # 显示当前 TODO 列表状态
             self._emit("todo_list_update", self._get_todo_summary())
 
@@ -291,6 +347,38 @@ class EmergentPlannerAgent(BaseAgent):
     # TODO list management
     # TODO 列表管理
     # ------------------------------------------------------------------
+
+    def _emit_checkpoint(
+        self,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None,
+        *,
+        all_results: list[StepResult],
+        iteration: int,
+        prev_completed: int,
+        stagnation: int,
+    ) -> None:
+        """Emit a resume-safe checkpoint payload after a TODO boundary."""
+        if on_checkpoint is None or self._todo_list is None:
+            return
+        current_completed = sum(
+            1 for todo in self._todo_list.todos.values()
+            if todo.status == TodoStatus.COMPLETED
+        )
+        on_checkpoint({
+            "boundary": "after_todo",
+            "committed_ids": [
+                str(todo.id)
+                for todo in self._todo_list.todos.values()
+                if todo.status == TodoStatus.COMPLETED
+            ],
+            "todo_list": self._todo_list.model_dump(),
+            "all_results": [result.model_dump() for result in all_results],
+            "iteration": iteration,
+            "stagnation_state": {
+                "prev_completed": current_completed,
+                "stagnation_rounds": stagnation,
+            },
+        })
 
     async def _init_todo_list(self, task: str, context: str) -> None:
         """
@@ -537,6 +625,7 @@ class EmergentPlannerAgent(BaseAgent):
                 context="",
                 node_id=str(todo.id),
                 system_hint=self.system_prompt,
+                effort=self._current_effort,
             )
             return result
 
@@ -562,7 +651,9 @@ class EmergentPlannerAgent(BaseAgent):
                 response_msg = await self.think_with_tools(
                     prompt if iteration == 1 else continue_msg,
                     tools=self.tool_schemas,
-                    temperature=0.5,
+                    temperature=0.3 if self._current_effort == ReasoningEffort.LOW
+                    else 0.7 if self._current_effort == ReasoningEffort.HIGH
+                    else config_module.REACT_TEMPERATURE,
                 )
             except Exception as exc:
                 logger.error("[EmergentPlanner] LLM call failed: %s", exc)
@@ -583,70 +674,21 @@ class EmergentPlannerAgent(BaseAgent):
                     tool_calls_log=tool_calls_log,
                 )
 
-            # Wave-1 N1: parallel tool execution + helper-driven classification.
-            # Previously this loop called `record_success` immediately after
-            # `traced_execute`, then re-checked `Error:` AFTER the fact —
-            # tools that swallow exceptions (web_search/fetch_url/ask_user)
-            # were counted as success and only later marked is_error,
-            # leaving the ToolRouter stats permanently polluted. Now we run
-            # in gather, classify once via helper, and write to ToolRouter
-            # in a single accounting pass.
-            # 之前 record_success 先于 Error 检测被调用,污染 router 统计;
-            # 改为 gather + classify_result 后单次入桶。
-            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool, bool]:
-                fn_name = tc.function.name
-                fn_args = self._parse_json(tc.function.arguments)
-                if fn_args is None:
-                    fn_args = {}
-                logger.info("[EmergentPlanner] Tool call: %s(%s)", fn_name, fn_args)
-                t = self.tools.get(fn_name)
-                if t is None:
-                    res = f"Error: Unknown tool '{fn_name}'"
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                attribute_caller(t, "EmergentPlanner")
-                try:
-                    res = await t.traced_execute(**fn_args)
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                except Exception as exc:
-                    res = f"Error: Tool execution error: {exc}"
-                    is_err, rl = classify_result(None, exc)
-                    return tc, fn_name, fn_args, res, is_err, rl
-
-            executions = await asyncio.gather(
-                *(_exec_one(tc) for tc in response_msg.tool_calls)
+            # Batch 4.1 DRY: shared execute_tool_calls replaces inline block.
+            tool_messages = await execute_tool_calls(
+                response_msg.tool_calls,
+                self.tools,
+                self.tool_router,
+                node_id=str(todo.id),
+                agent_name=self.name,
+                truncation_limit=config_module.TOOL_RESULT_TRUNCATION_LIMIT,
+                tool_calls_log=tool_calls_log,
+                log_prefix="EmergentPlanner",
+                policy=ToolExecutionPolicy.for_effort(self._current_effort),
+                parse_args=self._parse_json_for_tool_args,
             )
-
-            truncation_limit = config_module.TOOL_RESULT_TRUNCATION_LIMIT
-            for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
-                if is_rate_limited:
-                    self.tool_router.record_rate_limited(str(todo.id), func_name)
-                elif is_error:
-                    self.tool_router.record_failure(str(todo.id), func_name)
-                else:
-                    self.tool_router.record_success(str(todo.id), func_name)
-
-                record_result, llm_result = truncate_for_llm(
-                    result, truncation_limit, is_error,
-                )
-
-                tool_calls_log.append(ToolCallRecord(
-                    tool_name=func_name,
-                    parameters=func_args,
-                    result=record_result,
-                ))
-
-                if is_error:
-                    result_with_marker = (
-                        f"[TOOL ERROR] {llm_result}\n\n"
-                        "IMPORTANT: The tool returned an error. Please analyze "
-                        "the error and decide whether to retry with different "
-                        "parameters or report the failure."
-                    )
-                else:
-                    result_with_marker = llm_result
-                self.add_tool_result(tool_call.id, result_with_marker)
+            for msg in tool_messages:
+                self.add_tool_result(msg["tool_call_id"], msg["content"])
 
         logger.warning("[EmergentPlanner] TODO %d hit max iterations (%d)", todo.id, self.max_iterations)
         return StepResult(
@@ -673,6 +715,18 @@ class EmergentPlannerAgent(BaseAgent):
             return result if isinstance(result, dict) else None
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_json_for_tool_args(text: str) -> dict[str, Any]:
+        """Parse tool-call arguments, handling markdown-fenced JSON.
+        解析工具调用参数，兼容 Markdown 代码块包裹的 JSON。
+        Returns {} on failure instead of None (safe for **kwargs unpacking)."""
+        from llm.client import LLMClient
+        try:
+            result = LLMClient.parse_json(text)
+            return result if isinstance(result, dict) else {}
+        except (ValueError, json.JSONDecodeError):
+            return {}
 
     def _get_todo_summary(self) -> str:
         """

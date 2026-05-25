@@ -32,6 +32,7 @@ from rich.table import Table
 from rich.tree import Tree
 
 from agents.orchestrator import OrchestratorAgent
+from checkpoint.store import TaskStateStore
 from dag.graph import TaskDAG
 from llm.client import LLMClient
 from schema import LLMCallRecord, NodeType, Plan, Reflection, Step, StepResult, TaskEdge, TaskNode, TokenUsageSummary
@@ -576,6 +577,13 @@ def on_event(event: str, data: Any) -> None:
             "Agent will proceed autonomously.[/yellow]"
         )
 
+    # --- v14.5 Task Resume: checkpoint events ---
+    # --- v14.5 任务恢复：checkpoint 事件 ---
+    elif event == "checkpoint_saved":
+        console.print(
+            f"  [dim](Checkpoint saved: task_id={data.get('task_id', '?')}, state={data.get('state', '?')})[/dim]"
+        )
+
     elif event == "task_complete":
         # 任务完成：显示绿色边框的最终答案面板
         console.print(Panel(
@@ -620,14 +628,14 @@ async def run_interactive() -> None:
     每轮对话共享同一个 Orchestrator 实例，因此长期记忆会在多轮之间积累。
     """
     console.print(Panel(
-        "[bold]Manus Demo v6[/bold] - Hybrid Multi-Agent System with Intelligent Plan Routing\n\n"
+        f"[bold]Manus Demo {config.VERSION}[/bold] - Hybrid Multi-Agent System with Intelligent Plan Routing\n\n"
         "This demo implements:\n"
-        "  [green]NEW[/green] [bold]ReActEngine v2[/bold] — unified ReAct loop engine, extracted from Executor & EmergentPlanner (v6)\n"
-        "  [green]NEW[/green] [bold]LLM retry[/bold] — exponential backoff retry for LLM calls (v6)\n"
+        "  [green]NEW[/green] [bold]Reasoning Model Adaptation[/bold] — thinking token tracking, dual protocol (DeepSeek R1 / OpenAI o), ReasoningEngine (v14)\n"
+        "  [green]NEW[/green] [bold]HITL Human-in-the-Loop[/bold] — ask_user tool with double-gating, asyncio.Future bridge (v13)\n"
+        "  [green]NEW[/green] [bold]SubAgent Collaboration[/bold] — depth=1 isolation, token budget fuse, caller_tag attribution (v9)\n"
         "  [green]NEW[/green] [bold]Bailian MCP web search + fetch_url[/bold] — richer search results + URL page fetching, convergence guidance (v11)\n"
-        "  [green]NEW[/green] [bold]Hybrid plan routing[/bold] — auto-selects simple (v1), complex (v2), or emergent (v5) path (v5)\n"
-        "  [green]NEW[/green] [bold]Two-stage classifier[/bold] — rules fast-filter + LLM fallback (v4)\n"
-        "  [green]NEW[/green] [bold]Emergent planning[/bold] — Claude Code style, plan emerges via TODO list (v5)\n"
+        "  [green]NEW[/green] [bold]Hybrid plan routing[/bold] — auto-selects simple (v1), complex (v2), or emergent (v5) path\n"
+        "  [green]NEW[/green] [bold]OTel Tracing[/bold] — full span tree, web viewer, multi-backend exporters (v7)\n"
         "  [cyan]1.[/cyan] Simple path: flat 2-6 step plan, sequential execution\n"
         "  [cyan]2.[/cyan] Complex path: hierarchical DAG (Goal -> SubGoals -> Actions)\n"
         "  [cyan]3.[/cyan] DAG execution with parallel super-steps\n"
@@ -671,6 +679,22 @@ async def run_interactive() -> None:
             console.print("[dim]Goodbye![/dim]")
             break
 
+        # v14.5: /resume command to resume a checkpointed task
+        if user_input.lower().startswith("/resume"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 2:
+                task_id = parts[1].strip()
+                try:
+                    answer = await orchestrator.resume(task_id)
+                except ValueError as exc:
+                    console.print(f"[red]Resume error: {exc}[/red]")
+                except Exception as exc:
+                    console.print(f"[red]Resume failed: {exc}[/red]")
+                    logging.exception("Resume error")
+            else:
+                _list_tasks()
+            continue
+
         try:
             answer = await orchestrator.run(user_input)
         except KeyboardInterrupt:
@@ -698,15 +722,73 @@ async def run_single(task: str) -> None:
     await orchestrator.run(task)
 
 
+def _list_tasks() -> None:
+    """List all checkpointed tasks. / 列出所有 checkpointed 任务。"""
+    store = TaskStateStore()
+    tasks = store.list_tasks()
+    if not tasks:
+        console.print("[dim]No checkpointed tasks found.[/dim]")
+        return
+    import time as _time
+    table = Table(title="Checkpointed Tasks", border_style="cyan")
+    table.add_column("Task ID", style="cyan", width=10)
+    table.add_column("Task", style="white", max_width=60)
+    table.add_column("Complexity", style="yellow", width=12)
+    table.add_column("State", style="green", width=20)
+    table.add_column("Last Updated", style="dim", width=20)
+    for t in tasks:
+        table.add_row(
+            t.task_id,
+            t.task[:60],
+            t.complexity,
+            t.state.value,
+            _time.strftime("%Y-%m-%d %H:%M", _time.localtime(t.updated_at)),
+        )
+    console.print(table)
+
+
+async def run_resume(task_id: str) -> None:
+    """Resume a checkpointed task. / 恢复一个 checkpointed 任务。"""
+    llm_client = LLMClient()
+    tools = [WebSearchTool(), FetchUrlTool(), UserLocationTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    orchestrator = OrchestratorAgent(
+        llm_client=llm_client,
+        tools=tools,
+        on_event=on_event,
+        interactive=True,
+    )
+    try:
+        answer = await orchestrator.resume(task_id)
+    except ValueError as exc:
+        console.print(f"[red]Resume error: {exc}[/red]")
+
+
 def main() -> None:
     """
     程序入口：解析命令行参数，决定运行模式。
     - 有位置参数：单任务模式（python main.py "任务"）
     - 无位置参数：交互模式（python main.py）
     - -v / --verbose：启用调试日志
+    - --list-tasks：列出所有 checkpointed 任务
+    - --resume <task_id>：恢复指定任务
     """
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     setup_logging(verbose)
+
+    # v14.5: --list-tasks
+    if "--list-tasks" in sys.argv:
+        _list_tasks()
+        return
+
+    # v14.5: --resume <task_id>
+    if "--resume" in sys.argv:
+        resume_idx = sys.argv.index("--resume")
+        if resume_idx + 1 < len(sys.argv):
+            task_id = sys.argv[resume_idx + 1]
+            asyncio.run(run_resume(task_id))
+        else:
+            console.print("[red]Error: --resume requires a task_id[/red]")
+        return
 
     # 过滤掉以 - 开头的选项参数，保留位置参数
     args = [a for a in sys.argv[1:] if not a.startswith("-")]

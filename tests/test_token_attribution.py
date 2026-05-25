@@ -131,7 +131,7 @@ class TestBaseAgentAutoTagging:
 
         # ContextManager.compress_if_needed returns messages unchanged
         cm = ContextManager()
-        cm.compress_if_needed = AsyncMock(side_effect=lambda msgs, _: msgs)
+        cm.compress_if_needed = AsyncMock(side_effect=lambda msgs, llm, **kw: msgs)
 
         agent = BaseAgent(
             name=name,

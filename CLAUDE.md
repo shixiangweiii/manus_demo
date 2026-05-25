@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-Multi-agent AI system with hybrid plan routing. Tasks classified by complexity → one of four engines: simple flat planning (v1), DAG-based parallel (v2), emergent TODO-list (v5), or goal-driven (v8). Supports SubAgent spawning (v9), OTel tracing (v7), and HITL ask_user (v13).
+Multi-agent AI system with hybrid plan routing. Tasks classified by complexity → one of four engines: simple flat planning (v1), DAG-based parallel (v2), emergent TODO-list (v5), or goal-driven (v8). Supports SubAgent spawning (v9), OTel tracing (v7), HITL ask_user (v13), and Task Resume/checkpoint persistence (v14.5).
 
 - **Language**: Python 3.11+ (async/await throughout)
 - **LLM**: OpenAI-compatible API (DeepSeek default)
 - **UI**: Rich console, event-driven
-- **Version**: v13.0 + Wave-1..7 SubAgent overhaul
+- **Version**: v14.5 + Task Resume checkpoint persistence
 
 ## Architecture
 
@@ -18,6 +18,7 @@ User Task → Orchestrator → [classify_task] → simple / complex / emergent
   emergent:  ENABLE_GOAL_DRIVEN_PLANNER=false → EmergentPlanner (TODO + per-TODO ReAct)
              ENABLE_GOAL_DRIVEN_PLANNER=true  → GoalDrivenPlanner (goal anchoring + dynamic TODO)
 All paths → Token usage → Long-term memory → TracingBridge (OTel)
+All paths → Checkpoint persistence (v14.5, per-step/per-TODO/per-super-step save, resume from checkpoint)
 ReAct loops → subagent tool (depth=1, isolated, summary-only)
 ReAct loops → ask_user tool (HITL, asyncio.Future bridge, interactive-only)
 ```
@@ -39,6 +40,7 @@ ReAct loops → ask_user tool (HITL, asyncio.Future bridge, interactive-only)
 - **TodoStatus**: `PENDING / IN_PROGRESS / COMPLETED / BLOCKED`
 - **SubAgentStatus**: `PENDING / RUNNING / COMPLETED / FAILED / TIMED_OUT`
 - **GoalAction**: `EXECUTE_TODO / REPLAN / COMPLETE`
+- **TaskRunState**: `RUNNING / PAUSED_WAITING_USER / COMPLETED / FAILED`
 
 ## Module Roles
 
@@ -48,6 +50,7 @@ ReAct loops → ask_user tool (HITL, asyncio.Future bridge, interactive-only)
 - **`llm/`** — LLMClient (async wrapper, centralized token tracking, `caller_tag` per-call attribution)
 - **`tools/`** — BaseTool ABC, WebSearchTool (Bailian MCP + DDGS fallback), FetchUrlTool, UserLocationTool, CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool, AskUserTool, ToolRouter, BailianMCPClient
 - **`tracing/`** — TracingBridge (event→span), FastAPI web viewer, multi-backend exporters
+- **`checkpoint/`** — TaskCheckpoint + path state models (SimplePathState, DAGPathState, EmergentPathState, GoalDrivenPathState), TaskStateStore (atomic JSON file persistence, version check, pruning)
 - **`memory/`** — ShortTermMemory (sliding-window), LongTermMemory (JSON-file)
 - **`context/`** — ContextManager (token estimation + LLM-based compression with safe split)
 - **`knowledge/`** — KnowledgeRetriever (TF-IDF + cosine)
@@ -75,6 +78,8 @@ python main.py -v                       # Verbose
 PLAN_MODE=simple|complex|emergent python main.py "task"
 SUBAGENT_ENABLED=true python main.py "task"
 HITL_ENABLED=true python main.py        # Interactive only
+python main.py --list-tasks             # List checkpointed tasks
+python main.py --resume <task_id>       # Resume a checkpointed task
 python -m tracing                       # Web viewer localhost:8000
 
 python -m pytest tests/ -v -o asyncio_mode=auto
@@ -111,6 +116,10 @@ All via env vars / `.env` (see `config.py`):
 | `SEARCH_CONVERGENCE_THRESHOLD` | `3` | Web search call count for convergence hints |
 | `DAG_SERIAL_EXECUTION` | `true` | Set `false` for parallel |
 | `EMERGENT_PLANNING_ENABLED` | `true` | Enable v5/v8 route |
+| `TASK_RESUME_ENABLED` | `true` | v14.5 checkpoint master switch |
+| `CHECKPOINT_DIR` | `~/.manus_demo/checkpoints` | Checkpoint storage directory |
+| `CHECKPOINT_MAX_PER_TASK` | `5` | Max checkpoint files per task |
+| `CHECKPOINT_RETENTION_DAYS` | `7` | Auto-delete checkpoints older than N days |
 
 ## Code Conventions
 
@@ -138,3 +147,6 @@ All via env vars / `.env` (see `config.py`):
 9. **SubAgent depth=1**: structural — tool whitelist filters out `subagent` and `ask_user`.
 10. **caller_tag**: named kwarg on `chat`/`chat_with_tools`/`chat_json` — never put in `**kwargs` (would leak to OpenAI API).
 11. **DAG dataflow**: `_parse_dag()` infers subgoal-level deps from cross-subgoal action deps; orphan edges stored in `_filtered_edges`.
+12. **Checkpoint resume boundary**: resumes to next execution boundary (step/TODO/super-step), does NOT restore LLM call mid-stream or ShortTermMemory. Each ReAct call starts fresh.
+13. **Checkpoint atomic write**: `TaskStateStore.save()` writes `.tmp` then `os.rename` — never partial files on crash. Version check on load rejects future/old formats.
+14. **Emergent/Goal-Driven loop extraction**: `_run_emergent_loop()` / `_run_goal_driven_loop()` shared between `execute()` and `resume_execute()` — no logic duplication.

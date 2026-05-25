@@ -12,6 +12,16 @@ import re
 
 import pytest
 
+
+def _can_import(module_name: str) -> bool:
+    """Check if a module can be imported without actually importing it."""
+    try:
+        __import__(module_name)
+        return True
+    except ImportError:
+        return False
+
+
 from evaluation.benchmark import BenchmarkTask, GroundTruth, get_benchmark_tasks
 from evaluation.metrics import (
     AggregatedMetrics,
@@ -30,7 +40,7 @@ from evaluation.metrics import (
     compute_overall_score,
     compute_planning_score,
 )
-from evaluation.runner import EvaluationProbe
+from evaluation.probe import EvaluationProbe
 
 
 # ======================================================================
@@ -357,12 +367,18 @@ class TestBenchmark:
         assert TaskDifficulty.HARD in difficulties
 
     def test_all_tasks_have_must_include(self):
-        """All benchmark tasks should have must_include_keywords."""
+        """All benchmark tasks should have must_include_keywords (safety tasks exempt)."""
         tasks = get_benchmark_tasks()
         for t in tasks:
-            assert len(t.ground_truth.must_include_keywords) > 0, (
-                f"Task {t.task_id} missing must_include_keywords"
-            )
+            # Safety tasks use must_not_include instead of must_include
+            if "safety" in t.tags:
+                assert len(t.ground_truth.must_not_include) > 0, (
+                    f"Safety task {t.task_id} missing must_not_include"
+                )
+            else:
+                assert len(t.ground_truth.must_include_keywords) > 0, (
+                    f"Task {t.task_id} missing must_include_keywords"
+                )
 
     def test_must_not_include_defined(self):
         """All tasks should have must_not_include defined (empty list is valid)."""
@@ -457,7 +473,7 @@ class TestProbeEventHandling:
 
     def test_chinese_step_coverage(self):
         """M2 fix: Chinese text should be split correctly for step coverage."""
-        from evaluation.runner import EvaluationProbe as EP
+        from evaluation.probe import EvaluationProbe as EP
         # Test the regex pattern used in build_result
         text = "搜索Python和JavaScript的区别"
         tokens = re.split(r'[\s,，、;；]+', text.lower())
@@ -552,7 +568,7 @@ class TestProbeEventHandling:
         assert not passes_not_include  # Should fail because "error" and "failed" are in answer
 
     def test_config_snapshot_populated(self):
-        """config_snapshot should be populated in build_result."""
+        """config_snapshot should be populated when passed to build_result."""
         probe = EvaluationProbe()
         probe.final_answer = "test answer"
         probe.task_success = True
@@ -560,9 +576,22 @@ class TestProbeEventHandling:
             task_id="test_cfg",
             task_description="test",
         )
-        result = probe.build_result(task=task, forced_mode=PlanMode.SIMPLE, llm_model="test-model")
+        # config_snapshot is provided by runner (probe doesn't import config)
+        snapshot = {
+            "plan_mode": "simple",
+            "max_react_iterations": 10,
+            "max_parallel_nodes": 3,
+        }
+        result = probe.build_result(
+            task=task, forced_mode=PlanMode.SIMPLE, llm_model="test-model",
+            config_snapshot=snapshot,
+        )
         assert len(result.config_snapshot) > 0
         assert result.config_snapshot.get("plan_mode") == "simple"
+
+        # Without config_snapshot, defaults to empty dict (backward compat)
+        result_empty = probe.build_result(task=task, forced_mode=PlanMode.SIMPLE, llm_model="test-model")
+        assert result_empty.config_snapshot == {}
 
 
 # ======================================================================
@@ -570,6 +599,10 @@ class TestProbeEventHandling:
 # ======================================================================
 
 class TestReportSmoke:
+    @pytest.mark.skipif(
+        not _can_import("evaluation.report"),
+        reason="rich not installed — report module unavailable",
+    )
     def test_render_comparison_table_no_crash(self):
         """Ensure report rendering doesn't crash with valid data."""
         from evaluation.report import render_comparison_table

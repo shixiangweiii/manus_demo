@@ -242,7 +242,7 @@ class TestParallelExecutionWithTools:
         mock_executor_agent = AsyncMock()
         mock_executor_agent.create_for_node = lambda node_id: mock_executor_agent
 
-        async def fake_execute_node(node: TaskNode, context: str = "") -> StepResult:
+        async def fake_execute_node(node: TaskNode, context: str = "", **kwargs) -> StepResult:
             """根据节点 ID 返回不同的工具调用结果，模拟 ReAct 循环."""
             tool_map = {
                 "act_1_1": StepResult(
@@ -441,7 +441,7 @@ class TestConditionalBranchAndRollback:
         mock_executor = AsyncMock()
         mock_executor.create_for_node = lambda node_id: mock_executor
 
-        async def fake_execute(node: TaskNode, context: str = "") -> StepResult:
+        async def fake_execute(node: TaskNode, context: str = "", **kwargs) -> StepResult:
             results = {
                 "act_check": StepResult(
                     step_id="act_check", success=True,
@@ -755,7 +755,7 @@ class TestAdaptivePlanningIntegration:
 
         call_count = 0
 
-        async def fake_execute(node: TaskNode, context: str = "") -> StepResult:
+        async def fake_execute(node: TaskNode, context: str = "", **kwargs) -> StepResult:
             nonlocal call_count
             call_count += 1
             return StepResult(step_id=node.id, success=True, output=f"Result of {node.id}")
@@ -864,14 +864,13 @@ class TestBugFixesVerification:
 
     def test_tool_error_detection_exists(self):
         """
-        验证 Critical #2 修复：ReActEngine 中存在 Error 字符串检测逻辑。
-        v12: legacy _react_loop 已移除，ExecutorAgent 现委托给 ReActEngine。
+        验证 Critical #2 修复：工具执行逻辑中存在 Error 处理。
+        Batch 4.3: error_prefix 通过 ToolExecutionPolicy 配置，默认值为 [TOOL ERROR]。
         """
-        import inspect
-        from react.engine import ReActEngine
+        from react.engine_helpers import ToolExecutionPolicy
 
-        source = inspect.getsource(ReActEngine)
-        assert "[TOOL ERROR]" in source, "ReActEngine 应包含 [TOOL ERROR] 标记"
+        policy = ToolExecutionPolicy.default()
+        assert policy.error_prefix == "[TOOL ERROR]"
 
     # ------------------------------------------------------------------
     # Critical #3: v5 状态机不闭合
@@ -1077,7 +1076,7 @@ class TestBugFixVerification2026:
         mock_executor = AsyncMock()
         mock_executor.create_for_node = lambda node_id: mock_executor
 
-        async def fake_execute(node, context=""):
+        async def fake_execute(node, context="", **kwargs):
             if node.id == "a":
                 raise RuntimeError("Simulated unexpected crash")
             return StepResult(step_id=node.id, success=True, output=f"Result of {node.id}")
@@ -1173,7 +1172,7 @@ class TestBugFixVerification2026:
         mock_executor = AsyncMock()
         mock_executor.create_for_node = lambda node_id: mock_executor
 
-        async def fake_execute(node, context=""):
+        async def fake_execute(node, context="", **kwargs):
             if node.id == "act_risky":
                 return StepResult(step_id="act_risky", success=False, output="Failed")
             return StepResult(step_id="act_cleanup", success=True, output="Cleaned")

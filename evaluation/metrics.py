@@ -334,6 +334,10 @@ class AggregatedMetrics(BaseModel):
     # v8 LLM Judge usage
     judge_override_count: int = 0               # LLM judge 覆盖关键词失败的次数
 
+    # v14.6.5 Reliability metrics
+    resume_success_rate: float = 0.0            # Resume 任务恢复成功率
+    checkpoint_avg_count: float = 0.0           # Resume 任务平均 checkpoint 数
+
     # Raw results for drill-down
     results: list[TaskEvaluationResult] = Field(default_factory=list)
 
@@ -648,5 +652,11 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
         avg_pass_at_k=avg_pk,
         pass_at_k_std=pk_std,
         judge_override_count=judge_overrides,
+        # v14.6.5: resume reliability metrics
+        resume_success_rate=(
+            sum(1 for r in results if r.execution.task_success) / len(resume_results)
+            if (resume_results := [r for r in results if r.task_id.startswith("resume_")])
+            else 0.0
+        ),
         results=results,
     )

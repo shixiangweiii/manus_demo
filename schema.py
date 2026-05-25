@@ -27,6 +27,28 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+
+# ======================================================================
+# Reasoning Effort (v14 Phase 4)
+# 推理力度（v14 Phase 4 新增）
+# ======================================================================
+
+class ReasoningEffort(str, Enum):
+    """Controls how much reasoning/iteration budget to allocate per task.
+    控制每个任务分配多少推理/迭代预算。"""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class TaskRunState(str, Enum):
+    """Task run lifecycle states for checkpoint/resume (v14.5).
+    任务运行生命周期状态，用于 checkpoint/resume。"""
+    RUNNING = "running"
+    PAUSED_WAITING_USER = "paused_waiting_user"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
 # ======================================================================
 # Legacy models (kept for backward compatibility / reference)
 # 旧版模型（保留用于向后兼容 / 学习对比）

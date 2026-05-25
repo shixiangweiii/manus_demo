@@ -46,7 +46,7 @@ MAX_ATTRIBUTE_LENGTH: int = root_config.TRACING_MAX_ATTRIBUTE_LENGTH
 # --- Derived Settings ---
 # --- 派生设置 ---
 
-SERVICE_VERSION: str = "13.0.0"
+SERVICE_VERSION: str = root_config.VERSION.lstrip("v")
 """Current service version, embedded in Resource.
 当前服务版本，嵌入到 Resource 中。Bump alongside CLAUDE.md project version."""
 

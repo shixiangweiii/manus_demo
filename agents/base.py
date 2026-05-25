@@ -100,7 +100,7 @@ class BaseAgent:
 
         # 超 Token 时压缩旧消息
         self._messages = await self.context_manager.compress_if_needed(
-            self._messages, self.llm_client
+            self._messages, self.llm_client, caller_tag=self.name
         )
 
         kwargs.setdefault("caller_tag", self.name)
@@ -120,7 +120,7 @@ class BaseAgent:
         self.add_message("user", user_input)
 
         self._messages = await self.context_manager.compress_if_needed(
-            self._messages, self.llm_client
+            self._messages, self.llm_client, caller_tag=self.name
         )
 
         kwargs.setdefault("caller_tag", self.name)
@@ -147,7 +147,7 @@ class BaseAgent:
         self.add_message("user", user_input)
 
         self._messages = await self.context_manager.compress_if_needed(
-            self._messages, self.llm_client
+            self._messages, self.llm_client, caller_tag=self.name
         )
 
         kwargs.setdefault("caller_tag", self.name)

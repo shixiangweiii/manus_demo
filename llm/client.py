@@ -20,7 +20,7 @@ import logging
 import re
 from typing import Any
 
-from openai import AsyncOpenAI, RateLimitError, APIError, APITimeoutError
+from openai import AsyncOpenAI, RateLimitError, APIError, APITimeoutError, BadRequestError
 
 import config
 from schema import LLMCallRecord
@@ -29,6 +29,24 @@ from tracing.spans import AttrKey
 logger = logging.getLogger(__name__)
 
 RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIError)
+
+# Internal message keys that must NOT be sent to the OpenAI-compatible API.
+# These are annotation fields used by engines/tracing/context internally.
+_INTERNAL_MESSAGE_KEYS = frozenset({"thinking_content"})
+
+
+def _sanitize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip internal-only keys from messages before sending to the API provider.
+
+    Returns a new list; the original messages list is not modified.
+    Internal fields like thinking_content are kept in the engine's local
+    transcript for tracing/context purposes but must not leak into the
+    OpenAI chat.completions.create() payload.
+    """
+    return [
+        {k: v for k, v in msg.items() if k not in _INTERNAL_MESSAGE_KEYS}
+        for msg in messages
+    ]
 
 
 def _extract_thinking_content(content: str | None) -> str:
@@ -134,12 +152,13 @@ class LLMClient:
             "chat", messages, temperature, max_tokens, caller_tag=caller_tag,
         )
         last_error: Exception | None = None
+        api_messages = _sanitize_messages_for_api(messages)
         try:
             for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
                 try:
                     resp = await self._client.chat.completions.create(
                         model=self.model,
-                        messages=messages,
+                        messages=api_messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         **kwargs,
@@ -195,12 +214,13 @@ class LLMClient:
             "chat_with_tools", messages, temperature, max_tokens, caller_tag=caller_tag,
         )
         last_error: Exception | None = None
+        api_messages = _sanitize_messages_for_api(messages)
         try:
             for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
                 try:
                     resp = await self._client.chat.completions.create(
                         model=self.model,
-                        messages=messages,
+                        messages=api_messages,
                         tools=tools,
                         tool_choice="auto",
                         temperature=temperature,
@@ -257,12 +277,13 @@ class LLMClient:
             "chat_json", messages, temperature, max_tokens, caller_tag=caller_tag,
         )
         response_data: dict[str, Any] | None = None
+        api_messages = _sanitize_messages_for_api(messages)
         try:
             try:
                 # 优先使用 JSON mode（强制 LLM 输出合法 JSON）
                 resp = await self._client.chat.completions.create(
                     model=self.model,
-                    messages=messages,
+                    messages=api_messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format={"type": "json_object"},  # OpenAI JSON mode
@@ -273,9 +294,12 @@ class LLMClient:
                 text = resp.choices[0].message.content or "{}"
                 logger.debug("[chat_json] Raw response: %.500s", text)
                 response_data = self._extract_response_data(resp, "chat_json")
-            except Exception:
+            except BadRequestError as exc:
+                # Only fall back when the error is specifically about response_format
+                if "response_format" not in str(exc).lower():
+                    raise
                 # 部分模型/服务不支持 response_format，降级为普通文本模式
-                logger.warning("JSON mode not supported, falling back to plain text")
+                logger.warning("JSON mode not supported, falling back to plain text: %s", exc)
                 text = await self.chat(
                     messages,
                     temperature=temperature,

@@ -46,6 +46,7 @@ from schema import (
     NodeType,
     Plan,
     PlanAdaptation,
+    ReasoningEffort,
     RiskAssessment,
     Step,
     StepResult,
@@ -115,6 +116,9 @@ def _build_simple_planner_prompt() -> str:
         _SIMPLE_PLANNER_BASE_PROMPT,
         inject_context=True,
         inject_subagent_guidance=False,
+        inject_location_guidance=False,
+        inject_search_guidance=False,
+        inject_hitl_guidance=False,
     )
 
 _PLANNER_BASE_PROMPT = """\
@@ -254,6 +258,9 @@ def _build_planner_prompt() -> str:
         _PLANNER_BASE_PROMPT,
         inject_context=True,
         inject_subagent_guidance=False,
+        inject_location_guidance=False,
+        inject_search_guidance=False,
+        inject_hitl_guidance=False,
     )
 
 
@@ -325,33 +332,62 @@ class PlannerAgent(BaseAgent):
     # 任务复杂度分类（v4 —— 两阶段混合分类器）
     # ==================================================================
 
-    async def classify_task(self, task: str) -> str:
+    async def classify_task(self, task: str) -> tuple[str, ReasoningEffort]:
         """
-        Determine whether a task is 'simple', 'complex', or 'emergent'.
-        判断任务是"简单"、"复杂"还是"涌现型"。
+        Determine whether a task is 'simple', 'complex', or 'emergent',
+        along with a reasoning effort level.
+        判断任务是"简单"、"复杂"还是"涌现型"，并返回推理力度。
 
         Routing logic:
           0. config.PLAN_MODE override (for testing/debugging)
           1. Stage 1: rule-based fast filter -> simple / complex / emergent / ambiguous
           2. Stage 2: lightweight LLM call (only if Stage 1 returns ambiguous)
 
-        路由逻辑：
-          0. config.PLAN_MODE 强制覆盖（用于测试/调试）
-          1. Stage 1：规则快筛 -> simple / complex / emergent / ambiguous
-          2. Stage 2：轻量 LLM 调用（仅当 Stage 1 返回 ambiguous 时触发）
-
         Returns:
-            "simple", "complex", or "emergent"
+            (complexity, effort) where complexity is "simple"/"complex"/"emergent"
+            and effort is ReasoningEffort.LOW/MEDIUM/HIGH.
         """
+        # Config override for effort level
+        effort_override = self._resolve_effort_override()
+        if effort_override is not None:
+            # Force effort, still need complexity
+            complexity = await self._classify_complexity(task)
+            return complexity, effort_override
+
+        complexity = await self._classify_complexity(task)
+        effort = self._effort_for_complexity(complexity, task)
+        return complexity, effort
+
+    def _resolve_effort_override(self) -> ReasoningEffort | None:
+        """Return forced effort from config.REASONING_EFFORT, or None for auto."""
+        effort_str = config.REASONING_EFFORT
+        if effort_str == "auto":
+            return None
+        mapping = {
+            "low": ReasoningEffort.LOW,
+            "medium": ReasoningEffort.MEDIUM,
+            "high": ReasoningEffort.HIGH,
+        }
+        return mapping.get(effort_str)
+
+    def _effort_for_complexity(self, complexity: str, task: str) -> ReasoningEffort:
+        """Map complexity + rule score to effort."""
+        if complexity == "emergent":
+            return ReasoningEffort.HIGH
+        if complexity == "simple":
+            return ReasoningEffort.LOW
+        # complex → MEDIUM by default
+        return ReasoningEffort.MEDIUM
+
+    async def _classify_complexity(self, task: str) -> str:
+        """Classify task complexity only (without effort)."""
         if config.PLAN_MODE in ("simple", "complex", "emergent"):
             logger.info("[Planner] PLAN_MODE override: %s", config.PLAN_MODE)
-            # 若强制 emergent 但开关关闭，降级到 complex
             if config.PLAN_MODE == "emergent" and not config.EMERGENT_PLANNING_ENABLED:
                 logger.warning("[Planner] PLAN_MODE=emergent but EMERGENT_PLANNING_ENABLED=false, downgrading to complex")
                 return "complex"
             return config.PLAN_MODE
 
-        # Emergent 禁用开关拦截：降级探索性分类到 complex
         if not config.EMERGENT_PLANNING_ENABLED:
             rule_result = self._rule_classify(task)
             if rule_result == "emergent":

@@ -339,6 +339,74 @@ def export_json(
     logger.info("[Report] Results exported to %s", output_path)
 
 
+def render_tag_matrix(
+    metrics_by_mode: dict[PlanMode, AggregatedMetrics],
+) -> None:
+    """
+    Render success rate broken down by tag × mode.
+    渲染标签 × 模式的成功率矩阵。
+    """
+    from collections import defaultdict
+
+    from evaluation.benchmark import get_benchmark_tasks
+
+    # Build task_id → tags lookup
+    all_bench_tasks = get_benchmark_tasks()
+    task_tags_map: dict[str, list[str]] = {t.task_id: t.tags for t in all_bench_tasks}
+
+    # Collect all tags that appear in results
+    tag_set: set[str] = set()
+    for metrics in metrics_by_mode.values():
+        for r in metrics.results:
+            tags = task_tags_map.get(r.task_id, [])
+            tag_set.update(tags)
+
+    if not tag_set:
+        return
+
+    modes = sorted(metrics_by_mode.keys(), key=lambda m: m.value)
+    sorted_tags = sorted(tag_set)
+
+    # Compute success counts per (tag, mode)
+    tag_stats: dict[str, dict[PlanMode, tuple[int, int]]] = {
+        tag: {m: (0, 0) for m in modes} for tag in sorted_tags
+    }
+    for mode in modes:
+        for r in metrics_by_mode[mode].results:
+            tags = task_tags_map.get(r.task_id, [])
+            for tag in tags:
+                if tag in tag_stats:
+                    succ, total = tag_stats[tag][mode]
+                    tag_stats[tag][mode] = (succ + (1 if r.execution.task_success else 0), total + 1)
+
+    table = Table(
+        title="Success Rate by Tag × Mode / 标签×模式成功率矩阵",
+        border_style="magenta",
+        show_lines=True,
+    )
+    table.add_column("Tag / 标签", style="bold white", width=25)
+    for mode in modes:
+        table.add_column(mode.value.upper(), justify="center", width=15)
+
+    for tag in sorted_tags:
+        row = [tag]
+        for mode in modes:
+            succ, total = tag_stats[tag][mode]
+            if total > 0:
+                sr = succ / total
+                cell = f"{sr:.0%} ({succ}/{total})"
+                if sr >= 0.8:
+                    cell = f"[green]{cell}[/green]"
+                elif sr < 0.5:
+                    cell = f"[red]{cell}[/red]"
+            else:
+                cell = "-"
+            row.append(cell)
+        table.add_row(*row)
+
+    console.print(table)
+
+
 def render_full_report(
     metrics_by_mode: dict[PlanMode, AggregatedMetrics],
     output_json: str | None = None,
@@ -365,6 +433,9 @@ def render_full_report(
 
     # Summary tree
     render_summary_tree(metrics_by_mode)
+
+    # Tag × Mode matrix
+    render_tag_matrix(metrics_by_mode)
 
     # JSON export
     if output_json:

@@ -55,6 +55,7 @@ from schema import (
     GoalReanchorResult,
     Milestone,
     MilestonePlan,
+    ReasoningEffort,
     StepResult,
     TodoItem,
     TodoList,
@@ -65,11 +66,7 @@ from tools.base import BaseTool
 from tools.router import ToolRouter
 
 from agents.prompt_utils import build_convergence_hint, build_system_prompt
-from react.tool_call_helpers import (
-    attribute_caller,
-    classify_result,
-    truncate_for_llm,
-)
+from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -262,13 +259,21 @@ class GoalDrivenPlannerAgent(BaseAgent):
         self._goal_doc: GoalDocument | None = None
         self._todo_list: TodoList | None = None
         self._reanchor_counter: int = 0
+        self._current_effort: ReasoningEffort = ReasoningEffort.MEDIUM
 
     # ------------------------------------------------------------------
     # Main entry point
     # 主入口
     # ------------------------------------------------------------------
 
-    async def execute(self, task: str, context: str = "") -> str:
+    async def execute(
+        self,
+        task: str,
+        context: str = "",
+        *,
+        effort: ReasoningEffort | None = None,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
         """
         Goal-driven planning and execution.
         目标驱动规划与执行。
@@ -284,6 +289,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
         self._reanchor_counter = 0
         self._goal_doc = None
         self._todo_list = None
+        self._current_effort = effort or ReasoningEffort.MEDIUM
 
         logger.info("[GoalDrivenPlanner] Starting execution: %s", task[:100])
         self._emit("phase", "Building goal document...")
@@ -305,12 +311,62 @@ class GoalDrivenPlannerAgent(BaseAgent):
         })
 
         # Phase 4: Goal-Guided Execution Loop
-        all_results: list[StepResult] = []
-        iteration = 0
-        last_reflection: GoalReflection | None = None
-        completed_count_at_last_check = 0
-        stagnation_rounds = 0
+        return await self._run_goal_driven_loop(
+            task=task,
+            goal_doc=goal_doc,
+            iteration=0,
+            all_results=[],
+            last_reflection=None,
+            completed_count_at_last_check=0,
+            stagnation_rounds=0,
+            on_checkpoint=on_checkpoint,
+        )
 
+    async def resume_execute(
+        self,
+        task: str,
+        context: str,
+        effort: ReasoningEffort,
+        goal_doc: GoalDocument,
+        todo_list: TodoList,
+        all_results: list[StepResult],
+        iteration: int,
+        stagnation_state: dict,
+        last_reflection: GoalReflection | None = None,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
+        """Resume goal-driven planning from a restored state (v14.5).
+        从恢复的状态继续目标驱动规划。"""
+        self._current_effort = effort
+        self._goal_doc = goal_doc
+        self._todo_list = todo_list
+        completed_count_at_last_check = stagnation_state.get("prev_completed", 0)
+        stagnation_rounds = stagnation_state.get("stagnation_rounds", 0)
+
+        return await self._run_goal_driven_loop(
+            task=task,
+            goal_doc=goal_doc,
+            iteration=iteration,
+            all_results=all_results,
+            last_reflection=last_reflection,
+            completed_count_at_last_check=completed_count_at_last_check,
+            stagnation_rounds=stagnation_rounds,
+            on_checkpoint=on_checkpoint,
+        )
+
+    async def _run_goal_driven_loop(
+        self,
+        task: str,
+        goal_doc: GoalDocument,
+        iteration: int,
+        all_results: list[StepResult],
+        last_reflection: GoalReflection | None,
+        completed_count_at_last_check: int,
+        stagnation_rounds: int,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
+        """Core goal-driven execution loop, shared by execute() and resume_execute().
+        核心目标驱动执行循环，execute() 和 resume_execute() 共享。"""
         while self._todo_list.has_pending() and iteration < self.max_outer_iterations:
             iteration += 1
 
@@ -402,6 +458,16 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 self.reset()
                 await self._refresh_todo_list(goal_doc, self._todo_list, result)
 
+            self._emit_checkpoint(
+                on_checkpoint,
+                goal_doc=goal_doc,
+                all_results=all_results,
+                iteration=iteration,
+                last_reflection=last_reflection,
+                completed_count_at_last_check=completed_count_at_last_check,
+                stagnation_rounds=stagnation_rounds,
+            )
+
         # Phase 5: Compile answer against goal
         self._emit("phase", "Compiling final answer against goal...")
         final = await self._compile_goal_anchored_answer(task, goal_doc, all_results)
@@ -412,6 +478,43 @@ class GoalDrivenPlannerAgent(BaseAgent):
     # Goal Document Building
     # 目标文档构建
     # ------------------------------------------------------------------
+
+    def _emit_checkpoint(
+        self,
+        on_checkpoint: Callable[[dict[str, Any]], None] | None,
+        *,
+        goal_doc: GoalDocument,
+        all_results: list[StepResult],
+        iteration: int,
+        last_reflection: GoalReflection | None,
+        completed_count_at_last_check: int,
+        stagnation_rounds: int,
+    ) -> None:
+        """Emit a resume-safe checkpoint payload after a TODO boundary."""
+        if on_checkpoint is None or self._todo_list is None:
+            return
+        current_completed = sum(
+            1 for todo in self._todo_list.todos.values()
+            if todo.status == TodoStatus.COMPLETED
+        )
+        on_checkpoint({
+            "boundary": "after_todo",
+            "committed_ids": [
+                str(todo.id)
+                for todo in self._todo_list.todos.values()
+                if todo.status == TodoStatus.COMPLETED
+            ],
+            "todo_list": self._todo_list.model_dump(),
+            "all_results": [result.model_dump() for result in all_results],
+            "iteration": iteration,
+            "stagnation_state": {
+                "prev_completed": current_completed,
+                "stagnation_rounds": stagnation_rounds,
+            },
+            "goal_doc": goal_doc.model_dump(),
+            "last_reflection": last_reflection.model_dump() if last_reflection else None,
+            "reanchor_counter": self._reanchor_counter,
+        })
 
     async def _build_goal_document(self, task: str, context: str = "") -> GoalDocument:
         """Ask the LLM to define what "done" looks like for this task."""
@@ -669,7 +772,9 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 response_msg = await self.llm_client.chat_with_tools(
                     messages,
                     tools=self.tool_schemas,
-                    temperature=0.5,
+                    temperature=0.3 if self._current_effort == ReasoningEffort.LOW
+                    else 0.7 if self._current_effort == ReasoningEffort.HIGH
+                    else config_module.REACT_TEMPERATURE,
                     caller_tag="GoalDrivenPlanner",
                 )
             except Exception as exc:
@@ -709,77 +814,18 @@ class GoalDrivenPlannerAgent(BaseAgent):
                     tool_calls_log=tool_calls_log,
                 )
 
-            # Execute tool calls in parallel via asyncio.gather (Wave-1 N2).
-            # Behavior mirrors react.engine.ReActEngine:
-            #   - attribute_caller(...) before traced_execute (H1)
-            #   - classify_result(...) for three-state semantics (H2)
-            #   - truncate_for_llm(...) so the LLM also sees a bounded payload (H3)
-            # Tool messages are written in original order to preserve
-            # assistant.tool_calls ↔ tool message alignment (OpenAI protocol).
-            # 通过 asyncio.gather 并行执行工具调用,行为与 ReActEngine 对齐。
-            async def _exec_one(tc) -> tuple[Any, str, dict, str, bool, bool]:
-                fn_name = tc.function.name
-                try:
-                    fn_args = json.loads(tc.function.arguments)
-                except (json.JSONDecodeError, TypeError):
-                    fn_args = {}
-                logger.info("[GoalDrivenPlanner] Tool call: %s(%s)", fn_name, fn_args)
-                t = self.tools.get(fn_name)
-                if t is None:
-                    res = f"Error: Unknown tool '{fn_name}'"
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                attribute_caller(t, "GoalDrivenPlanner")
-                try:
-                    res = await t.traced_execute(**fn_args)
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                except Exception as exc:
-                    res = f"Error: Tool execution error: {exc}"
-                    is_err, rl = classify_result(None, exc)
-                    return tc, fn_name, fn_args, res, is_err, rl
-
-            executions = await asyncio.gather(
-                *(_exec_one(tc) for tc in response_msg.tool_calls)
+            # Batch 4.1 DRY: shared execute_tool_calls replaces inline block.
+            tool_messages = await execute_tool_calls(
+                response_msg.tool_calls,
+                self.tools,
+                self.tool_router,
+                node_id=step_id,
+                agent_name=self.name,
+                truncation_limit=config_module.TOOL_RESULT_TRUNCATION_LIMIT,
+                tool_calls_log=tool_calls_log,
+                log_prefix="GoalDrivenPlanner",
+                policy=ToolExecutionPolicy.for_effort(self._current_effort),
             )
-
-            tool_messages: list[dict[str, Any]] = []
-            truncation_limit = config_module.TOOL_RESULT_TRUNCATION_LIMIT
-
-            for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
-                if is_rate_limited:
-                    self.tool_router.record_rate_limited(step_id, func_name)
-                elif is_error:
-                    self.tool_router.record_failure(step_id, func_name)
-                else:
-                    self.tool_router.record_success(step_id, func_name)
-
-                record_result, llm_result = truncate_for_llm(
-                    result, truncation_limit, is_error,
-                )
-
-                tool_calls_log.append(ToolCallRecord(
-                    tool_name=func_name,
-                    parameters=func_args,
-                    result=record_result,
-                ))
-
-                if is_error:
-                    result_with_marker = (
-                        f"[TOOL ERROR] {llm_result}\n\n"
-                        "IMPORTANT: The tool returned an error. Please analyze "
-                        "the error and decide whether to retry with different "
-                        "parameters or report the failure."
-                    )
-                else:
-                    result_with_marker = llm_result
-
-                tool_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_with_marker,
-                })
-
             messages.extend(tool_messages)
 
         # Max iterations reached

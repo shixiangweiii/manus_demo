@@ -24,7 +24,7 @@ import config as config_module
 from agents.base import BaseAgent
 from context.manager import ContextManager
 from llm.client import LLMClient
-from schema import Step, StepResult, TaskNode
+from schema import ReasoningEffort, Step, StepResult, TaskNode
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -150,7 +150,7 @@ class ExecutorAgent(BaseAgent):
     # DAG 执行入口（v2 新增）
     # ------------------------------------------------------------------
 
-    async def execute_node(self, node: TaskNode, context: str = "") -> StepResult:
+    async def execute_node(self, node: TaskNode, context: str = "", *, effort: ReasoningEffort | None = None) -> StepResult:
         """
         Execute a single DAG TaskNode via the unified ReActEngine.
         通过统一 ReActEngine 执行单个 DAG TaskNode。
@@ -168,6 +168,7 @@ class ExecutorAgent(BaseAgent):
             context=context,
             node_id=node.id,
             system_hint=self.system_prompt,
+            effort=effort,
         )
 
     # ------------------------------------------------------------------
@@ -175,7 +176,7 @@ class ExecutorAgent(BaseAgent):
     # v1 入口（扁平计划）
     # ------------------------------------------------------------------
 
-    async def execute_step(self, step: Step, context: str = "") -> StepResult:
+    async def execute_step(self, step: Step, context: str = "", *, effort: ReasoningEffort | None = None) -> StepResult:
         """
         Execute a single plan step via the unified ReActEngine.
         通过统一 ReActEngine 执行单个计划步骤。
@@ -187,4 +188,5 @@ class ExecutorAgent(BaseAgent):
             context=context,
             node_id=str(step.id),
             system_hint=self.system_prompt,
+            effort=effort,
         )

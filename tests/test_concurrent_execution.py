@@ -131,8 +131,8 @@ async def test_medium_parallelism():
     result = await executor.execute(dag)
     
     completed_count = sum(1 for n in dag.nodes.values() if n.status == NodeStatus.COMPLETED)
-    assert completed_count == 12, f"期望 12 个节点完成，实际 {completed_count}"
-    
+    assert completed_count == 13, f"期望 13 个节点完成（1 goal + 2 subgoal + 10 action），实际 {completed_count}"
+
     print(f"✓ 中等并发测试通过：{completed_count} 个节点全部完成")
     return True
 

@@ -126,12 +126,11 @@ class ShellTool(BaseTool):
                 return match.group(0)
         return None
 
-    @staticmethod
-    async def _run_shell(command: str, timeout: float) -> str:
+    async def _run_shell(self, command: str, timeout: float) -> str:
         result = await run_with_limits(
             cmd=["bash", "-c", command],
             timeout=timeout,
-            cwd=config.SANDBOX_DIR,
+            cwd=self._workdir,
             env=build_safe_env(),
             max_output_bytes=config.SUBPROCESS_MAX_OUTPUT_BYTES,
         )
@@ -147,5 +146,5 @@ class ShellTool(BaseTool):
         if not output_parts:
             output_parts.append("Command executed successfully (no output).")
 
-        output_parts.append(f"[Working directory: {config.SANDBOX_DIR}]")
+        output_parts.append(f"[Working directory: {self._workdir}]")
         return "\n".join(output_parts)

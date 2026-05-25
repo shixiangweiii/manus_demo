@@ -93,7 +93,13 @@ class ReflectorAgent(BaseAgent):
     """
 
     def __init__(self, llm_client: LLMClient, context_manager: ContextManager | None = None):
-        system_prompt = build_system_prompt(REFLECTOR_SYSTEM_PROMPT)
+        system_prompt = build_system_prompt(
+            REFLECTOR_SYSTEM_PROMPT,
+            inject_location_guidance=False,
+            inject_search_guidance=False,
+            inject_subagent_guidance=False,
+            inject_hitl_guidance=False,
+        )
         super().__init__(
             name="Reflector",
             system_prompt=system_prompt,

@@ -24,7 +24,8 @@ from typing import Any, Callable
 import config
 from llm.client import _extract_thinking_content, _strip_thinking_from_content
 from react.engine import ReActEngine
-from schema import StepResult, ToolCallRecord
+from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
+from schema import ReasoningEffort, StepResult, ToolCallRecord
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,20 @@ class ReasoningEngine(ReActEngine):
     - Iteration counting: pure thinking rounds don't increment iteration
     - Message construction: separates thinking from response in assistant_msg
     - Thinking budget: tracks cumulative reasoning_tokens against MAX_THINKING_TOKENS
+    - Temperature: MEDIUM uses REASONING_TEMPERATURE instead of REACT_TEMPERATURE
     """
 
     def __init__(self, *args: Any, max_thinking_tokens: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.max_thinking_tokens = max_thinking_tokens or config.MAX_THINKING_TOKENS
+
+    def _apply_effort(self, effort: ReasoningEffort) -> tuple[float, int]:
+        """Override: MEDIUM uses REASONING_TEMPERATURE instead of REACT_TEMPERATURE."""
+        if effort == ReasoningEffort.LOW:
+            return 0.3, max(3, self.max_iterations // 2)
+        elif effort == ReasoningEffort.HIGH:
+            return 0.7, self.max_iterations
+        return config.REASONING_TEMPERATURE, self.max_iterations
 
     async def execute(
         self,
@@ -51,6 +61,7 @@ class ReasoningEngine(ReActEngine):
         node_id: str | None = None,
         system_hint: str = "",
         on_iteration: Callable[[int, list[ToolCallRecord]], None] | None = None,
+        effort: ReasoningEffort | None = None,
     ) -> StepResult:
         """Execute a single task with reasoning-model-aware iteration counting.
 
@@ -61,6 +72,14 @@ class ReasoningEngine(ReActEngine):
         - Cumulative thinking tokens are tracked against MAX_THINKING_TOKENS
         """
         step_id = node_id or "default"
+        effective_effort = effort or ReasoningEffort.MEDIUM
+        effective_temp, effective_max_iter = self._apply_effort(effective_effort)
+        effective_policy = ToolExecutionPolicy.for_effort(effective_effort)
+
+        # ReasoningEngine: LOW effort caps thinking budget
+        effective_thinking_budget = self.max_thinking_tokens
+        if effective_effort == ReasoningEffort.LOW:
+            effective_thinking_budget = min(self.max_thinking_tokens, 2000)
 
         if context:
             prompt = f"{prompt}\n\nContext from previous steps:\n{context}"
@@ -69,13 +88,14 @@ class ReasoningEngine(ReActEngine):
         self._current_log = tool_calls_log
         iteration = 0
         total_thinking_tokens = 0
+        thinking_rounds = 0
         messages: list[dict[str, Any]] = []
         if system_hint:
             messages.append({"role": "system", "content": system_hint})
 
         logger.info("[ReasoningEngine] Starting execution for %s: %s", step_id, prompt[:100])
 
-        while iteration < self.max_iterations:
+        while iteration < effective_max_iter:
             try:
                 continue_msg = "Continue executing based on the tool results above."
                 router_hint = self.tool_router.get_hint(str(step_id))
@@ -102,7 +122,7 @@ class ReasoningEngine(ReActEngine):
 
                 if self.context_manager is not None:
                     messages = await self.context_manager.compress_if_needed(
-                        messages, self.llm_client
+                        messages, self.llm_client, caller_tag=self.agent_name or "ReasoningEngine"
                     )
 
                 records_before = len(self.llm_client.get_call_records())
@@ -110,7 +130,7 @@ class ReasoningEngine(ReActEngine):
                 response_msg = await self.llm_client.chat_with_tools(
                     messages,
                     tools=self.tool_schemas,
-                    temperature=config.REASONING_TEMPERATURE,
+                    temperature=effective_temp,
                     caller_tag=self.agent_name or "ReasoningEngine",
                 )
 
@@ -160,12 +180,36 @@ class ReasoningEngine(ReActEngine):
             has_tool_calls = bool(response_msg.tool_calls)
             has_final_answer = bool(response_text.strip())
 
+            # Budget guard: applies to ALL branches, not just pure-thinking
+            budget_exceeded = total_thinking_tokens > effective_thinking_budget
+            if budget_exceeded:
+                logger.warning("[ReasoningEngine] Thinking budget exceeded (%d > %d) on %s branch",
+                               total_thinking_tokens, effective_thinking_budget,
+                               "tool-call" if has_tool_calls else "final-answer" if has_final_answer else "thinking")
+
             if has_tool_calls:
+                # Tool call breaks the consecutive thinking streak
+                thinking_rounds = 0
                 # Tool calls always count as an iteration
                 iteration += 1
-                logger.debug("[ReasoningEngine] Iteration %d/%d (tool calls)", iteration, self.max_iterations)
+                if budget_exceeded:
+                    # Budget exceeded: skip tool execution, force model to summarize
+                    logger.warning("[ReasoningEngine] Budget exceeded on tool-call round, skipping tool execution")
+                    tool_summary = ", ".join(tc.tool_name for tc in tool_calls_log) if tool_calls_log else "none"
+                    return StepResult(
+                        step_id=step_id,
+                        success=False,
+                        output=f"Thinking budget exceeded ({total_thinking_tokens} > {effective_thinking_budget} tokens) "
+                               f"during tool-call round. Tools executed so far: [{tool_summary}].",
+                        tool_calls_log=tool_calls_log,
+                        iterations_completed=iteration,
+                    )
+                logger.debug("[ReasoningEngine] Iteration %d/%d (tool calls)", iteration, effective_max_iter)
             elif has_final_answer:
+                # Final answer breaks the consecutive thinking streak
+                thinking_rounds = 0
                 # Final answer — count as an iteration and return
+                # Allow return even if budget exceeded (final answer is valuable data)
                 iteration += 1
                 logger.info("[ReasoningEngine] Completed in %d iterations (thinking tokens: %d)", iteration, total_thinking_tokens)
                 if on_iteration:
@@ -179,11 +223,27 @@ class ReasoningEngine(ReActEngine):
                 )
             else:
                 # Pure thinking round — don't increment iteration
-                logger.debug("[ReasoningEngine] Thinking round (total thinking tokens: %d/%d)", total_thinking_tokens, self.max_thinking_tokens)
+                thinking_rounds += 1
+                logger.debug("[ReasoningEngine] Thinking round %d/%d (tokens: %d/%d)", thinking_rounds, config.MAX_THINKING_ROUNDS, total_thinking_tokens, effective_thinking_budget)
 
-                # Check thinking budget
-                if total_thinking_tokens > self.max_thinking_tokens:
-                    logger.warning("[ReasoningEngine] Thinking budget exceeded (%d > %d), forcing iteration count", total_thinking_tokens, self.max_thinking_tokens)
+                # Hard stop: consecutive thinking rounds cap (independent of token tracking)
+                if thinking_rounds > config.MAX_THINKING_ROUNDS:
+                    logger.warning("[ReasoningEngine] Max thinking rounds exceeded (%d > %d), forcing exit", thinking_rounds, config.MAX_THINKING_ROUNDS)
+                    iteration += 1
+                    if on_iteration:
+                        on_iteration(iteration, tool_calls_log)
+                    return StepResult(
+                        step_id=step_id,
+                        success=False,
+                        output=f"Max consecutive thinking rounds exceeded ({thinking_rounds} > {config.MAX_THINKING_ROUNDS}). "
+                               f"Tools executed: [{', '.join(tc.tool_name for tc in tool_calls_log) if tool_calls_log else 'none'}].",
+                        tool_calls_log=tool_calls_log,
+                        iterations_completed=iteration,
+                    )
+
+                # Check thinking budget (second guard, depends on token tracking)
+                if total_thinking_tokens > effective_thinking_budget:
+                    logger.warning("[ReasoningEngine] Thinking budget exceeded (%d > %d), forcing iteration count", total_thinking_tokens, effective_thinking_budget)
                     iteration += 1
                     if on_iteration:
                         on_iteration(iteration, tool_calls_log)
@@ -191,7 +251,7 @@ class ReasoningEngine(ReActEngine):
                     partial_response = response_text.strip()[:200] if response_text else "(empty)"
                     output = (
                         f"Thinking budget exceeded ({total_thinking_tokens} > "
-                        f"{self.max_thinking_tokens} tokens). "
+                        f"{effective_thinking_budget} tokens). "
                         f"Tools executed: [{tool_summary}]. "
                         f"Last partial response: {partial_response}"
                     )
@@ -205,84 +265,28 @@ class ReasoningEngine(ReActEngine):
                 # Continue to next LLM call without incrementing iteration
                 continue
 
-            # --- Tool execution (same logic as ReActEngine) ---
-            import asyncio
-            import json
-            from react.tool_call_helpers import attribute_caller, classify_result, truncate_for_llm
-
-            async def _exec_one(tc: Any) -> tuple[Any, str, dict, str, bool, bool]:
-                fn_name = tc.function.name
-                try:
-                    fn_args = json.loads(tc.function.arguments)
-                except (json.JSONDecodeError, TypeError):
-                    fn_args = {}
-                logger.info("[ReasoningEngine] Tool call: %s(%s)", fn_name, fn_args)
-                t = self.tools.get(fn_name)
-                if t is None:
-                    res = f"Error: Unknown tool '{fn_name}'"
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                attribute_caller(t, self.agent_name)
-                try:
-                    res = await t.traced_execute(**fn_args)
-                    is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-                except Exception as exc:
-                    res = f"Error: Tool execution error: {exc}"
-                    is_err, rl = classify_result(None, exc)
-                    return tc, fn_name, fn_args, res, is_err, rl
-
-            executions = await asyncio.gather(
-                *(_exec_one(tc) for tc in response_msg.tool_calls)
+            # --- Tool execution (same logic as ReActEngine, Batch 4.1 DRY) ---
+            tool_messages = await execute_tool_calls(
+                response_msg.tool_calls,
+                self.tools,
+                self.tool_router,
+                node_id=str(step_id),
+                agent_name=self.agent_name,
+                truncation_limit=effective_policy.truncation_limit,
+                tool_calls_log=tool_calls_log,
+                log_prefix="ReasoningEngine",
+                policy=effective_policy,
             )
-
-            tool_messages: list[dict[str, Any]] = []
-            truncation_limit = config.TOOL_RESULT_TRUNCATION_LIMIT
-
-            for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
-                if is_rate_limited:
-                    self.tool_router.record_rate_limited(str(step_id), func_name)
-                elif is_error:
-                    self.tool_router.record_failure(str(step_id), func_name)
-                else:
-                    self.tool_router.record_success(str(step_id), func_name)
-
-                record_result, llm_result = truncate_for_llm(
-                    result, truncation_limit, is_error,
-                )
-
-                tool_calls_log.append(ToolCallRecord(
-                    tool_name=func_name,
-                    parameters=func_args,
-                    result=record_result,
-                ))
-
-                if is_error:
-                    result_with_marker = (
-                        f"[TOOL ERROR] {llm_result}\n\n"
-                        "IMPORTANT: The tool returned an error. Please analyze "
-                        "the error and decide whether to retry with different "
-                        "parameters or report the failure."
-                    )
-                else:
-                    result_with_marker = llm_result
-
-                tool_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_with_marker,
-                })
-
             messages.extend(tool_messages)
 
             if on_iteration:
                 on_iteration(iteration, tool_calls_log)
 
-        logger.warning("[ReasoningEngine] Hit max iterations (%d)", self.max_iterations)
+        logger.warning("[ReasoningEngine] Hit max iterations (%d)", effective_max_iter)
         return StepResult(
             step_id=step_id,
             success=False,
-            output=f"Task did not complete within {self.max_iterations} iterations.",
+            output=f"Task did not complete within {effective_max_iter} iterations.",
             tool_calls_log=tool_calls_log,
             iterations_completed=iteration,
         )

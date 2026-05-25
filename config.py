@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 
 load_dotenv()  # 自动读取项目根目录的 .env 文件（若存在），优先级低于系统环境变量
 
+VERSION = "v14.0-dev"  # 当前版本号，main.py 和 tracing 引用此值
+
 # --- LLM API Configuration ---
 # --- LLM API 配置 ---
 # Load from environment; prefer .env or env vars for API key in production.
@@ -150,6 +152,15 @@ REASONING_TOKEN_TRACKING = os.getenv("REASONING_TOKEN_TRACKING", "true").lower()
 # --- 推理引擎（v14 Phase 2 新增）---
 ENABLE_REASONING_ENGINE = os.getenv("ENABLE_REASONING_ENGINE", "false").lower() == "true"  # 启用 ReasoningEngine（默认关闭，灰度切换）
 MAX_THINKING_TOKENS = int(os.getenv("MAX_THINKING_TOKENS", "10000"))  # 推理模型 thinking token 预算上限
+MAX_THINKING_ROUNDS = int(os.getenv("MAX_THINKING_ROUNDS", "5"))  # 连续纯思考轮次硬上限（防无限循环，独立于 token tracking）
+REASONING_EFFORT = os.getenv("REASONING_EFFORT", "auto").lower()  # 推理力度：auto / low / medium / high（auto = 由 classifier 动态决定）
+
+# --- v14.5 Task Resume ---
+# --- 任务恢复 / Checkpoint（v14.5 新增）---
+TASK_RESUME_ENABLED = os.getenv("TASK_RESUME_ENABLED", "true").lower() == "true"  # 是否启用 Task Resume checkpoint
+CHECKPOINT_DIR = os.path.expanduser(os.getenv("CHECKPOINT_DIR", os.path.join(MEMORY_DIR, "checkpoints")))  # checkpoint 文件存储目录
+CHECKPOINT_MAX_PER_TASK = int(os.getenv("CHECKPOINT_MAX_PER_TASK", "5"))  # 每个任务最多保留的 checkpoint 文件数
+CHECKPOINT_RETENTION_DAYS = int(os.getenv("CHECKPOINT_RETENTION_DAYS", "7"))  # 已完成 checkpoint 保留天数
 
 # --- v14 Phase 3: Harness Configuration ---
 # --- Harness 配置层（v14 Phase 3 新增）---

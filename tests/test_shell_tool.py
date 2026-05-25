@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+import config
 from tools.shell_tool import ShellTool
 
 
@@ -214,6 +215,43 @@ class TestShellToolConcurrency:
             assert all("error" not in r.lower() for r in results)
         finally:
             ShellTool._concurrency_sem = None
+
+
+class TestShellToolWorkdir:
+    """Verify instance-level _workdir is respected (Wave-5 sandbox fix)."""
+
+    def test_default_workdir_is_sandbox_dir(self):
+        """New ShellTool instances should default to config.SANDBOX_DIR."""
+        tool = ShellTool()
+        assert tool._workdir == config.SANDBOX_DIR
+
+    @pytest.mark.asyncio
+    async def test_custom_workdir_respected(self):
+        """When _workdir is overridden, shell commands should run in that directory."""
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="manus_test_") as tmpdir:
+            tool = ShellTool()
+            tool._workdir = tmpdir
+
+            result = await tool._run_shell("pwd", timeout=5)
+
+            assert tmpdir in result
+            assert f"[Working directory: {tmpdir}]" in result
+
+    @pytest.mark.asyncio
+    async def test_custom_workdir_differs_from_global(self):
+        """Explicitly verify that a custom workdir differs from the global one."""
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="manus_test_") as tmpdir:
+            if os.path.realpath(tmpdir) == os.path.realpath(config.SANDBOX_DIR):
+                pytest.skip("tmpdir happens to be same as SANDBOX_DIR")
+
+            tool = ShellTool()
+            tool._workdir = tmpdir
+
+            result = await tool._run_shell("pwd", timeout=5)
+
+            assert config.SANDBOX_DIR not in result.split("[Working directory:")[1]
 
 
 if __name__ == "__main__":

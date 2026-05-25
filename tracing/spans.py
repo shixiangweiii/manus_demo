@@ -69,6 +69,11 @@ class SpanName:
     # --- HITL (v13) ---
     HITL_ASK_USER = "hitl.ask_user"
 
+    # --- Task Resume (v14.5) ---
+    TASK_RESUME = "task.resume"
+    CHECKPOINT_SAVE = "checkpoint.save"
+    CHECKPOINT_LOAD = "checkpoint.load"
+
     # --- LLM Calls ---
     LLM_CHAT = "llm.chat"
     LLM_CHAT_WITH_TOOLS = "llm.chat_with_tools"
@@ -184,6 +189,12 @@ class AttrKey:
     HITL_PROMPT_COUNT = "hitl.prompt_count"
     HITL_TIMEOUT_SECONDS = "hitl.timeout_seconds"
 
+    # --- Task Resume (v14.5) ---
+    TASK_RESUMED = "task.resumed"
+    CHECKPOINT_TASK_ID = "checkpoint.task_id"
+    CHECKPOINT_STATE = "checkpoint.state"
+    CHECKPOINT_VERSION = "checkpoint.version"
+
     # --- Reflection ---
     REFLECTION_PASSED = "reflection.passed"
     REFLECTION_SCORE = "reflection.score"
@@ -250,6 +261,10 @@ class EventName:
 
     # --- Context ---
     CONTEXT_COMPRESSED = "context.compressed"
+
+    # --- Task Resume (v14.5) ---
+    CHECKPOINT_SAVED = "checkpoint.saved"
+    CHECKPOINT_LOADED = "checkpoint.loaded"
 
 
 # ======================================================================

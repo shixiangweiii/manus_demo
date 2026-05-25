@@ -6,8 +6,20 @@ Provides benchmark tasks, metric collection, and comparative reporting for:
   - v2 complex: hierarchical DAG -> parallel super-step execution
   - v5 emergent: Claude Code-style TODO list planning
 
-v8 (current): extended to cover v8 GoalDrivenPlanner, v9 SubAgent, v13 HITL
-feature dimensions; added Pass^k reliability and LLM-as-Judge fallback.
+v14.6 (current): Evaluation Harness upgrade — probe extracted to standalone module,
+deterministic verifiers, baseline/regression gate, expanded benchmark dataset.
+
+Module structure (v14.6):
+  - benchmark.py   — Task definitions + ground truth (no runtime deps)
+  - metrics.py     — Score computation models (no runtime deps)
+  - probe.py       — EvaluationProbe event interceptor (no runtime deps)
+  - verifiers.py   — Deterministic outcome verifiers (no runtime deps)
+  - baseline.py    — Baseline management + regression gate (no runtime deps)
+  - report.py      — Rich console + JSON report (rich + metrics only)
+  - runner.py      — Orchestrates execution (requires runtime: agents, llm, tools)
+  - eval_cli.py    — CLI entry point (lazy-imports runner)
+  - user_simulator.py — HITL simulated user (no runtime deps)
+  - llm_judge.py   — LLM-as-Judge fallback (requires llm runtime)
 
 Manus Demo 三种规划执行范式的评测模块。
 
