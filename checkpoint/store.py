@@ -132,6 +132,10 @@ class TaskStateStore:
             filepath.unlink(missing_ok=True)
         logger.debug("[TaskStateStore] Deleted checkpoints for task_id=%s", task_id)
 
+    def count_checkpoints(self, task_id: str) -> int:
+        """Return the number of checkpoint files for a task_id."""
+        return len(list(Path(self._dir).glob(f"{task_id}_*.json")))
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

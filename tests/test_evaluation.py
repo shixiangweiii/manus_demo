@@ -8,7 +8,9 @@ All tests are mock-based, no LLM API calls required.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import os
 
 import pytest
 
@@ -331,6 +333,27 @@ class TestAggregation:
         agg = aggregate_results(results)
         assert agg.classification_accuracy == 0.0  # No non-forced tasks to count
 
+    def test_resume_metrics_only_count_resume_tasks(self):
+        """Resume aggregates should be bounded and should ignore non-resume tasks."""
+        r1 = _make_result(task_id="resume_001", task_success=True)
+        r1.resume_attempted = True
+        r1.resume_success = True
+        r1.checkpoint_count = 3
+
+        r2 = _make_result(task_id="resume_002", task_success=False)
+        r2.resume_attempted = True
+        r2.resume_success = False
+        r2.checkpoint_count = 1
+
+        r3 = _make_result(task_id="easy_001", task_success=True)
+        r3.checkpoint_count = 99
+
+        agg = aggregate_results([r1, r2, r3])
+
+        assert agg.resume_success_rate == 0.5
+        assert agg.resume_success_rate <= 1.0
+        assert agg.checkpoint_avg_count == 2.0
+
 
 # ======================================================================
 # Test: Benchmark Tasks
@@ -592,6 +615,149 @@ class TestProbeEventHandling:
         # Without config_snapshot, defaults to empty dict (backward compat)
         result_empty = probe.build_result(task=task, forced_mode=PlanMode.SIMPLE, llm_model="test-model")
         assert result_empty.config_snapshot == {}
+
+    def test_verifier_failure_blocks_task_success(self):
+        """Explicit verifier failures should be authoritative task failures."""
+        probe = EvaluationProbe()
+        probe.final_answer = "The task completed without the expected value."
+        probe.task_success = True
+        task = BenchmarkTask(
+            task_id="test_verifier_fail",
+            task_description="test",
+            ground_truth=GroundTruth(must_include_keywords=[]),
+            verifiers=[
+                {"type": "regex_match", "params": {"pattern": r"\b3628800\b"}},
+            ],
+        )
+
+        result = probe.build_result(task=task, forced_mode=PlanMode.SIMPLE, llm_model="test")
+
+        assert not result.execution.task_success
+        assert result.failed_by_verifier
+        assert result.verifier_total == 1
+        assert result.verifier_failed == 1
+        assert any("Verifier" in f.detail for f in result.failures)
+
+    def test_verifier_pass_can_replace_fragile_keyword_check(self):
+        """A passing deterministic verifier should satisfy outcome checks even if a keyword is absent."""
+        probe = EvaluationProbe()
+        probe.final_answer = "The file was written successfully."
+        probe.task_success = True
+        task = BenchmarkTask(
+            task_id="test_verifier_pass",
+            task_description="test",
+            ground_truth=GroundTruth(must_include_keywords=["test_output.txt"]),
+            verifiers=[
+                {"type": "keyword_include", "params": {"keywords": ["written successfully"]}},
+            ],
+        )
+
+        result = probe.build_result(task=task, forced_mode=PlanMode.SIMPLE, llm_model="test")
+
+        assert result.execution.task_success
+        assert not result.failed_by_verifier
+        assert result.verifier_passed == 1
+
+    def test_all_skipped_verifiers_fall_back_to_keyword_logic(self, tmp_path):
+        """All-skipped verifiers should not force failure when keyword checks pass."""
+        probe = EvaluationProbe()
+        probe.final_answer = "fallback answer includes required keyword"
+        probe.task_success = True
+        task = BenchmarkTask(
+            task_id="test_verifier_skipped",
+            task_description="test",
+            ground_truth=GroundTruth(must_include_keywords=["required keyword"]),
+            verifiers=[
+                {
+                    "type": "regex_match",
+                    "params": {
+                        "source": "file",
+                        "path": "missing.txt",
+                        "pattern": "anything",
+                    },
+                },
+            ],
+        )
+
+        result = probe.build_result(
+            task=task,
+            forced_mode=PlanMode.SIMPLE,
+            llm_model="test",
+            sandbox_dir=str(tmp_path),
+        )
+
+        assert result.execution.task_success
+        assert not result.failed_by_verifier
+        assert result.verifier_skipped == 1
+
+
+class TestEvaluationRunnerResume:
+    def test_resume_task_uses_injected_temp_store(self, monkeypatch):
+        """Resume-tagged eval tasks should exercise resume() with an isolated store."""
+        import evaluation.runner as runner_module
+        from checkpoint.models import TaskRunState
+
+        class FakeOrchestrator:
+            last_store_dir = ""
+            last_resumed_task_id = ""
+
+            def __init__(
+                self,
+                llm_client=None,
+                tools=None,
+                on_event=None,
+                interactive=True,
+                task_state_store=None,
+            ):
+                self.on_event = on_event or (lambda *_: None)
+                self.store = task_state_store
+                FakeOrchestrator.last_store_dir = task_state_store._dir
+
+            async def resume(self, task_id):
+                FakeOrchestrator.last_resumed_task_id = task_id
+                checkpoint = self.store.load(task_id)
+                assert checkpoint is not None
+                self.on_event("task_start", {
+                    "task": checkpoint.task,
+                    "task_id": task_id,
+                    "resumed": True,
+                })
+                checkpoint.state = TaskRunState.COMPLETED
+                self.store.save(checkpoint)
+                self.on_event("phase", "Executing")
+                self.on_event("task_complete", {"answer": "CSV 人口密度 density"})
+                return "CSV 人口密度 density"
+
+            async def run(self, task_description):
+                raise AssertionError("resume-tagged evaluation task should call resume(), not run()")
+
+        monkeypatch.setattr(runner_module, "OrchestratorAgent", FakeOrchestrator)
+
+        class FakeLLMClient:
+            model = "test-model"
+
+        task = BenchmarkTask(
+            task_id="resume_test",
+            task_description="resume task",
+            tags=["resume"],
+            ground_truth=GroundTruth(
+                expected_complexity="complex",
+                must_include_keywords=["CSV", "density"],
+            ),
+            verifiers=[
+                {"type": "regex_match", "params": {"pattern": r"CSV|density|人口密度"}},
+            ],
+        )
+        runner = runner_module.EvaluationRunner(llm_client=FakeLLMClient(), tools=[])
+
+        result = asyncio.run(runner.evaluate_task(task, PlanMode.SIMPLE))
+
+        assert result.resume_attempted
+        assert result.resume_success
+        assert result.execution.task_success
+        assert result.checkpoint_count >= 1
+        assert FakeOrchestrator.last_resumed_task_id.startswith("evalrsm_")
+        assert not os.path.exists(FakeOrchestrator.last_store_dir)
 
 
 # ======================================================================

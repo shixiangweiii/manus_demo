@@ -1,0 +1,3 @@
+variant_id,mode,total_tasks,task_success_rate,verifier_pass_rate,avg_overall_score,avg_total_tokens,avg_prompt_tokens,avg_completion_tokens,avg_reasoning_tokens,avg_llm_call_count,avg_total_wall_time_ms,p50_total_wall_time_ms,p95_total_wall_time_ms,delta_success_rate,token_ratio,time_ratio,recommendation
+react_auto_baseline,simple,8,0.75,0.875,0.8181647945728747,21772.25,18883.125,2889.125,1455.375,9.625,30517.420023679733,19971.674919128418,101880.46002388,0.0,1.0,1.0,baseline
+reasoning_auto,simple,8,0.875,0.875,0.8325170346359672,34860.0,31223.625,3636.375,1628.625,13.0,40513.85247707367,21400.835752487183,158421.86617851257,0.125,1.601120692624786,1.3275647956359773,candidate_default

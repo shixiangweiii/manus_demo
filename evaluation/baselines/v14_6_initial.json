@@ -1,0 +1,31 @@
+{
+  "version": "v14.6",
+  "created_at": "2026-05-25T00:00:00+00:00",
+  "note": "Initial offline seed so baseline gates are never empty. Replace with python -m evaluation.eval_cli --save-baseline after a real LLM-backed run.",
+  "modes": {
+    "simple": {
+      "task_success_rate": 0.0,
+      "avg_overall_score": 0.0,
+      "avg_total_tokens": 0,
+      "avg_execution_time_ms": 0,
+      "failure_distribution": {},
+      "per_task": {}
+    },
+    "complex": {
+      "task_success_rate": 0.0,
+      "avg_overall_score": 0.0,
+      "avg_total_tokens": 0,
+      "avg_execution_time_ms": 0,
+      "failure_distribution": {},
+      "per_task": {}
+    },
+    "emergent": {
+      "task_success_rate": 0.0,
+      "avg_overall_score": 0.0,
+      "avg_total_tokens": 0,
+      "avg_execution_time_ms": 0,
+      "failure_distribution": {},
+      "per_task": {}
+    }
+  }
+}

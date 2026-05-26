@@ -100,10 +100,17 @@ class EvaluationProbe:
 
         # Token tracking
         self.total_tokens: int = 0
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self.reasoning_tokens: int = 0
+        self.llm_call_count: int = 0
+        self.tokens_by_engine: dict[str, dict[str, Any]] = {}
+        self.tokens_by_caller: dict[str, dict[str, Any]] = {}
         self.tokens_snapshot_before: int = 0
         self.subagent_tokens_from_caller: int = 0
 
         # Task result
+        self.runtime_task_id: str = ""
         self.final_answer: str = ""
         self.task_success: bool = False
 
@@ -152,6 +159,22 @@ class EvaluationProbe:
         error_prefixes = ("Error:", "error:", "ERROR:", "Exception:", "Traceback")
         return result_str.strip().startswith(error_prefixes)
 
+    @staticmethod
+    def _usage_to_dict(usage: Any) -> dict[str, Any]:
+        """Convert TokenUsage-like objects into plain JSON-friendly dicts."""
+        if hasattr(usage, "model_dump"):
+            try:
+                return usage.model_dump(mode="json")
+            except TypeError:
+                return usage.model_dump()
+        return {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+            "completion_tokens": getattr(usage, "completion_tokens", 0),
+            "total_tokens": getattr(usage, "total_tokens", 0),
+            "reasoning_tokens": getattr(usage, "reasoning_tokens", 0),
+            "engine": getattr(usage, "engine", ""),
+        }
+
     def on_event(self, event: str, data: Any) -> None:
         """
         Event callback — attached to OrchestratorAgent._on_event.
@@ -169,6 +192,8 @@ class EvaluationProbe:
         if event == "task_start":
             self.task_start_time = time.time()
             self._phase_started["task"] = time.time()
+            if isinstance(data, dict):
+                self.runtime_task_id = data.get("task_id", self.runtime_task_id)
             # classification_forced is set by runner before execution, not read from config
 
         # --- Classification ---
@@ -302,7 +327,21 @@ class EvaluationProbe:
             # Duck-type: TokenUsageSummary.total.total_tokens, .by_caller
             if hasattr(data, 'total') and hasattr(data.total, 'total_tokens'):
                 self.total_tokens = data.total.total_tokens
+                self.prompt_tokens = getattr(data.total, "prompt_tokens", 0)
+                self.completion_tokens = getattr(data.total, "completion_tokens", 0)
+                self.reasoning_tokens = getattr(data.total, "reasoning_tokens", 0)
+            if hasattr(data, 'call_records'):
+                self.llm_call_count = len(data.call_records)
+            if hasattr(data, 'by_engine'):
+                self.tokens_by_engine = {
+                    str(engine): self._usage_to_dict(usage)
+                    for engine, usage in data.by_engine.items()
+                }
             if hasattr(data, 'by_caller'):
+                self.tokens_by_caller = {
+                    str(caller): self._usage_to_dict(usage)
+                    for caller, usage in data.by_caller.items()
+                }
                 self.subagent_tokens_from_caller = sum(
                     usage.total_tokens
                     for caller, usage in data.by_caller.items()
@@ -417,6 +456,10 @@ class EvaluationProbe:
         forced_mode: PlanMode,
         llm_model: str,
         config_snapshot: dict[str, Any] | None = None,
+        sandbox_dir: str = "",
+        checkpoint_count: int = 0,
+        resume_attempted: bool = False,
+        resume_success: bool = False,
     ) -> TaskEvaluationResult:
         """
         Build a TaskEvaluationResult from collected probe data.
@@ -477,29 +520,61 @@ class EvaluationProbe:
         tool_acc = self.successful_tool_calls / self.total_tool_calls if self.total_tool_calls > 0 else 0.0
         avg_iters = self.total_react_iterations / max(self.steps_completed, 1)
 
-        # Determine task success
-        task_success = self.task_success
-        if gt.must_include_keywords:
-            answer_lower = self.final_answer.lower()
-            task_success = task_success and all(kw.lower() in answer_lower for kw in gt.must_include_keywords)
+        # Determine task success from the legacy keyword checks first. When
+        # deterministic verifiers are present, a fully passing actionable
+        # verifier set can replace fragile keyword matching, while explicit
+        # verifier failures remain authoritative failures.
+        answer_lower = self.final_answer.lower()
+        base_success = self.task_success
+        must_not_ok = True
         if gt.must_not_include:
-            answer_lower = self.final_answer.lower()
-            task_success = task_success and not any(kw.lower() in answer_lower for kw in gt.must_not_include)
+            must_not_ok = not any(kw.lower() in answer_lower for kw in gt.must_not_include)
+        keyword_success = base_success and must_not_ok
+        if gt.must_include_keywords:
+            keyword_success = keyword_success and all(
+                kw.lower() in answer_lower for kw in gt.must_include_keywords
+            )
+        task_success = keyword_success
 
-        # Deterministic verifiers (v14.6.3) — override task_success on failure
+        # Deterministic verifiers (v14.6.3) — override task_success only on
+        # actionable failures. If every verifier is skipped/non-actionable,
+        # keyword/judge logic remains the source of truth.
+        verifier_total = 0
+        verifier_passed = 0
+        verifier_failed = 0
+        verifier_skipped = 0
+        verifier_details: list[dict[str, Any]] = []
+        failed_by_verifier = False
         if task.verifiers:
             from evaluation.verifiers import run_verifiers
-            vresult = run_verifiers(task.verifiers, self.final_answer)
-            if vresult.total > 0 and not vresult.all_passed:
+            vresult = run_verifiers(task.verifiers, self.final_answer, sandbox_dir=sandbox_dir)
+            verifier_total = vresult.total
+            verifier_passed = vresult.passed_count
+            verifier_failed = sum(1 for v in vresult.details if v.passed is False)
+            verifier_skipped = sum(1 for v in vresult.details if v.passed is None)
+            verifier_details = [
+                {
+                    "type": v.type.value,
+                    "passed": v.passed,
+                    "detail": v.detail,
+                }
+                for v in vresult.details
+            ]
+            if vresult.total > 0 and vresult.all_passed is False:
                 task_success = False
+                failed_by_verifier = True
                 for v in vresult.details:
                     if v.passed is False:
                         self.failures.append(FailureRecord(
                             category=FailureCategory.TOOL_EXECUTION_ERROR,
                             detail=f"Verifier '{v.type.value}' failed: {v.detail}",
                         ))
+            elif vresult.total > 0 and vresult.all_passed is True:
+                task_success = base_success and must_not_ok
 
         exec_time_ms = (self.execution_end - self.execution_start) * 1000 if self.execution_end > self.execution_start else 0.0
+        total_wall_time_ms = (self.execution_end - self.task_start_time) * 1000 if self.execution_end > self.task_start_time else 0.0
+        reflection_time_ms = (self.reflection_end - self.reflection_start) * 1000 if self.reflection_end > self.reflection_start else 0.0
 
         sa_calls = max(self._subagent_starts, len(self.subagent_results))
         sa_success = sum(1 for r in self.subagent_results if r.get("status") == "completed")
@@ -629,8 +704,28 @@ class EvaluationProbe:
             planning_score=planning_score,
             execution_score=execution_score,
             efficiency_score=efficiency_score,
+            llm_call_count=self.llm_call_count,
+            prompt_tokens=self.prompt_tokens,
+            completion_tokens=self.completion_tokens,
+            reasoning_tokens=self.reasoning_tokens,
+            tokens_by_engine=self.tokens_by_engine,
+            tokens_by_caller=self.tokens_by_caller,
+            total_wall_time_ms=total_wall_time_ms,
+            planning_time_ms=plan_time_ms,
+            execution_time_ms=exec_time_ms,
+            reflection_time_ms=reflection_time_ms,
+            failure_category=self.failures[0].category.value if self.failures else "",
             llm_model=llm_model,
             subagent_metrics=subagent_metrics,
+            verifier_total=verifier_total,
+            verifier_passed=verifier_passed,
+            verifier_failed=verifier_failed,
+            verifier_skipped=verifier_skipped,
+            failed_by_verifier=failed_by_verifier,
+            verifier_details=verifier_details,
+            checkpoint_count=checkpoint_count,
+            resume_attempted=resume_attempted,
+            resume_success=resume_success,
             final_answer=self.final_answer,
             config_snapshot=config_snapshot or {},
         )

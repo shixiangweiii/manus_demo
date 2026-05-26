@@ -124,9 +124,14 @@ def compare_baseline(
     baseline_modes = set(baseline.get("modes", {}).keys())
     current_modes = {m.value for m in current.keys()}
 
-    # Detect missing baseline modes (only warn if baseline is non-empty)
+    if not baseline_modes:
+        comparison.regressions.append("Baseline contains no modes — generate a v14.6 baseline before gating")
+        comparison.is_regression = True
+        return comparison
+
+    # Detect missing baseline modes
     missing_in_baseline = current_modes - baseline_modes
-    if missing_in_baseline and baseline_modes:
+    if missing_in_baseline:
         for m in sorted(missing_in_baseline):
             comparison.regressions.append(
                 f"[{m}] No baseline data — cannot verify regression"

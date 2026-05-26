@@ -18,10 +18,11 @@ import json
 import logging
 import time
 import re
-from typing import Any, Callable
+import tempfile
+import uuid
+from typing import Any, TYPE_CHECKING
 
 import config
-from agents.orchestrator import OrchestratorAgent
 from evaluation.benchmark import BenchmarkTask, get_benchmark_tasks
 from evaluation.metrics import (
     AggregatedMetrics,
@@ -41,11 +42,13 @@ from evaluation.metrics import (
     compute_planning_score,
 )
 from evaluation.probe import EvaluationProbe  # noqa: F401 — backward-compat re-export
-from llm.client import LLMClient
-from schema import Reflection, TokenUsageSummary
-from tools.base import BaseTool
+
+if TYPE_CHECKING:
+    from llm.client import LLMClient
+    from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
+OrchestratorAgent: Any | None = None
 
 
 # ======================================================================
@@ -103,6 +106,7 @@ class EvaluationRunner:
             ]
 
         if self.llm_client is None:
+            from llm.client import LLMClient
             self.llm_client = LLMClient()
 
         probe = EvaluationProbe()
@@ -127,6 +131,7 @@ class EvaluationRunner:
         is_hitl_task = "hitl" in tags_lower
         is_subagent_task = "subagent" in tags_lower
         is_goal_driven_task = "goal_driven" in tags_lower
+        is_resume_task = "resume" in tags_lower
 
         if is_hitl_task:
             config.HITL_ENABLED = True
@@ -155,58 +160,128 @@ class EvaluationRunner:
                     logger.warning("[EvalRunner] SimulatedUser intercept failed: %s", exc)
             probe.on_event(event, data)
 
-        try:
-            orchestrator = OrchestratorAgent(
-                llm_client=llm_client,
-                tools=self.tools,
-                on_event=event_callback,
-                interactive=is_hitl_task,
+        from checkpoint.store import TaskStateStore
+        with tempfile.TemporaryDirectory(prefix="manus_eval_checkpoints_") as checkpoint_dir:
+            task_state_store = TaskStateStore(checkpoint_dir=checkpoint_dir)
+            resume_attempted = False
+            resume_seed_task_id = ""
+
+            try:
+                global OrchestratorAgent
+                if OrchestratorAgent is None:
+                    from agents.orchestrator import OrchestratorAgent as _OrchestratorAgent
+                    OrchestratorAgent = _OrchestratorAgent
+
+                orchestrator = OrchestratorAgent(
+                    llm_client=llm_client,
+                    tools=self.tools,
+                    on_event=event_callback,
+                    interactive=is_hitl_task,
+                    task_state_store=task_state_store,
+                )
+
+                logger.info(
+                    "[EvalRunner] Running task '%s' with mode '%s' (hitl=%s subagent=%s goal_driven=%s)",
+                    task.task_id, mode.value, is_hitl_task, is_subagent_task, is_goal_driven_task,
+                )
+
+                if is_resume_task:
+                    resume_attempted = True
+                    resume_seed_task_id = self._seed_resume_checkpoint(task, task_state_store)
+                    await orchestrator.resume(resume_seed_task_id)
+                else:
+                    await orchestrator.run(task.task_description)
+
+            except Exception as exc:
+                logger.error(
+                    "[EvalRunner] Task '%s' crashed with mode '%s': %s",
+                    task.task_id, mode.value, exc,
+                )
+                probe.failures.append(FailureRecord(
+                    category=FailureCategory.LLM_CALL_FAILURE,
+                    detail=str(exc)[:300],
+                ))
+            finally:
+                config.PLAN_MODE = original_plan_mode
+                config.EMERGENT_PLANNING_ENABLED = original_emergent
+                config.HITL_ENABLED = original_hitl
+                config.SUBAGENT_ENABLED = original_subagent
+                config.ENABLE_GOAL_DRIVEN_PLANNER = original_goal_driven
+
+            checkpoint_task_id = probe.runtime_task_id or resume_seed_task_id
+            checkpoint_count = (
+                task_state_store.count_checkpoints(checkpoint_task_id)
+                if checkpoint_task_id else 0
             )
 
-            logger.info(
-                "[EvalRunner] Running task '%s' with mode '%s' (hitl=%s subagent=%s goal_driven=%s)",
-                task.task_id, mode.value, is_hitl_task, is_subagent_task, is_goal_driven_task,
+            # Build config snapshot from runner (has config imported)
+            config_snapshot = {
+                "plan_mode": mode.value,
+                "max_react_iterations": getattr(config, 'MAX_REACT_ITERATIONS', None),
+                "max_parallel_nodes": getattr(config, 'MAX_PARALLEL_NODES', None),
+                "max_replan_attempts": getattr(config, 'MAX_REPLAN_ATTEMPTS', None),
+                "emergent_planning_enabled": getattr(config, 'EMERGENT_PLANNING_ENABLED', None),
+                "adaptive_planning_enabled": getattr(config, 'ADAPTIVE_PLANNING_ENABLED', None),
+                "enable_reasoning_engine": getattr(config, 'ENABLE_REASONING_ENGINE', None),
+                "reasoning_effort": getattr(config, 'REASONING_EFFORT', None),
+                "max_thinking_tokens": getattr(config, 'MAX_THINKING_TOKENS', None),
+                "max_thinking_rounds": getattr(config, 'MAX_THINKING_ROUNDS', None),
+                "dag_serial_execution": getattr(config, 'DAG_SERIAL_EXECUTION', None),
+                "subagent_enabled": getattr(config, 'SUBAGENT_ENABLED', None),
+                "enable_goal_driven_planner": getattr(config, 'ENABLE_GOAL_DRIVEN_PLANNER', None),
+            }
+
+            result = probe.build_result(
+                task=task,
+                forced_mode=mode,
+                llm_model=self.llm_client.model if self.llm_client else "unknown",
+                config_snapshot=config_snapshot,
+                sandbox_dir=getattr(config, "SANDBOX_DIR", ""),
+                checkpoint_count=checkpoint_count,
+                resume_attempted=resume_attempted,
+                resume_success=resume_attempted and probe.task_success,
             )
 
-            await orchestrator.run(task.task_description)
+            # v8: LLM-as-Judge fallback when keyword check fails
+            await self._maybe_apply_llm_judge(task, result)
+            if resume_attempted:
+                result.resume_success = result.execution.task_success
 
-        except Exception as exc:
-            logger.error(
-                "[EvalRunner] Task '%s' crashed with mode '%s': %s",
-                task.task_id, mode.value, exc,
-            )
-            probe.failures.append(FailureRecord(
-                category=FailureCategory.LLM_CALL_FAILURE,
-                detail=str(exc)[:300],
-            ))
-        finally:
-            config.PLAN_MODE = original_plan_mode
-            config.EMERGENT_PLANNING_ENABLED = original_emergent
-            config.HITL_ENABLED = original_hitl
-            config.SUBAGENT_ENABLED = original_subagent
-            config.ENABLE_GOAL_DRIVEN_PLANNER = original_goal_driven
+            return result
 
-        # Build config snapshot from runner (has config imported)
-        config_snapshot = {
-            "plan_mode": mode.value,
-            "max_react_iterations": getattr(config, 'MAX_REACT_ITERATIONS', None),
-            "max_parallel_nodes": getattr(config, 'MAX_PARALLEL_NODES', None),
-            "max_replan_attempts": getattr(config, 'MAX_REPLAN_ATTEMPTS', None),
-            "emergent_planning_enabled": getattr(config, 'EMERGENT_PLANNING_ENABLED', None),
-            "adaptive_planning_enabled": getattr(config, 'ADAPTIVE_PLANNING_ENABLED', None),
-        }
+    def _seed_resume_checkpoint(
+        self,
+        task: BenchmarkTask,
+        task_state_store: Any,
+    ) -> str:
+        """Create a minimal simple-path checkpoint so evaluation can exercise resume()."""
+        from checkpoint.models import SimplePathState, TaskCheckpoint
+        from schema import Plan, ReasoningEffort, Step, TaskRunState
 
-        result = probe.build_result(
-            task=task,
-            forced_mode=mode,
-            llm_model=self.llm_client.model if self.llm_client else "unknown",
-            config_snapshot=config_snapshot,
+        task_id = f"evalrsm_{uuid.uuid4().hex[:8]}"
+        now = time.time()
+        plan = Plan(
+            task=task.task_description,
+            steps=[Step(id=1, description=task.task_description)],
         )
-
-        # v8: LLM-as-Judge fallback when keyword check fails
-        await self._maybe_apply_llm_judge(task, result)
-
-        return result
+        checkpoint = TaskCheckpoint(
+            task_id=task_id,
+            task=task.task_description,
+            context="",
+            complexity="simple",
+            effort=ReasoningEffort.MEDIUM.value,
+            state=TaskRunState.RUNNING,
+            created_at=now,
+            updated_at=now,
+            simple_state=SimplePathState(
+                plan=plan.model_dump(),
+                all_results=[],
+                current_step_index=0,
+            ),
+            resume_metadata={"boundary": "evaluation_resume_seed"},
+        )
+        task_state_store.save(checkpoint)
+        return task_id
 
     async def _maybe_apply_llm_judge(
         self,
@@ -222,6 +297,8 @@ class EvaluationRunner:
         """
         gt = task.ground_truth
         if result.execution.task_success:
+            return
+        if result.failed_by_verifier:
             return
         if not gt.must_include_keywords or not gt.success_criteria:
             return

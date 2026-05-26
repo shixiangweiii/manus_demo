@@ -53,7 +53,7 @@ class VerifierResult:
     """Aggregate result from running all verifiers for a task."""
     total: int = 0
     passed_count: int = 0
-    all_passed: bool = False
+    all_passed: bool | None = None
     details: list[VerifierSpec] = field(default_factory=list)
 
 
@@ -415,9 +415,10 @@ def run_verifiers(
         if spec.passed is True:
             passed_count += 1
 
-    # all_passed requires all verifiers to pass (None/skipped doesn't fail)
+    # all_passed is None when every verifier is non-actionable/skipped.
+    # Callers can then fall back to keyword or judge logic instead of failing.
     actionable = [r for r in results if r.passed is not None]
-    all_passed = all(r.passed is True for r in actionable) if actionable else False
+    all_passed = all(r.passed is True for r in actionable) if actionable else None
 
     return VerifierResult(
         total=len(results),

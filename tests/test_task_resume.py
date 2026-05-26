@@ -383,6 +383,12 @@ class TestTaskStateStore:
         store.delete("test1234")
         assert store.load("test1234") is None
 
+    def test_count_checkpoints(self, store):
+        cp = _make_checkpoint()
+        store.save(cp)
+        assert store.count_checkpoints("test1234") == 1
+        assert store.count_checkpoints("missing") == 0
+
     def test_corrupted_file_raises(self, store):
         cp = _make_checkpoint()
         store.save(cp)

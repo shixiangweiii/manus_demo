@@ -15,6 +15,10 @@ Module structure (v14.6):
   - probe.py       — EvaluationProbe event interceptor (no runtime deps)
   - verifiers.py   — Deterministic outcome verifiers (no runtime deps)
   - baseline.py    — Baseline management + regression gate (no runtime deps)
+  - suites.py      — Named benchmark task suites for matrix runs
+  - variants.py    — Named config bundles for engine/effort comparisons
+  - reasoning_matrix.py — Variant × mode matrix CLI
+  - compare_variants.py — Matrix summary/Markdown/CSV reporting
   - report.py      — Rich console + JSON report (rich + metrics only)
   - runner.py      — Orchestrates execution (requires runtime: agents, llm, tools)
   - eval_cli.py    — CLI entry point (lazy-imports runner)

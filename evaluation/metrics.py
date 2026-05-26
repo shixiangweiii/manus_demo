@@ -219,6 +219,10 @@ class TaskEvaluationResult(BaseModel):
     planning_mode: PlanMode = PlanMode.SIMPLE   # 使用的规划模式
     task_difficulty: TaskDifficulty = TaskDifficulty.MEDIUM  # 任务难度
 
+    # Evaluation matrix metadata
+    variant_id: str = ""                        # 评测变体 ID（如 react_auto_baseline / reasoning_high）
+    variant_config: dict[str, Any] = Field(default_factory=dict)  # 变体配置快照
+
     # Component metrics
     planning: PlanningMetrics = Field(default_factory=PlanningMetrics)
     execution: ExecutionMetrics = Field(default_factory=ExecutionMetrics)
@@ -234,6 +238,21 @@ class TaskEvaluationResult(BaseModel):
     execution_score: float = 0.0                # 执行评分 (0-1)
     efficiency_score: float = 0.0               # 效率评分 (0-1)
 
+    # Token/cost breakdown for reasoning-engine evaluation
+    llm_call_count: int = 0                     # LLM API 调用次数
+    prompt_tokens: int = 0                      # prompt token 总数
+    completion_tokens: int = 0                  # completion token 总数
+    reasoning_tokens: int = 0                   # reasoning token 总数
+    tokens_by_engine: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    tokens_by_caller: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    # Phase timing shortcuts for matrix reports
+    total_wall_time_ms: float = 0.0             # 端到端任务耗时（task_start → task_complete）
+    planning_time_ms: float = 0.0               # 规划耗时快照
+    execution_time_ms: float = 0.0              # 执行耗时快照
+    reflection_time_ms: float = 0.0             # 反思耗时快照
+    failure_category: str = ""                  # 第一个失败类别，便于 CSV 聚合
+
     # v9 SubAgent metrics (Wave C #9: previously collected but unused)
     # 子智能体相关指标（采集后聚合，便于评估 SubAgent 路径的 ROI）
     subagent_metrics: dict[str, Any] = Field(default_factory=dict)
@@ -248,6 +267,19 @@ class TaskEvaluationResult(BaseModel):
     # v8 LLM 兜底裁判：仅在 must_include 关键词缺失且 LLM judge 被调用时记录
     judge_overrode: bool = False                # judge 是否覆盖了关键词失败判定
     judge_reasoning: str = ""                   # judge 给出的语义判定理由（一句话）
+
+    # v14.6 Deterministic verifier summary
+    verifier_total: int = 0                     # verifier 总数
+    verifier_passed: int = 0                    # 通过的 verifier 数
+    verifier_failed: int = 0                    # 明确失败的 verifier 数
+    verifier_skipped: int = 0                   # 不可判定 / skipped 的 verifier 数
+    failed_by_verifier: bool = False            # 是否因确定性 verifier 明确失败
+    verifier_details: list[dict[str, Any]] = Field(default_factory=list)
+
+    # v14.6.5 Resume / checkpoint reliability details
+    checkpoint_count: int = 0                   # 本任务产生/可见的 checkpoint 数
+    resume_attempted: bool = False              # 是否尝试过 resume 路径
+    resume_success: bool = False                # resume 路径是否成功完成
 
     # Final answer (surfaced for transparency and LLM judge access)
     # 最终答案（供 transparency 输出和 LLM judge 访问）
@@ -294,7 +326,14 @@ class AggregatedMetrics(BaseModel):
 
     # Efficiency specifics
     avg_total_tokens: float = 0.0               # 平均 token 消耗
+    avg_prompt_tokens: float = 0.0              # 平均 prompt token
+    avg_completion_tokens: float = 0.0          # 平均 completion token
+    avg_reasoning_tokens: float = 0.0           # 平均 reasoning token
+    avg_llm_call_count: float = 0.0             # 平均 LLM 调用次数
     avg_execution_time_ms: float = 0.0          # 平均执行耗时
+    avg_total_wall_time_ms: float = 0.0         # 平均端到端耗时
+    p50_total_wall_time_ms: float = 0.0         # 端到端耗时 P50
+    p95_total_wall_time_ms: float = 0.0         # 端到端耗时 P95
     avg_trajectory_efficiency: float = 0.0      # 平均轨迹效率
     avg_replan_count: float = 0.0               # 平均重规划次数
 
@@ -526,6 +565,17 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
 
     task_sr = sum(_success_score(r) for r in results) / n if n > 0 else 0.0
 
+    def _percentile(values: list[float], percentile: float) -> float:
+        """Nearest-rank percentile for small benchmark result sets."""
+        clean = sorted(v for v in values if v >= 0)
+        if not clean:
+            return 0.0
+        if len(clean) == 1:
+            return clean[0]
+        rank = math.ceil((percentile / 100.0) * len(clean)) - 1
+        rank = min(max(rank, 0), len(clean) - 1)
+        return clean[rank]
+
     # By difficulty (same pass^k-aware logic)
     by_diff: dict[str, list[TaskEvaluationResult]] = {}
     for r in results:
@@ -612,6 +662,18 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
     # v8 LLM Judge usage count
     judge_overrides = sum(1 for r in results if r.judge_overrode)
 
+    # v14.6.5 Resume reliability aggregates
+    resume_results = [r for r in results if r.task_id.startswith("resume_") or r.resume_attempted]
+    if resume_results:
+        resume_success_rate = sum(
+            1 for r in resume_results
+            if r.resume_success or r.execution.task_success
+        ) / len(resume_results)
+        checkpoint_avg_count = sum(r.checkpoint_count for r in resume_results) / len(resume_results)
+    else:
+        resume_success_rate = 0.0
+        checkpoint_avg_count = 0.0
+
     return AggregatedMetrics(
         planning_mode=mode,
         total_tasks=n,
@@ -629,7 +691,14 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
         avg_tool_accuracy=sum(r.execution.tool_accuracy for r in results) / n,
         avg_react_iterations=sum(r.execution.total_react_iterations for r in results) / n,
         avg_total_tokens=sum(r.efficiency.total_tokens for r in results) / n,
+        avg_prompt_tokens=sum(r.prompt_tokens for r in results) / n,
+        avg_completion_tokens=sum(r.completion_tokens for r in results) / n,
+        avg_reasoning_tokens=sum(r.reasoning_tokens for r in results) / n,
+        avg_llm_call_count=sum(r.llm_call_count for r in results) / n,
         avg_execution_time_ms=sum(r.execution.execution_time_ms for r in results) / n,
+        avg_total_wall_time_ms=sum(r.total_wall_time_ms for r in results) / n,
+        p50_total_wall_time_ms=_percentile([r.total_wall_time_ms for r in results], 50),
+        p95_total_wall_time_ms=_percentile([r.total_wall_time_ms for r in results], 95),
         avg_trajectory_efficiency=sum(r.efficiency.trajectory_efficiency for r in results) / n,
         avg_replan_count=sum(r.efficiency.replan_count for r in results) / n,
         reflection_accuracy=ref_acc,
@@ -653,10 +722,7 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
         pass_at_k_std=pk_std,
         judge_override_count=judge_overrides,
         # v14.6.5: resume reliability metrics
-        resume_success_rate=(
-            sum(1 for r in results if r.execution.task_success) / len(resume_results)
-            if (resume_results := [r for r in results if r.task_id.startswith("resume_")])
-            else 0.0
-        ),
+        resume_success_rate=resume_success_rate,
+        checkpoint_avg_count=checkpoint_avg_count,
         results=results,
     )

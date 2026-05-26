@@ -83,6 +83,12 @@ def render_comparison_table(
         for m in metrics_by_mode.values()
     )
     has_judge = any(m.judge_override_count > 0 for m in metrics_by_mode.values())
+    has_resume = any(
+        m.resume_success_rate > 0
+        or m.checkpoint_avg_count > 0
+        or any(r.resume_attempted for r in m.results)
+        for m in metrics_by_mode.values()
+    )
 
     # Row data
     rows = [
@@ -125,6 +131,9 @@ def render_comparison_table(
         rows.append(("Stagnation Rate / 停滞触发率", "stagnation_rate", ".1%", False))
     if has_judge:
         rows.append(("LLM Judge Overrides / 裁判覆盖次数", "judge_override_count", "d", False))
+    if has_resume:
+        rows.append(("Resume Success Rate / 恢复成功率", "resume_success_rate", ".1%", True))
+        rows.append(("Avg Checkpoints / 平均检查点数", "checkpoint_avg_count", ".2f", True))
 
     for label, attr, fmt, higher_better in rows:
         values = {}
@@ -230,6 +239,8 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
         show_subagent = any(r.execution.subagent_calls > 0 for r in metrics.results)
         show_hitl = any(r.execution.hitl_calls > 0 for r in metrics.results)
         show_judge = any(r.judge_overrode for r in metrics.results)
+        show_verifier = any(r.verifier_total > 0 for r in metrics.results)
+        show_resume = any(r.resume_attempted for r in metrics.results)
 
         task_table = Table(
             title=f"Per-Task Results ({mode})",
@@ -253,6 +264,10 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
             task_table.add_column("HITL", justify="center", width=8)
         if show_judge:
             task_table.add_column("Judge", justify="center", width=6)
+        if show_verifier:
+            task_table.add_column("Verifier", justify="center", width=12)
+        if show_resume:
+            task_table.add_column("Resume", justify="center", width=12)
 
         for r in metrics.results:
             success_str = "[green]✓[/green]" if r.execution.task_success else "[red]✗[/red]"
@@ -284,6 +299,18 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
                     row.append("-")
             if show_judge:
                 row.append("[yellow]Y[/yellow]" if r.judge_overrode else "-")
+            if show_verifier:
+                if r.verifier_total > 0:
+                    status = "fail" if r.failed_by_verifier else "pass"
+                    row.append(f"{status} {r.verifier_passed}/{r.verifier_total}")
+                else:
+                    row.append("-")
+            if show_resume:
+                if r.resume_attempted:
+                    status = "ok" if r.resume_success else "fail"
+                    row.append(f"{status} cp={r.checkpoint_count}")
+                else:
+                    row.append("-")
             task_table.add_row(*row)
         console.print(task_table)
 

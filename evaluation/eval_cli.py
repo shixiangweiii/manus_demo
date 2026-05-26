@@ -82,6 +82,10 @@ def show_benchmark_tasks() -> None:
     """Display all benchmark tasks without executing them."""
     tasks = get_benchmark_tasks()
 
+    def _verifier_label(task) -> str:
+        labels = [str(v.get("type", "?")) for v in task.verifiers]
+        return ", ".join(labels) if labels else "-"
+
     if _HAS_RICH:
         table = Table(
             title="Benchmark Tasks / 评测基准任务",
@@ -93,6 +97,7 @@ def show_benchmark_tasks() -> None:
         table.add_column("Tags", width=30)
         table.add_column("Expected Mode", width=14)
         table.add_column("Expected Tools", width=25)
+        table.add_column("Verifiers", width=22)
         table.add_column("Description", width=50)
 
         for t in tasks:
@@ -103,6 +108,7 @@ def show_benchmark_tasks() -> None:
                 ", ".join(t.tags),
                 gt.expected_complexity or "-",
                 ", ".join(gt.expected_tools) or "-",
+                _verifier_label(t),
                 t.task_description[:50] + "..." if len(t.task_description) > 50 else t.task_description,
             )
 
@@ -110,12 +116,14 @@ def show_benchmark_tasks() -> None:
         console.print(f"\nTotal: [bold]{len(tasks)}[/bold] benchmark tasks")
     else:
         # Plain-text fallback for environments without rich
-        print(f"{'Task ID':<14} {'Diff':<8} {'Mode':<10} {'Description'}")
-        print("-" * 80)
+        print(f"{'Task ID':<14} {'Diff':<8} {'Mode':<10} {'Verifier':<18} {'Description'}")
+        print("-" * 104)
         for t in tasks:
             gt = t.ground_truth
             desc = t.task_description[:48] + ".." if len(t.task_description) > 50 else t.task_description
-            print(f"{t.task_id:<14} {t.difficulty.value:<8} {gt.expected_complexity or '-':<10} {desc}")
+            verifier = _verifier_label(t)
+            verifier = verifier[:16] + ".." if len(verifier) > 18 else verifier
+            print(f"{t.task_id:<14} {t.difficulty.value:<8} {gt.expected_complexity or '-':<10} {verifier:<18} {desc}")
         print(f"\nTotal: {len(tasks)} benchmark tasks")
 
 
