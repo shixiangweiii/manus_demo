@@ -162,6 +162,14 @@ CHECKPOINT_DIR = os.path.expanduser(os.getenv("CHECKPOINT_DIR", os.path.join(MEM
 CHECKPOINT_MAX_PER_TASK = int(os.getenv("CHECKPOINT_MAX_PER_TASK", "5"))  # 每个任务最多保留的 checkpoint 文件数
 CHECKPOINT_RETENTION_DAYS = int(os.getenv("CHECKPOINT_RETENTION_DAYS", "7"))  # 已完成 checkpoint 保留天数
 
+# --- v15 Agentic Memory ---
+# --- 结构化记忆（v15 新增）---
+AGENTIC_MEMORY_ENABLED = os.getenv("AGENTIC_MEMORY_ENABLED", "false").lower() == "true"  # 启用 Agentic Memory（默认关闭，向后兼容）
+MEMORY_TOOLS_ENABLED = os.getenv("MEMORY_TOOLS_ENABLED", "false").lower() == "true"  # 注册 memory tools 到 ReAct（默认关闭）
+MEMORY_MIN_CONFIDENCE = float(os.getenv("MEMORY_MIN_CONFIDENCE", "0.35"))  # 记忆检索最低置信度阈值
+MEMORY_SEARCH_TOP_K = int(os.getenv("MEMORY_SEARCH_TOP_K", "3"))  # 记忆检索返回最大条数
+MEMORY_LLM_CONSOLIDATION_ENABLED = os.getenv("MEMORY_LLM_CONSOLIDATION_ENABLED", "false").lower() == "true"  # 启用 LLM 辅助记忆巩固（默认关闭）
+
 # --- v14 Phase 3: Harness Configuration ---
 # --- Harness 配置层（v14 Phase 3 新增）---
 REACT_TEMPERATURE = float(os.getenv("REACT_TEMPERATURE", "0.5"))          # ReActEngine chat_with_tools 温度

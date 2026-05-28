@@ -142,6 +142,21 @@ EVALUATION_SUITES: dict[str, EvaluationSuite] = {
         ],
         default_repeat=3,
     ),
+    "memory_agentic": EvaluationSuite(
+        id="memory_agentic",
+        description="Agentic Memory recall/store/correction/poisoning prevention benchmarks.",
+        task_ids=[
+            "memory_fact_write_001",
+            "memory_fact_recall_001",
+            "memory_experience_write_001",
+            "memory_experience_recall_001",
+            "memory_correction_001",
+            "memory_poisoning_001",
+        ],
+        default_modes=[PlanMode.SIMPLE, PlanMode.EMERGENT],
+        recommended_variants=["react_auto_baseline", "agentic_memory_on"],
+        default_repeat=3,
+    ),
 }
 
 

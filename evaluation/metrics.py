@@ -257,6 +257,9 @@ class TaskEvaluationResult(BaseModel):
     # 子智能体相关指标（采集后聚合，便于评估 SubAgent 路径的 ROI）
     subagent_metrics: dict[str, Any] = Field(default_factory=dict)
 
+    # v15 Agentic Memory per-task metrics
+    memory_metrics: dict[str, Any] = Field(default_factory=dict)
+
     # v8 Pass^k reliability (TauBench-style; only populated when --repeat k>1)
     # v8 借鉴 TauBench：单任务多次重跑度量稳定性
     trial_count: int = 1                                # 本任务实际重跑次数 k
@@ -376,6 +379,16 @@ class AggregatedMetrics(BaseModel):
     # v14.6.5 Reliability metrics
     resume_success_rate: float = 0.0            # Resume 任务恢复成功率
     checkpoint_avg_count: float = 0.0           # Resume 任务平均 checkpoint 数
+
+    # v15 Agentic Memory aggregates
+    memory_search_count: int = 0                # 记忆检索总次数
+    memory_hit_count: int = 0                   # 记忆命中总次数
+    memory_store_count: int = 0                 # 记忆存储总次数
+    memory_revoke_count: int = 0                # 记忆撤销总次数
+    memory_false_positive_count: int = 0        # 记忆误报次数
+    memory_hit_rate: float = 0.0                # 记忆命中率
+    memory_false_positive_rate: float = 0.0     # 记忆误报率
+    avg_memory_context_tokens: float = 0.0      # 平均记忆上下文 token 数
 
     # Raw results for drill-down
     results: list[TaskEvaluationResult] = Field(default_factory=list)
@@ -674,6 +687,13 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
         resume_success_rate = 0.0
         checkpoint_avg_count = 0.0
 
+    # v15 Agentic Memory aggregates
+    mem_search = sum(r.memory_metrics.get("search_count", 0) for r in results)
+    mem_hit = sum(r.memory_metrics.get("hit_count", 0) for r in results)
+    mem_store = sum(r.memory_metrics.get("store_count", 0) for r in results)
+    mem_revoke = sum(r.memory_metrics.get("revoke_count", 0) for r in results)
+    mem_hit_rate = mem_hit / mem_search if mem_search > 0 else 0.0
+
     return AggregatedMetrics(
         planning_mode=mode,
         total_tasks=n,
@@ -724,5 +744,11 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
         # v14.6.5: resume reliability metrics
         resume_success_rate=resume_success_rate,
         checkpoint_avg_count=checkpoint_avg_count,
+        # v15: agentic memory aggregates
+        memory_search_count=mem_search,
+        memory_hit_count=mem_hit,
+        memory_store_count=mem_store,
+        memory_revoke_count=mem_revoke,
+        memory_hit_rate=mem_hit_rate,
         results=results,
     )

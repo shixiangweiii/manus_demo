@@ -18,6 +18,7 @@ import json
 import logging
 import time
 import re
+import shutil
 import tempfile
 import uuid
 from typing import Any, TYPE_CHECKING
@@ -81,6 +82,7 @@ class EvaluationRunner:
         self,
         task: BenchmarkTask,
         mode: PlanMode,
+        _shared_memory_dir: str | None = None,
     ) -> TaskEvaluationResult:
         """
         Evaluate a single benchmark task with a specific planning mode.
@@ -121,6 +123,9 @@ class EvaluationRunner:
         original_hitl = config.HITL_ENABLED
         original_subagent = config.SUBAGENT_ENABLED
         original_goal_driven = config.ENABLE_GOAL_DRIVEN_PLANNER
+        original_agentic_memory = config.AGENTIC_MEMORY_ENABLED
+        original_memory_tools = config.MEMORY_TOOLS_ENABLED
+        original_memory_dir = config.MEMORY_DIR
 
         config.PLAN_MODE = mode.value
         if mode == PlanMode.EMERGENT:
@@ -132,6 +137,18 @@ class EvaluationRunner:
         is_subagent_task = "subagent" in tags_lower
         is_goal_driven_task = "goal_driven" in tags_lower
         is_resume_task = "resume" in tags_lower
+        is_memory_task = "memory" in tags_lower
+
+        # v15: Memory tasks get isolated MEMORY_DIR to avoid polluting user's real memory
+        _memory_tmpdir: str | None = None
+        if is_memory_task:
+            config.AGENTIC_MEMORY_ENABLED = True
+            config.MEMORY_TOOLS_ENABLED = True
+            if _shared_memory_dir:
+                config.MEMORY_DIR = _shared_memory_dir
+            else:
+                _memory_tmpdir = tempfile.mkdtemp(prefix="manus_eval_memory_")
+                config.MEMORY_DIR = _memory_tmpdir
 
         if is_hitl_task:
             config.HITL_ENABLED = True
@@ -207,6 +224,11 @@ class EvaluationRunner:
                 config.HITL_ENABLED = original_hitl
                 config.SUBAGENT_ENABLED = original_subagent
                 config.ENABLE_GOAL_DRIVEN_PLANNER = original_goal_driven
+                config.AGENTIC_MEMORY_ENABLED = original_agentic_memory
+                config.MEMORY_TOOLS_ENABLED = original_memory_tools
+                config.MEMORY_DIR = original_memory_dir
+                if _memory_tmpdir:
+                    shutil.rmtree(_memory_tmpdir, ignore_errors=True)
 
             checkpoint_task_id = probe.runtime_task_id or resume_seed_task_id
             checkpoint_count = (
@@ -371,39 +393,48 @@ class EvaluationRunner:
         if tasks is None:
             tasks = get_benchmark_tasks()
 
+        # v15: shared MEMORY_DIR for all memory tasks in this mode run
+        _shared_memory_dir: str | None = None
+        if any("memory" in t.tags for t in tasks):
+            _shared_memory_dir = tempfile.mkdtemp(prefix="manus_eval_memory_")
+
         results: list[TaskEvaluationResult] = []
-        for task in tasks:
-            if repeat <= 1:
-                result = await self.evaluate_task(task, mode)
-                result.trial_count = 1
-                result.trial_results = [result.execution.task_success]
-                results.append(result)
-                logger.info(
-                    "[EvalRunner] Task '%s' (%s): score=%.3f success=%s",
-                    task.task_id, mode.value, result.overall_score, result.execution.task_success,
-                )
-            else:
-                trial_results: list[bool] = []
-                last_result: TaskEvaluationResult | None = None
-                for k_idx in range(repeat):
-                    r = await self.evaluate_task(task, mode)
-                    trial_results.append(r.execution.task_success)
-                    last_result = r
+        try:
+            for task in tasks:
+                if repeat <= 1:
+                    result = await self.evaluate_task(task, mode, _shared_memory_dir=_shared_memory_dir)
+                    result.trial_count = 1
+                    result.trial_results = [result.execution.task_success]
+                    results.append(result)
                     logger.info(
-                        "[EvalRunner] Task '%s' (%s) trial %d/%d: success=%s",
-                        task.task_id, mode.value, k_idx + 1, repeat,
-                        r.execution.task_success,
+                        "[EvalRunner] Task '%s' (%s): score=%.3f success=%s",
+                        task.task_id, mode.value, result.overall_score, result.execution.task_success,
                     )
-                assert last_result is not None
-                last_result.trial_count = repeat
-                last_result.trial_results = trial_results
-                last_result.pass_at_k = sum(trial_results) / repeat
-                results.append(last_result)
-                logger.info(
-                    "[EvalRunner] Task '%s' (%s) pass@%d=%.2f (%d/%d successes)",
-                    task.task_id, mode.value, repeat,
-                    last_result.pass_at_k, sum(trial_results), repeat,
-                )
+                else:
+                    trial_results: list[bool] = []
+                    last_result: TaskEvaluationResult | None = None
+                    for k_idx in range(repeat):
+                        r = await self.evaluate_task(task, mode, _shared_memory_dir=_shared_memory_dir)
+                        trial_results.append(r.execution.task_success)
+                        last_result = r
+                        logger.info(
+                            "[EvalRunner] Task '%s' (%s) trial %d/%d: success=%s",
+                            task.task_id, mode.value, k_idx + 1, repeat,
+                            r.execution.task_success,
+                        )
+                    assert last_result is not None
+                    last_result.trial_count = repeat
+                    last_result.trial_results = trial_results
+                    last_result.pass_at_k = sum(trial_results) / repeat
+                    results.append(last_result)
+                    logger.info(
+                        "[EvalRunner] Task '%s' (%s) pass@%d=%.2f (%d/%d successes)",
+                        task.task_id, mode.value, repeat,
+                        last_result.pass_at_k, sum(trial_results), repeat,
+                    )
+        finally:
+            if _shared_memory_dir:
+                shutil.rmtree(_shared_memory_dir, ignore_errors=True)
 
         return aggregate_results(results)
 

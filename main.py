@@ -455,6 +455,19 @@ def on_event(event: str, data: Any) -> None:
         # 长期记忆已存储提示
         console.print("[dim]   (Result stored in long-term memory)[/dim]")
 
+    # --- v15 Agentic Memory Events ---
+    elif event == "memory_search_start":
+        console.print("[dim]   Searching agentic memory...[/dim]")
+    elif event == "memory_search_result":
+        count = data.get("count", 0) if isinstance(data, dict) else 0
+        console.print(f"[dim]   Agentic memory: {count} results found[/dim]")
+    elif event == "memory_store":
+        console.print("[dim]   (Result stored in agentic memory)[/dim]")
+    elif event == "memory_revoke":
+        console.print(f"[dim]   Memory revoked: {data}[/dim]")
+    elif event == "memory_consolidate":
+        console.print("[dim]   Memory consolidated[/dim]")
+
     elif event == "token_usage_summary":
         # Token 消耗追踪汇总：显示明细表 + 引擎汇总 + 总计
         summary: TokenUsageSummary = data
@@ -658,12 +671,14 @@ async def run_interactive() -> None:
 
     llm_client = LLMClient()
     # 注册五个工具：网络搜索、URL页面抓取、Python 代码执行、文件读写、Shell 命令执行
-    tools = [WebSearchTool(), FetchUrlTool(), UserLocationTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    tools = _build_tools()
+    agentic_service = _build_agentic_service()
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
         on_event=on_event,  # 绑定 UI 事件回调
         interactive=True,   # v13 HITL: 交互模式可同步收集用户输入
+        agentic_memory_service=agentic_service,
     )
 
     while True:
@@ -711,15 +726,38 @@ async def run_single(task: str) -> None:
     用于 `python main.py "任务描述"` 的命令行用法。
     """
     llm_client = LLMClient()
-    tools = [WebSearchTool(), FetchUrlTool(), UserLocationTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    tools = _build_tools()
+    agentic_service = _build_agentic_service()
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
         on_event=on_event,
         interactive=False,  # v13 HITL: 单任务模式无法收集用户输入，HITL 自动失活
+        agentic_memory_service=agentic_service,
     )
 
     await orchestrator.run(task)
+
+
+def _build_tools() -> list:
+    """Build the base tool list (memory tools registered by OrchestratorAgent)."""
+    from tools.base import BaseTool
+    tools: list[BaseTool] = [
+        WebSearchTool(), FetchUrlTool(), UserLocationTool(),
+        CodeExecutorTool(), FileOpsTool(), ShellTool(),
+    ]
+    return tools
+
+
+def _build_agentic_service():
+    """Build AgenticMemoryService if memory tools are enabled (v15).
+    Returns the service instance or None. The same instance is passed to
+    OrchestratorAgent so tools and orchestrator share one Store."""
+    if config.MEMORY_TOOLS_ENABLED and config.AGENTIC_MEMORY_ENABLED:
+        from memory.agentic_store import AgenticMemoryStore
+        from memory.service import AgenticMemoryService
+        return AgenticMemoryService(AgenticMemoryStore())
+    return None
 
 
 def _list_tasks() -> None:
@@ -750,12 +788,14 @@ def _list_tasks() -> None:
 async def run_resume(task_id: str) -> None:
     """Resume a checkpointed task. / 恢复一个 checkpointed 任务。"""
     llm_client = LLMClient()
-    tools = [WebSearchTool(), FetchUrlTool(), UserLocationTool(), CodeExecutorTool(), FileOpsTool(), ShellTool()]
+    tools = _build_tools()
+    agentic_service = _build_agentic_service()
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
         on_event=on_event,
         interactive=True,
+        agentic_memory_service=agentic_service,
     )
     try:
         answer = await orchestrator.resume(task_id)

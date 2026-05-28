@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-Multi-agent AI system with hybrid plan routing. Tasks classified by complexity → one of four engines: simple flat planning (v1), DAG-based parallel (v2), emergent TODO-list (v5), or goal-driven (v8). Supports SubAgent spawning (v9), OTel tracing (v7), HITL ask_user (v13), and Task Resume/checkpoint persistence (v14.5).
+Multi-agent AI system with hybrid plan routing. Tasks classified by complexity → one of four engines: simple flat planning (v1), DAG-based parallel (v2), emergent TODO-list (v5), or goal-driven (v8). Supports SubAgent spawning (v9), OTel tracing (v7), HITL ask_user (v13), Task Resume/checkpoint persistence (v14.5), and Agentic Memory (v15).
 
 - **Language**: Python 3.11+ (async/await throughout)
 - **LLM**: OpenAI-compatible API (DeepSeek default)
 - **UI**: Rich console, event-driven
-- **Version**: v14.5 + Task Resume checkpoint persistence
+- **Version**: v15 Agentic Memory
 
 ## Architecture
 
@@ -19,6 +19,7 @@ User Task → Orchestrator → [classify_task] → simple / complex / emergent
              ENABLE_GOAL_DRIVEN_PLANNER=true  → GoalDrivenPlanner (goal anchoring + dynamic TODO)
 All paths → Token usage → Long-term memory → TracingBridge (OTel)
 All paths → Checkpoint persistence (v14.5, per-step/per-TODO/per-super-step save, resume from checkpoint)
+All paths → Agentic Memory (v15, structured records, bilingual retrieval, Memory as Tool, opt-in via AGENTIC_MEMORY_ENABLED)
 ReAct loops → subagent tool (depth=1, isolated, summary-only)
 ReAct loops → ask_user tool (HITL, asyncio.Future bridge, interactive-only)
 ```
@@ -41,6 +42,8 @@ ReAct loops → ask_user tool (HITL, asyncio.Future bridge, interactive-only)
 - **SubAgentStatus**: `PENDING / RUNNING / COMPLETED / FAILED / TIMED_OUT`
 - **GoalAction**: `EXECUTE_TODO / REPLAN / COMPLETE`
 - **TaskRunState**: `RUNNING / PAUSED_WAITING_USER / COMPLETED / FAILED`
+- **MemoryKind**: `FACTUAL / EXPERIENTIAL / WORKING / PROCEDURAL` (v15, in `memory/models.py`)
+- **MemoryStatus**: `ACTIVE / REVOKED` (v15, in `memory/models.py`)
 
 ## Module Roles
 
@@ -51,7 +54,7 @@ ReAct loops → ask_user tool (HITL, asyncio.Future bridge, interactive-only)
 - **`tools/`** — BaseTool ABC, WebSearchTool (Bailian MCP + DDGS fallback), FetchUrlTool, UserLocationTool, CodeExecutorTool, FileOpsTool, ShellTool, SubAgentTool, AskUserTool, ToolRouter, BailianMCPClient
 - **`tracing/`** — TracingBridge (event→span), FastAPI web viewer, multi-backend exporters
 - **`checkpoint/`** — TaskCheckpoint + path state models (SimplePathState, DAGPathState, EmergentPathState, GoalDrivenPathState), TaskStateStore (atomic JSON file persistence, version check, pruning)
-- **`memory/`** — ShortTermMemory (sliding-window), LongTermMemory (JSON-file)
+- **`memory/`** — ShortTermMemory (sliding-window), LongTermMemory (JSON-file), AgenticMemoryStore + AgenticMemoryService (v15 structured memory), models (MemoryKind, MemoryStatus, AgenticMemoryRecord)
 - **`context/`** — ContextManager (token estimation + LLM-based compression with safe split)
 - **`knowledge/`** — KnowledgeRetriever (TF-IDF + cosine)
 - **`evaluation/`** — 12 tasks, 4-dimension weighted scoring (Planning 30% / Execution 40% / Efficiency 20% / Reflection 10%)
@@ -120,6 +123,11 @@ All via env vars / `.env` (see `config.py`):
 | `CHECKPOINT_DIR` | `~/.manus_demo/checkpoints` | Checkpoint storage directory |
 | `CHECKPOINT_MAX_PER_TASK` | `5` | Max checkpoint files per task |
 | `CHECKPOINT_RETENTION_DAYS` | `7` | Auto-delete checkpoints older than N days |
+| `AGENTIC_MEMORY_ENABLED` | `false` | v15 Agentic Memory master switch |
+| `MEMORY_TOOLS_ENABLED` | `false` | Register memory_search/store/consolidate/revoke tools |
+| `MEMORY_MIN_CONFIDENCE` | `0.35` | Min confidence for memory retrieval |
+| `MEMORY_SEARCH_TOP_K` | `3` | Max memory results per search |
+| `MEMORY_LLM_CONSOLIDATION_ENABLED` | `false` | Enable LLM-assisted consolidation |
 
 ## Code Conventions
 

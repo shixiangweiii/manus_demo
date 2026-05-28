@@ -110,6 +110,7 @@ class OrchestratorAgent:
         on_event: Callable[[str, Any], None] | None = None,
         interactive: bool = True,
         task_state_store: TaskStateStore | None = None,
+        agentic_memory_service: Any | None = None,
     ):
         # interactive: whether the host environment can collect user input
         # synchronously. main.run_interactive passes True, run_single passes False.
@@ -206,6 +207,36 @@ class OrchestratorAgent:
         self.short_term = ShortTermMemory()    # 短期记忆：当前会话上下文
         self.long_term = LongTermMemory()      # 长期记忆：跨会话持久化
         self.knowledge = KnowledgeRetriever()  # 知识库：TF-IDF 检索本地文档
+
+        # v15 Agentic Memory (feature-flagged, default off)
+        # v15 结构化记忆（特性开关控制，默认关闭）
+        self._agentic_memory_enabled = config.AGENTIC_MEMORY_ENABLED
+        self._agentic_memory_service = None
+        if self._agentic_memory_enabled:
+            if agentic_memory_service is not None:
+                self._agentic_memory_service = agentic_memory_service
+            else:
+                from memory.agentic_store import AgenticMemoryStore
+                from memory.service import AgenticMemoryService
+                store = AgenticMemoryStore()
+                self._agentic_memory_service = AgenticMemoryService(store)
+            self._agentic_memory_service._store.migrate_from_legacy()
+            logger.info("[Orchestrator] Agentic Memory (v15) enabled")
+
+            # Register memory tools inside orchestrator (same pattern as SubAgent/HITL)
+            # 在 orchestrator 内部注册 memory tools（与 SubAgent/HITL 注册模式一致）
+            if config.MEMORY_TOOLS_ENABLED and self._agentic_memory_service is not None:
+                from tools.memory_tools import (
+                    MemorySearchTool, MemoryStoreTool,
+                    MemoryConsolidateTool, MemoryRevokeTool,
+                )
+                svc = self._agentic_memory_service
+                tools = list(tools or []) + [
+                    MemorySearchTool(svc, on_event=self._emit),
+                    MemoryStoreTool(svc, on_event=self._emit),
+                    MemoryConsolidateTool(svc, on_event=self._emit),
+                    MemoryRevokeTool(svc, on_event=self._emit),
+                ]
 
         # Event callback for UI updates（UI 事件回调）
         self._on_event = on_event or (lambda *_: None)
@@ -325,22 +356,31 @@ class OrchestratorAgent:
         Retrieve relevant memories and knowledge for the task.
         检索与当前任务相关的历史记忆和知识库内容。
         """
-        memories = self.long_term.search(task)
-        memory_context = self.long_term.format_memories(memories)
-        self._emit("memory", memory_context)
+        combined = ""
+
+        # v15 Agentic Memory path / v15 结构化记忆路径
+        if self._agentic_memory_enabled and self._agentic_memory_service:
+            self._emit("memory_search_start", {"query": task})
+            results = self._agentic_memory_service.search_for_task(task, top_k=config.MEMORY_SEARCH_TOP_K)
+            agentic_context = self._agentic_memory_service.format_context(results)
+            self._emit("memory_search_result", {"query": task, "count": len(results), "results": results})
+            if results:
+                combined += f"=== Agentic Memory ===\n{agentic_context}\n\n"
+        else:
+            # Legacy path / 旧路径
+            memories = self.long_term.search(task)
+            memory_context = self.long_term.format_memories(memories)
+            self._emit("memory", memory_context)
+            if memories:
+                combined += f"=== Past Experience ===\n{memory_context}\n\n"
 
         knowledge_results = self.knowledge.search(task)
         knowledge_context = self.knowledge.format_results(knowledge_results)
         self._emit("knowledge", knowledge_context)
-
-        self.short_term.add({"role": "user", "content": task})
-
-        # 将记忆和知识合并为单一上下文字符串，注入后续规划/执行流程
-        combined = ""
-        if memories:
-            combined += f"=== Past Experience ===\n{memory_context}\n\n"
         if knowledge_results:
             combined += f"=== Relevant Knowledge ===\n{knowledge_context}\n\n"
+
+        self.short_term.add({"role": "user", "content": task})
         return combined
 
     # ------------------------------------------------------------------
@@ -806,13 +846,24 @@ class OrchestratorAgent:
         Store task completion in long-term memory.
         将任务完成情况存入长期记忆，供后续类似任务参考。
         """
-        entry = MemoryEntry(
-            task=task,
-            summary=answer[:500],  # 只存储前 500 字符作为摘要
-            learnings=[f"Completed task: {task[:100]}"],
-        )
-        self.long_term.store(entry)
-        self._emit("memory_stored", entry)
+        if self._agentic_memory_enabled and self._agentic_memory_service:
+            # v15 Agentic Memory path / v15 结构化记忆路径
+            self._agentic_memory_service.store_task_result(
+                task=task,
+                answer=answer,
+                task_id=self._current_task_id or "",
+                success=True,
+            )
+            self._emit("memory_store", {"task_id": self._current_task_id})
+        else:
+            # Legacy path / 旧路径
+            entry = MemoryEntry(
+                task=task,
+                summary=answer[:500],  # 只存储前 500 字符作为摘要
+                learnings=[f"Completed task: {task[:100]}"],
+            )
+            self.long_term.store(entry)
+            self._emit("memory_stored", entry)
 
     @staticmethod
     def _make_multicast(*callbacks: Callable) -> Callable:

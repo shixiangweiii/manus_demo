@@ -135,6 +135,16 @@ EVALUATION_VARIANTS: dict[str, EvaluationVariant] = {
         modes=[PlanMode.COMPLEX],
         expected_focus="parallel DAG throughput",
     ),
+    "agentic_memory_on": EvaluationVariant(
+        id="agentic_memory_on",
+        description="Agentic Memory enabled with memory tools for recall/store/correction.",
+        env_overrides={
+            "AGENTIC_MEMORY_ENABLED": True,
+            "MEMORY_TOOLS_ENABLED": True,
+        },
+        modes=[PlanMode.SIMPLE, PlanMode.EMERGENT],
+        expected_focus="memory recall and storage",
+    ),
 }
 
 

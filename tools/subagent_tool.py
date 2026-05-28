@@ -165,11 +165,13 @@ class SubAgentTool(BaseTool):
 
         tool_whitelist = kwargs.get("tool_whitelist", [])
 
-        # Validate and filter tool whitelist — always exclude "subagent" (depth=1) and "ask_user" (HITL isolation)
+        # Validate and filter tool whitelist — always exclude blocked tools
+        # v15: also block memory_store/memory_revoke to prevent SubAgent from polluting global memory
+        _BLOCKED_TOOLS = ("subagent", "ask_user", "memory_store", "memory_revoke")
         validated_whitelist = []
         for name in tool_whitelist:
-            if name in ("subagent", "ask_user"):
-                continue  # Structural depth=1 enforcement + HITL isolation
+            if name in _BLOCKED_TOOLS:
+                continue  # Structural depth=1 enforcement + HITL isolation + memory write protection
             if name in self._available_tools:
                 validated_whitelist.append(name)
             else:
@@ -181,12 +183,12 @@ class SubAgentTool(BaseTool):
             if default_whitelist:
                 for name in default_whitelist.split(","):
                     name = name.strip()
-                    if name and name not in ("subagent", "ask_user") and name in self._available_tools:
+                    if name and name not in _BLOCKED_TOOLS and name in self._available_tools:
                         validated_whitelist.append(name)
             if not validated_whitelist:
                 validated_whitelist = [
                     name for name in self._available_tools.keys()
-                    if name not in ("subagent", "ask_user")
+                    if name not in _BLOCKED_TOOLS
                 ]
 
         # Build restricted tool list

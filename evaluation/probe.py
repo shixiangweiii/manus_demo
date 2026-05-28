@@ -141,6 +141,13 @@ class EvaluationProbe:
         self.goal_reflection_count: int = 0
         self.stagnation_detected: bool = False
 
+        # v15 Agentic Memory specifics
+        self.memory_search_count: int = 0
+        self.memory_hit_count: int = 0
+        self.memory_store_count: int = 0
+        self.memory_revoke_count: int = 0
+        self.memory_context_tokens: int = 0
+
         # v2 DAG details
         self.dag_rollback_count: int = 0
         self.condition_eval_count: int = 0
@@ -432,6 +439,16 @@ class EvaluationProbe:
         elif event == "goal_drift_alert":
             pass
 
+        # --- v15 Agentic Memory events ---
+        elif event == "memory_search_start":
+            self.memory_search_count += 1
+        elif event == "memory_search_result":
+            self.memory_hit_count += (data.get("count", 0) if isinstance(data, dict) else 0)
+        elif event == "memory_store":
+            self.memory_store_count += 1
+        elif event == "memory_revoke":
+            self.memory_revoke_count += 1
+
         # --- v2 DAG detail events ---
         elif event == "node_rollback":
             self.dag_rollback_count += 1
@@ -658,6 +675,14 @@ class EvaluationProbe:
                 "limits_hit": self.subagent_limits_hit,
             }
 
+        # v15 Memory per-task metrics
+        memory_metrics = {
+            "search_count": self.memory_search_count,
+            "hit_count": self.memory_hit_count,
+            "store_count": self.memory_store_count,
+            "revoke_count": self.memory_revoke_count,
+        }
+
         # Ground truth range validation
         if gt.expected_hitl_calls is not None:
             lo, hi = gt.expected_hitl_calls
@@ -717,6 +742,7 @@ class EvaluationProbe:
             failure_category=self.failures[0].category.value if self.failures else "",
             llm_model=llm_model,
             subagent_metrics=subagent_metrics,
+            memory_metrics=memory_metrics,
             verifier_total=verifier_total,
             verifier_passed=verifier_passed,
             verifier_failed=verifier_failed,
