@@ -153,6 +153,53 @@ class TestMCPBridgeToolExecute:
         assert "inner error" in result
 
 
+class TestMCPBridgeToolEvents:
+    """P1-4: MCPBridgeTool must emit mcp_tool_executed so the eval probe can
+    count MCP tool executions."""
+
+    @pytest.mark.asyncio
+    async def test_emits_executed_on_success(self):
+        events = []
+        manager = _make_manager(call_result="ok")
+        tool = MCPBridgeTool(
+            prefixed_name="mcp_test_echo", description="Echo",
+            mcp_tool_schema={"type": "object", "properties": {}},
+            client_manager=manager, original_tool_name="echo", server_name="test",
+            on_event=lambda e, d: events.append((e, d)),
+        )
+        await tool.execute()
+        executed = [d for e, d in events if e == "mcp_tool_executed"]
+        assert len(executed) == 1
+        assert executed[0]["error"] is False
+
+    @pytest.mark.asyncio
+    async def test_emits_executed_with_error_flag_on_failure(self):
+        events = []
+        manager = _make_manager()
+        manager.call_tool = AsyncMock(side_effect=RuntimeError("boom"))
+        tool = MCPBridgeTool(
+            prefixed_name="mcp_test_fail", description="Fail",
+            mcp_tool_schema={"type": "object", "properties": {}},
+            client_manager=manager, original_tool_name="fail", server_name="test",
+            on_event=lambda e, d: events.append((e, d)),
+        )
+        await tool.execute()
+        executed = [d for e, d in events if e == "mcp_tool_executed"]
+        assert len(executed) == 1
+        assert executed[0]["error"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_event_when_no_sink(self):
+        # on_event=None must not raise.
+        manager = _make_manager(call_result="ok")
+        tool = MCPBridgeTool(
+            prefixed_name="mcp_test_echo", description="Echo",
+            mcp_tool_schema={"type": "object", "properties": {}},
+            client_manager=manager, original_tool_name="echo", server_name="test",
+        )
+        assert await tool.execute() == "ok"
+
+
 class TestMCPBridgeToolStrictMode:
     def test_strict_mode_rejects_complex_schema(self):
         manager = _make_manager()

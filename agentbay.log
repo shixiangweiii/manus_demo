@@ -1,0 +1,81 @@
+2026-05-30 21:35:39.747 | AgentBay | INFO     | 39545:140704579388224 | agentbay._common.config:_load_dotenv_with_fallback:120 | Loaded .env file from: /Users/shixiangweii/PycharmProjects/manus_demo/.env
+2026-05-30 21:35:42.088 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.agentbay:create:819 | [32m✅ API Response: CreateSession, RequestId=F611D8B7-4766-5865-A2C5-BFCED109E2B6[0m
+2026-05-30 21:35:42.089 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ session_id=s-04pomilse8hdvywsm[0m
+2026-05-30 21:35:42.089 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ resource_url=https://wy.aliyun.com/mcp.html?authcode=acv2JliP6fOGksCGxGiZEJxp7hP6UIFsweqiSeFIqncXl/r/qAzlj/N9m139tUjDYGJRyZ15oGVGqtfMQD34JrjZV70QE20/s30sQvDYIYSbM93JAIqP3Um2UpZWpxnpj3FNoqcCLQsuLpaxCoSS5koPFfBFxBkP6L20hD4r84ZuLi5B9et1iIYvThYgYzPZQNL3iuBkbq12Ych6AfRqehljJpU2h3es+Mr34P6tPPMyCFkFk+ShIBWce98VsVfZ6rE1nb1RWWaOiABy+OcOPMpx31o6rP6NfJktOZ3wRDr7oPxoltkd5kAJ6nM+rVLAloy9781WYcch35HyHlyhq9I4V4rad+LgTF9nPBBg4GxBD6pxLyz3W9MvuQco8t4avu6c&resourceId=p-0cbg3hbors5x5f9f2&connectionProperties=%7B%22authMode%22%3A%22Session%22%2C%22serviceProvider%22%3A%22Default%22%7D&appId=mcp-server-ubuntu&input=true&keyboard=true&app=true&productType=AIAgent&customAppInfo=eyJsb2dpblJlZ2lvbklkIjoiY24tc2hhbmdoYWkiLCJpc0FnZW50QmF5IjpmYWxzZSwib3NUeXBlIjoiTGludXgifQ==[0m
+2026-05-30 21:35:42.090 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ AppInstanceId=ai-0cbg3hbort5fovwi4[0m
+2026-05-30 21:35:42.090 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.agentbay:_build_session_from_response:294 | 🆔 Session created: s-04pomilse8hdvywsm, AppInstanceId: ai-0cbg3hbort5fovwi4
+2026-05-30 21:35:42.209 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:delete:544 | 🔄 Waiting for session s-04pomilse8hdvywsm to be deleted...
+2026-05-30 21:35:42.210 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:309 | [34m🔗 API Call: GetSessionDetail[0m
+2026-05-30 21:35:42.210 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:309 |   └─ SessionId=s-04pomilse8hdvywsm
+2026-05-30 21:35:42.285 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:349 |   ✓ GetSessionDetail API call async successful{'Aliuid': '1213763666198530', 'ApikeyId': 'ak-bi17egtnmzpmmobvq', 'AppInstanceGroupId': 'aig-0buj1s9imn282at7r', 'AppInstanceId': 'ai-0cbg3hbort5fovwi4', 'AppUserId': 'ak-bi17egtnmzpmmobvq_s-04pomilse8hdvywsm', 'BizType': 0, 'EndReason': 'API_CALL', 'ImageId': 'computer-use-ubuntu-2204', 'ImageType': 'ComputerUse', 'IsDeleted': 0, 'RegionId': 'cn-hangzhou', 'Status': 'DELETING'}
+2026-05-30 21:35:42.286 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:357 | [32m✅ API Response: GetSessionDetail, RequestId=6184E2B0-AB2F-5883-A50F-08898ABE6C45[0m
+2026-05-30 21:35:42.286 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:357 | [32m  └─ status=DELETING[0m
+2026-05-30 21:35:43.289 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:309 | [34m🔗 API Call: GetSessionDetail[0m
+2026-05-30 21:35:43.290 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:309 |   └─ SessionId=s-04pomilse8hdvywsm
+2026-05-30 21:35:43.407 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:349 |   ✓ GetSessionDetail API call async successful{'Aliuid': '1213763666198530', 'ApikeyId': 'ak-bi17egtnmzpmmobvq', 'AppInstanceGroupId': 'aig-0buj1s9imn282at7r', 'AppInstanceId': 'ai-0cbg3hbort5fovwi4', 'AppUserId': 'ak-bi17egtnmzpmmobvq_s-04pomilse8hdvywsm', 'BizType': 0, 'EndReason': 'API_CALL', 'ImageId': 'computer-use-ubuntu-2204', 'ImageType': 'ComputerUse', 'IsDeleted': 1, 'RegionId': 'cn-hangzhou', 'Status': 'FINISH'}
+2026-05-30 21:35:43.408 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:357 | [32m✅ API Response: GetSessionDetail, RequestId=B8432A19-70E2-5EC1-A069-DE5B1E0AB4C9[0m
+2026-05-30 21:35:43.408 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:get_status:357 | [32m  └─ status=FINISH[0m
+2026-05-30 21:35:43.408 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:delete:599 | ✅ Session s-04pomilse8hdvywsm successfully deleted
+2026-05-30 21:35:43.409 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:delete:607 | [32m✅ API Response: DeleteSessionAsync, RequestId=AE2B37DC-703E-5B20-AA1D-4BC3CF229861[0m
+2026-05-30 21:35:43.410 | AgentBay | INFO     | 39545:140704579388224 | agentbay._sync.session:delete:607 | [32m  └─ session_id=s-04pomilse8hdvywsm[0m
+2026-05-30 21:36:37.580 | AgentBay | INFO     | 39663:140704579388224 | agentbay._common.config:_load_dotenv_with_fallback:120 | Loaded .env file from: /Users/shixiangweii/PycharmProjects/manus_demo/.env
+2026-05-30 21:36:38.556 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.agentbay:create:819 | [32m✅ API Response: CreateSession, RequestId=5018E516-1BD1-59CD-B6ED-B357AE1A5E90[0m
+2026-05-30 21:36:38.557 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ session_id=s-04pomkizzk2tv2ci1[0m
+2026-05-30 21:36:38.557 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ resource_url=[0m
+2026-05-30 21:36:38.557 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ AppInstanceId=arc-ai-5fffc1ac1ea64dc79cbc8490a2[0m
+2026-05-30 21:36:38.558 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.agentbay:_build_session_from_response:294 | 🆔 Session created: s-04pomkizzk2tv2ci1, AppInstanceId: arc-ai-5fffc1ac1ea64dc79cbc8490a2
+2026-05-30 21:36:38.566 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1091 | [34m🔗 API Call: CallMcpTool(LinkUrl)[0m
+2026-05-30 21:36:38.567 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1091 |   └─ Tool=run_code, ArgsLength=371, RequestId=link-1780148198566-377693291
+2026-05-30 21:36:41.192 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1188 | [32m✅ API Response: CallMcpTool(LinkUrl) Response, RequestId=link-1780148198566-377693291[0m
+2026-05-30 21:36:41.193 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1188 | [32m  └─ tool_name=run_code[0m
+2026-05-30 21:36:41.193 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1188 | [32m  └─ server=wuying_codespace[0m
+2026-05-30 21:36:41.194 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1188 | [32m  └─ is_error=False[0m
+2026-05-30 21:36:41.194 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1188 | [32m  └─ data_len=180[0m
+2026-05-30 21:36:41.194 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:_call_mcp_tool_link_url:1188 | [32m  └─ response_preview={
+	"executionError" : "",
+	"result" : [],
+	"stderr" : [],
+	"stdout" : 
+	[
+		"Factorial of 10: 3628800\nFibonacci of 10: 55\nSquares: [1, 4, 9, 16, 25, 36, 49, 64, 81, 100]\n"
+	]
+}
+[0m
+2026-05-30 21:36:41.346 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:delete:544 | 🔄 Waiting for session s-04pomkizzk2tv2ci1 to be deleted...
+2026-05-30 21:36:41.346 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:309 | [34m🔗 API Call: GetSessionDetail[0m
+2026-05-30 21:36:41.347 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:309 |   └─ SessionId=s-04pomkizzk2tv2ci1
+2026-05-30 21:36:41.424 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:349 |   ✓ GetSessionDetail API call async successful{'Aliuid': '1213763666198530', 'ApikeyId': 'ak-bi17egtnmzpmmobvq', 'AppInstanceGroupId': 'arc-pool-909532e82609487da4ddeeba207a49f4', 'AppInstanceId': 'arc-ai-5fffc1ac1ea64dc79cbc8490a2', 'AppUserId': 'ak-bi17egtnmzpmmobvq_s-04pomkizzk2tv2ci1', 'BizType': 0, 'EndReason': 'API_CALL', 'ImageId': 'code-space-debian-12', 'ImageType': 'CodeSpace', 'IsDeleted': 0, 'RegionId': 'cn-hangzhou', 'Status': 'DELETING'}
+2026-05-30 21:36:41.425 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:357 | [32m✅ API Response: GetSessionDetail, RequestId=B91BA0E3-D3B5-5194-957E-9C6777C4BE70[0m
+2026-05-30 21:36:41.425 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:357 | [32m  └─ status=DELETING[0m
+2026-05-30 21:36:42.427 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:309 | [34m🔗 API Call: GetSessionDetail[0m
+2026-05-30 21:36:42.428 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:309 |   └─ SessionId=s-04pomkizzk2tv2ci1
+2026-05-30 21:36:42.523 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:349 |   ✓ GetSessionDetail API call async successful{'Aliuid': '1213763666198530', 'ApikeyId': 'ak-bi17egtnmzpmmobvq', 'AppInstanceGroupId': 'arc-pool-909532e82609487da4ddeeba207a49f4', 'AppInstanceId': 'arc-ai-5fffc1ac1ea64dc79cbc8490a2', 'AppUserId': 'ak-bi17egtnmzpmmobvq_s-04pomkizzk2tv2ci1', 'BizType': 0, 'EndReason': 'API_CALL', 'ImageId': 'code-space-debian-12', 'ImageType': 'CodeSpace', 'IsDeleted': 1, 'RegionId': 'cn-hangzhou', 'Status': 'FINISH'}
+2026-05-30 21:36:42.524 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:357 | [32m✅ API Response: GetSessionDetail, RequestId=C4D29E38-95D2-5E6A-B216-A43306800D56[0m
+2026-05-30 21:36:42.524 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:get_status:357 | [32m  └─ status=FINISH[0m
+2026-05-30 21:36:42.525 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:delete:599 | ✅ Session s-04pomkizzk2tv2ci1 successfully deleted
+2026-05-30 21:36:42.525 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:delete:607 | [32m✅ API Response: DeleteSessionAsync, RequestId=1D340763-ECB1-53B4-9014-28A356715753[0m
+2026-05-30 21:36:42.525 | AgentBay | INFO     | 39663:140704579388224 | agentbay._sync.session:delete:607 | [32m  └─ session_id=s-04pomkizzk2tv2ci1[0m
+2026-05-30 21:40:52.520 | AgentBay | INFO     | 40075:140704579388224 | agentbay._common.config:_load_dotenv_with_fallback:120 | Loaded .env file from: /Users/shixiangweii/PycharmProjects/manus_demo/.env
+2026-05-30 21:40:53.979 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.agentbay:create:819 | [32m✅ API Response: CreateSession, RequestId=A315AC47-B3A5-50D3-88DD-5D052F74E424[0m
+2026-05-30 21:40:53.979 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ session_id=s-04owxyqhjnnzjqe4h[0m
+2026-05-30 21:40:53.980 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ resource_url=https://wy.aliyun.com/mcp.html?authcode=acv2XHZZ3CoMTKFEsjwqIykYmKXkZwmhnvPKGY4s/Qx8VsINGCRNtwBo9RtyJaj1jEqbXQlsvgEuzGZ7Z8zhn+k8EQ/BpEHJsYref+Kfmk5fq1B3rxlIbTgpt9e7UsJ4Gg4JEwu3D6cQW86owQBa0XHzyI1BG0oscTuvAJwKqcjlEP1LgAayc+p6+fNLDfIMH+BENZ7Kw3dWF5H+Irnrg1AkbgQ8g2Y3IU9alCmyusENWiBpvLYd6VT4MP3OMbAeXJIZeUudZD64kOn6WNCxEsQyQEYDE2ZqTWbJ2cI6JetDFJB1PffF0wkhFnVYd1bRsC27m+bw/OeRBbvyESLnPtecL1VYQLzHcDsJrMTS1upQ2dzFfaGHz6rEEcQ8VBPIiVHI&resourceId=p-0cbg3fgv3ee4u772k&connectionProperties=%7B%22authMode%22%3A%22Session%22%2C%22serviceProvider%22%3A%22Default%22%7D&appId=agentBay-browser-cdp&input=true&keyboard=true&productType=AIAgent&customAppInfo=eyJsb2dpblJlZ2lvbklkIjoiY24tc2hhbmdoYWkiLCJpc0FnZW50QmF5IjpmYWxzZSwib3NUeXBlIjoiTGludXgifQ==[0m
+2026-05-30 21:40:53.980 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.agentbay:create:819 | [32m  └─ AppInstanceId=ai-0cbg3fgv3ee4rqlv8[0m
+2026-05-30 21:40:53.981 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.agentbay:_build_session_from_response:294 | 🆔 Session created: s-04owxyqhjnnzjqe4h, AppInstanceId: ai-0cbg3fgv3ee4rqlv8
+2026-05-30 21:40:58.254 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.browser:initialize:120 | [32m✅ API Response: InitBrowser (async)[0m
+2026-05-30 21:40:58.255 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.browser:initialize:120 | [32m  └─ port=9333[0m
+2026-05-30 21:40:58.255 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.browser:initialize:120 | [32m  └─ status=successfully initialized[0m
+2026-05-30 21:40:58.255 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.browser:initialize:128 | Browser instance successfully initialized
+2026-05-30 21:41:12.050 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:delete:544 | 🔄 Waiting for session s-04owxyqhjnnzjqe4h to be deleted...
+2026-05-30 21:41:12.051 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:309 | [34m🔗 API Call: GetSessionDetail[0m
+2026-05-30 21:41:12.051 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:309 |   └─ SessionId=s-04owxyqhjnnzjqe4h
+2026-05-30 21:41:12.119 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:349 |   ✓ GetSessionDetail API call async successful{'Aliuid': '1213763666198530', 'ApikeyId': 'ak-bi17egtnmzpmmobvq', 'AppInstanceGroupId': 'aig-0bzwu4jij8ivbgtp6', 'AppInstanceId': 'ai-0cbg3fgv3ee4rqlv8', 'AppUserId': 'ak-bi17egtnmzpmmobvq_s-04owxyqhjnnzjqe4h', 'BizType': 0, 'EndReason': 'API_CALL', 'ImageId': 'browser-use-debian-12', 'ImageType': 'BrowserUse', 'IsDeleted': 0, 'RegionId': 'cn-hangzhou', 'Status': 'DELETING'}
+2026-05-30 21:41:12.119 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:357 | [32m✅ API Response: GetSessionDetail, RequestId=FDF71674-2FFC-5B0A-A7D0-64CB728A4836[0m
+2026-05-30 21:41:12.119 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:357 | [32m  └─ status=DELETING[0m
+2026-05-30 21:41:13.122 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:309 | [34m🔗 API Call: GetSessionDetail[0m
+2026-05-30 21:41:13.123 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:309 |   └─ SessionId=s-04owxyqhjnnzjqe4h
+2026-05-30 21:41:13.211 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:349 |   ✓ GetSessionDetail API call async successful{'Aliuid': '1213763666198530', 'ApikeyId': 'ak-bi17egtnmzpmmobvq', 'AppInstanceGroupId': 'aig-0bzwu4jij8ivbgtp6', 'AppInstanceId': 'ai-0cbg3fgv3ee4rqlv8', 'AppUserId': 'ak-bi17egtnmzpmmobvq_s-04owxyqhjnnzjqe4h', 'BizType': 0, 'EndReason': 'API_CALL', 'ImageId': 'browser-use-debian-12', 'ImageType': 'BrowserUse', 'IsDeleted': 1, 'RegionId': 'cn-hangzhou', 'Status': 'FINISH'}
+2026-05-30 21:41:13.211 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:357 | [32m✅ API Response: GetSessionDetail, RequestId=A8118B79-B570-5813-B9EB-E3D93163CCA8[0m
+2026-05-30 21:41:13.211 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:get_status:357 | [32m  └─ status=FINISH[0m
+2026-05-30 21:41:13.212 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:delete:599 | ✅ Session s-04owxyqhjnnzjqe4h successfully deleted
+2026-05-30 21:41:13.212 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:delete:607 | [32m✅ API Response: DeleteSessionAsync, RequestId=533DA921-2E75-51C8-80B4-0EE358A893ED[0m
+2026-05-30 21:41:13.212 | AgentBay | INFO     | 40075:140704579388224 | agentbay._sync.session:delete:607 | [32m  └─ session_id=s-04owxyqhjnnzjqe4h[0m

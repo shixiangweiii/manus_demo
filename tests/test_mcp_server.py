@@ -86,6 +86,37 @@ class TestMCPServerWrapperRegistration:
         assert server.get_server().name == "custom-server"
 
 
+class TestMCPServerToolSchema:
+    """P1-3 regression: registered MCP tools must expose the BaseTool's real
+    parameter schema, not a degenerate `kwargs` field."""
+
+    def _params_for(self, tool, name):
+        server = MCPServerWrapper(tools=[tool])
+        registered = server.get_server()._tool_manager.list_tools()
+        match = [t for t in registered if t.name == name]
+        assert match, f"{name} not registered"
+        return match[0].parameters
+
+    def test_schema_has_real_field_names(self):
+        params = self._params_for(_AddTool(), "add")
+        props = params.get("properties", {})
+        assert set(props.keys()) == {"a", "b"}
+        assert "kwargs" not in props
+
+    def test_required_fields_preserved(self):
+        params = self._params_for(_AddTool(), "add")
+        assert set(params.get("required", [])) == {"a", "b"}
+
+    def test_optional_field_not_required(self):
+        # FileOpsTool: 'action' required; 'filename'/'content' optional.
+        from tools.file_ops import FileOpsTool
+        params = self._params_for(FileOpsTool(), "file_ops")
+        props = params.get("properties", {})
+        assert {"action", "filename", "content"} <= set(props.keys())
+        assert "kwargs" not in props
+        assert set(params.get("required", [])) == {"action"}
+
+
 class TestMCPServerWrapperWithMemory:
     def test_memory_resources_registered(self):
         mock_service = MagicMock()

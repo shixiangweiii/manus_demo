@@ -72,6 +72,12 @@ class MemorySearchTool(BaseTool):
         tags = kwargs.get("tags", [])
         top_k = kwargs.get("top_k", 3)
 
+        # Emit search_start so eval probe counts LLM-initiated tool searches
+        # (probe.memory_search_count increments on memory_search_start, NOT result).
+        # 发出 search_start，让评测 probe 统计 LLM 主动发起的工具搜索。
+        if self._on_event:
+            self._on_event("memory_search_start", {"query": query, "source": "tool"})
+
         from memory.models import MemoryKind, MemorySearchQuery
 
         kind = MemoryKind(kind_str) if kind_str else None
@@ -282,7 +288,7 @@ class MemoryRevokeTool(BaseTool):
                 "memory_id": memory_id,
             }, ensure_ascii=False)
         else:
-            return json.dumps({
-                "status": "error",
-                "message": f"Memory record '{memory_id}' not found",
-            }, ensure_ascii=False)
+            # Return an Error:-prefixed string so ToolRouter/classify_result treats
+            # a failed revoke as a failure (a JSON {"status":"error"} reads as success).
+            # 返回 Error: 前缀字符串，让 classify_result 识别为失败（JSON 体会被误判成功）。
+            return f"Error: Memory record '{memory_id}' not found"

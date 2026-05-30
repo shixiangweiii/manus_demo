@@ -874,6 +874,19 @@ async def _build_tools() -> list:
         CodeExecutorTool(), FileOpsTool(), ShellTool(),
     ]
 
+    # AgentBay cloud runtime tools (feature-flagged, default off). Only register
+    # when an API key is present so the LLM does not see tools that can only fail.
+    if config.AGENTBAY_ENABLED:
+        if not config.AGENTBAY_API_KEY:
+            logger.warning("[main] AGENTBAY_ENABLED=true but AGENTBAY_API_KEY is empty; skipping AgentBay tools")
+        else:
+            from tools.agentbay import AgentBayBrowserTool, AgentBayCodeTool
+            if config.AGENTBAY_CODE_TOOL_ENABLED:
+                tools.append(AgentBayCodeTool())
+            if config.AGENTBAY_BROWSER_TOOL_ENABLED:
+                tools.append(AgentBayBrowserTool())
+            logger.info("[main] Registered AgentBay tools: %s", [t.name for t in tools if t.name.startswith("agentbay_")])
+
     # v16: MCP Bridge tools (feature-flagged, default off)
     if config.MCP_BRIDGE_ENABLED:
         mcp_tools = await _discover_mcp_bridge_tools()
@@ -887,42 +900,11 @@ async def _build_tools() -> list:
 async def _discover_mcp_bridge_tools() -> list:
     """
     Discover and instantiate MCPBridgeTool instances from configured servers.
-    Async — runs within the existing event loop.
-
-    从已配置的服务器发现并实例化 MCPBridgeTool。
-    异步调用，在已有事件循环中运行。
+    Delegates to the shared builder in tools/mcp/discovery.py (reused by the
+    evaluation runner). 委托给共享构建器（评测 runner 复用同一逻辑）。
     """
-    from tools.mcp.config import load_mcp_bridge_config
-    from tools.mcp.client import MCPClientManager
-    from tools.mcp.bridge_tool import MCPBridgeTool
-
-    bridge_config = load_mcp_bridge_config()
-    if not bridge_config.servers:
-        logger.warning("[main] MCP_BRIDGE_ENABLED but no servers configured")
-        return []
-
-    manager = MCPClientManager(bridge_config)
-
-    try:
-        discovered = await manager.discover_all_tools()
-    except Exception as exc:
-        logger.error("[main] MCP tool discovery failed: %s", exc)
-        return []
-
-    bridge_tools: list = []
-    for dt in discovered:
-        bridge_tool = MCPBridgeTool(
-            prefixed_name=dt.prefixed_name,
-            description=dt.description,
-            mcp_tool_schema=dt.input_schema,
-            client_manager=manager,
-            original_tool_name=dt.original_tool_name,
-            server_name=dt.server_name,
-            schema_mode=bridge_config.schema_mode,
-        )
-        bridge_tools.append(bridge_tool)
-
-    return bridge_tools
+    from tools.mcp.discovery import discover_mcp_bridge_tools
+    return await discover_mcp_bridge_tools(on_event=None)
 
 
 def _start_mcp_server_background(tools: list, agentic_service, llm_client=None) -> "asyncio.Task | None":

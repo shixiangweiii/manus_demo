@@ -78,6 +78,21 @@ SUBPROCESS_MAX_OUTPUT_BYTES = int(os.getenv("SUBPROCESS_MAX_OUTPUT_BYTES", str(5
 SHELL_MAX_CONCURRENT = int(os.getenv("SHELL_MAX_CONCURRENT", "3"))                    # 最大并发 Shell 子进程数
 CODE_MAX_CONCURRENT = int(os.getenv("CODE_MAX_CONCURRENT", "3"))                      # 最大并发代码执行子进程数
 
+# --- AgentBay Cloud Runtime Tools ---
+# --- AgentBay 云端运行时工具（默认关闭，按需注册）---
+AGENTBAY_ENABLED = os.getenv("AGENTBAY_ENABLED", "false").lower() == "true"           # AgentBay 原生工具总开关
+AGENTBAY_API_KEY = os.getenv("AGENTBAY_API_KEY", "")                                  # AgentBay API Key
+AGENTBAY_CODE_TOOL_ENABLED = os.getenv("AGENTBAY_CODE_TOOL_ENABLED", "true").lower() == "true"  # 注册 agentbay_code
+AGENTBAY_BROWSER_TOOL_ENABLED = os.getenv("AGENTBAY_BROWSER_TOOL_ENABLED", "true").lower() == "true"  # 注册 agentbay_browser
+AGENTBAY_LOG_LEVEL = os.getenv("AGENTBAY_LOG_LEVEL", "WARNING")                       # SDK 日志级别；WARNING 避免输出 resource_url/authcode
+AGENTBAY_MAX_CONCURRENT_SESSIONS = int(os.getenv("AGENTBAY_MAX_CONCURRENT_SESSIONS", "1"))  # AgentBay Session 并发上限
+AGENTBAY_CODE_IMAGE = os.getenv("AGENTBAY_CODE_IMAGE", "code_latest")                 # CodeSpace 镜像 alias
+AGENTBAY_BROWSER_IMAGE = os.getenv("AGENTBAY_BROWSER_IMAGE", "browser_latest")        # BrowserUse 镜像 alias
+AGENTBAY_SESSION_IDLE_RELEASE_MINUTES = int(os.getenv("AGENTBAY_SESSION_IDLE_RELEASE_MINUTES", "5"))  # 空闲自动释放兜底
+AGENTBAY_SESSION_MAX_RUNTIME_MINUTES = int(os.getenv("AGENTBAY_SESSION_MAX_RUNTIME_MINUTES", "10"))   # 单 Session 最大运行时间兜底
+AGENTBAY_CODE_TIMEOUT_SECONDS = int(os.getenv("AGENTBAY_CODE_TIMEOUT_SECONDS", "60"))  # CodeSpace 单次执行超时（官方建议<=60s）
+AGENTBAY_BROWSER_TIMEOUT_MS = int(os.getenv("AGENTBAY_BROWSER_TIMEOUT_MS", "30000"))  # BrowserUse 页面操作超时
+
 # --- User Location Resolution ---
 # --- 用户位置解析（fallback 链：env > memory > IP；不再使用系统时区，因 IANA zone 不是地理位置）---
 USER_LOCATION = (os.getenv("USER_LOCATION", "") or "").strip()                       # 用户显式指定的城市（最高优先级，工具内部仍以 os.getenv 直读以兼容运行时切换）

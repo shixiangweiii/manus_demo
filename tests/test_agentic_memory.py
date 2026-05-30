@@ -474,3 +474,40 @@ class TestLegacyMigration:
         store.migrate_from_legacy(str(tmp_path))
         count2 = len(store.list_records())
         assert count2 == count1  # no duplicates
+
+    def test_migrate_picks_up_new_entries_after_partial(self, tmp_path):
+        # P2-7: appending a new legacy entry after a prior migration must be
+        # picked up — not skipped wholesale just because some legacy record exists.
+        legacy_file = os.path.join(str(tmp_path), "memory.json")
+        first = [{"task": "t1", "summary": "s1", "learnings": [], "timestamp": 111.0}]
+        with open(legacy_file, "w") as f:
+            json.dump(first, f)
+
+        store = AgenticMemoryStore(memory_dir=str(tmp_path))
+        assert store.migrate_from_legacy(str(tmp_path)) == 1
+
+        # Append a brand-new entry and re-run migration.
+        both = first + [{"task": "t2", "summary": "s2", "learnings": [], "timestamp": 222.0}]
+        with open(legacy_file, "w") as f:
+            json.dump(both, f)
+
+        migrated_again = store.migrate_from_legacy(str(tmp_path))
+        assert migrated_again == 1  # only the new entry
+        assert len(store.list_records(kind=MemoryKind.EXPERIENTIAL)) == 2
+
+
+class TestExtractTagsChinese:
+    """P2-7: CJK keywords must be extractable from continuous Chinese text
+    (no \\b word boundary between CJK chars)."""
+
+    def test_chinese_keyword_in_continuous_text(self):
+        from memory.service import AgenticMemoryService
+        tags = AgenticMemoryService._extract_tags("这是一个数据分析与机器学习任务")
+        assert "数据分析" in tags
+        assert "机器学习" in tags
+
+    def test_ascii_keyword_still_word_bounded(self):
+        from memory.service import AgenticMemoryService
+        # "web" must NOT match inside "webhook" (word-boundary preserved for ASCII).
+        tags = AgenticMemoryService._extract_tags("configure a webhook endpoint")
+        assert "web" not in tags

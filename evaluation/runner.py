@@ -128,6 +128,7 @@ class EvaluationRunner:
         original_agentic_memory = config.AGENTIC_MEMORY_ENABLED
         original_memory_tools = config.MEMORY_TOOLS_ENABLED
         original_memory_dir = config.MEMORY_DIR
+        original_mcp_bridge = config.MCP_BRIDGE_ENABLED
 
         config.PLAN_MODE = mode.value
         if mode == PlanMode.EMERGENT:
@@ -141,6 +142,7 @@ class EvaluationRunner:
         is_resume_task = "resume" in tags_lower
         is_memory_task = "memory" in tags_lower
         is_handoff_task = "handoff" in tags_lower
+        is_mcp_task = "mcp" in tags_lower
 
         # v15: Memory tasks get isolated MEMORY_DIR to avoid polluting user's real memory
         _memory_tmpdir: str | None = None
@@ -165,6 +167,10 @@ class EvaluationRunner:
             config.HANDOFF_ENABLED = True
             if is_hitl_task:
                 config.HANDOFF_ALLOW_ASK_USER = True
+        # v16: mcp-tagged tasks enable the MCP Bridge client (a configured server is
+        # still required for discovery to yield tools; variants may also flip the flag).
+        if is_mcp_task:
+            config.MCP_BRIDGE_ENABLED = True
 
         # v8: SimulatedUser for HITL tasks — intercepts ask_user_prompt event and
         # resolves the Future with a scripted response BEFORE the probe records it.
@@ -186,6 +192,19 @@ class EvaluationRunner:
                     logger.warning("[EvalRunner] SimulatedUser intercept failed: %s", exc)
             probe.on_event(event, data)
 
+        # v16: discover MCP bridge tools per task so events reach THIS task's probe
+        # (avoids a cached on_event pointing at a stale probe). Discovery yields
+        # tools only when a server is configured; otherwise it emits count=0.
+        task_tools = self.tools
+        if config.MCP_BRIDGE_ENABLED:
+            try:
+                from tools.mcp.discovery import discover_mcp_bridge_tools
+                mcp_tools = await discover_mcp_bridge_tools(on_event=event_callback)
+                if mcp_tools:
+                    task_tools = list(self.tools) + mcp_tools
+            except Exception as exc:
+                logger.warning("[EvalRunner] MCP discovery failed: %s", exc)
+
         from checkpoint.store import TaskStateStore
         with tempfile.TemporaryDirectory(prefix="manus_eval_checkpoints_") as checkpoint_dir:
             task_state_store = TaskStateStore(checkpoint_dir=checkpoint_dir)
@@ -200,7 +219,7 @@ class EvaluationRunner:
 
                 orchestrator = OrchestratorAgent(
                     llm_client=llm_client,
-                    tools=self.tools,
+                    tools=task_tools,
                     on_event=event_callback,
                     interactive=is_hitl_task,
                     task_state_store=task_state_store,
@@ -238,6 +257,7 @@ class EvaluationRunner:
                 config.AGENTIC_MEMORY_ENABLED = original_agentic_memory
                 config.MEMORY_TOOLS_ENABLED = original_memory_tools
                 config.MEMORY_DIR = original_memory_dir
+                config.MCP_BRIDGE_ENABLED = original_mcp_bridge
                 if _memory_tmpdir:
                     shutil.rmtree(_memory_tmpdir, ignore_errors=True)
 

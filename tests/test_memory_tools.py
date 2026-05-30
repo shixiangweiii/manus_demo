@@ -105,6 +105,15 @@ class TestMemorySearchTool:
         data = json.loads(result)
         assert data["count"] == 0
 
+    @pytest.mark.asyncio
+    async def test_search_emits_search_start(self, service):
+        # P2-6: tool-initiated search must emit memory_search_start so the eval
+        # probe (memory_search_count) counts it.
+        events = []
+        tool = MemorySearchTool(service, on_event=lambda e, d: events.append((e, d)))
+        await tool.execute(query="anything")
+        assert any(e == "memory_search_start" for e, _ in events)
+
 
 # ======================================================================
 # Store tool tests
@@ -161,9 +170,11 @@ class TestMemoryRevokeTool:
 
     @pytest.mark.asyncio
     async def test_revoke_not_found(self, revoke_tool):
+        # P2-6: not-found must return an Error:-prefixed string (classify_result
+        # treats a JSON {"status":"error"} body as success).
         result = await revoke_tool.execute(memory_id="nonexistent")
-        data = json.loads(result)
-        assert data["status"] == "error"
+        assert result.startswith("Error:")
+        assert "nonexistent" in result
 
     @pytest.mark.asyncio
     async def test_revoked_not_in_search(self, search_tool, service):

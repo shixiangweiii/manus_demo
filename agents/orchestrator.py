@@ -218,6 +218,42 @@ class OrchestratorAgent:
                     "is empty/invalid — remote subagent disabled"
                 )
 
+        # v15 Agentic Memory (feature-flagged, default off)
+        # v15 结构化记忆（特性开关控制，默认关闭）
+        # NOTE: must run BEFORE the execution sub-agents below — executor /
+        # emergent / goal-driven snapshot the `tools` list into their own dict at
+        # construction (see executor.py / emergent_planner.py). Memory tools
+        # appended after that point would never reach their ReAct loops.
+        # 注意：必须在下方执行型子智能体构造之前完成 —— executor/emergent/goal-driven
+        # 在构造时就把 tools 快照成自己的 dict，之后再追加的工具进不了它们的 ReAct 循环。
+        self._agentic_memory_enabled = config.AGENTIC_MEMORY_ENABLED
+        self._agentic_memory_service = None
+        if self._agentic_memory_enabled:
+            if agentic_memory_service is not None:
+                self._agentic_memory_service = agentic_memory_service
+            else:
+                from memory.agentic_store import AgenticMemoryStore
+                from memory.service import AgenticMemoryService
+                store = AgenticMemoryStore()
+                self._agentic_memory_service = AgenticMemoryService(store)
+            self._agentic_memory_service._store.migrate_from_legacy()
+            logger.info("[Orchestrator] Agentic Memory (v15) enabled")
+
+            # Register memory tools inside orchestrator (same pattern as SubAgent/HITL)
+            # 在 orchestrator 内部注册 memory tools（与 SubAgent/HITL 注册模式一致）
+            if config.MEMORY_TOOLS_ENABLED and self._agentic_memory_service is not None:
+                from tools.memory_tools import (
+                    MemorySearchTool, MemoryStoreTool,
+                    MemoryConsolidateTool, MemoryRevokeTool,
+                )
+                svc = self._agentic_memory_service
+                tools = list(tools or []) + [
+                    MemorySearchTool(svc, on_event=self._emit),
+                    MemoryStoreTool(svc, on_event=self._emit),
+                    MemoryConsolidateTool(svc, on_event=self._emit),
+                    MemoryRevokeTool(svc, on_event=self._emit),
+                ]
+
         # Sub-agents（各专用子智能体）
         self.planner = PlannerAgent(self.llm_client, self.context_manager)
         self.executor_agent = ExecutorAgent(
@@ -250,36 +286,6 @@ class OrchestratorAgent:
         self.short_term = ShortTermMemory()    # 短期记忆：当前会话上下文
         self.long_term = LongTermMemory()      # 长期记忆：跨会话持久化
         self.knowledge = KnowledgeRetriever()  # 知识库：TF-IDF 检索本地文档
-
-        # v15 Agentic Memory (feature-flagged, default off)
-        # v15 结构化记忆（特性开关控制，默认关闭）
-        self._agentic_memory_enabled = config.AGENTIC_MEMORY_ENABLED
-        self._agentic_memory_service = None
-        if self._agentic_memory_enabled:
-            if agentic_memory_service is not None:
-                self._agentic_memory_service = agentic_memory_service
-            else:
-                from memory.agentic_store import AgenticMemoryStore
-                from memory.service import AgenticMemoryService
-                store = AgenticMemoryStore()
-                self._agentic_memory_service = AgenticMemoryService(store)
-            self._agentic_memory_service._store.migrate_from_legacy()
-            logger.info("[Orchestrator] Agentic Memory (v15) enabled")
-
-            # Register memory tools inside orchestrator (same pattern as SubAgent/HITL)
-            # 在 orchestrator 内部注册 memory tools（与 SubAgent/HITL 注册模式一致）
-            if config.MEMORY_TOOLS_ENABLED and self._agentic_memory_service is not None:
-                from tools.memory_tools import (
-                    MemorySearchTool, MemoryStoreTool,
-                    MemoryConsolidateTool, MemoryRevokeTool,
-                )
-                svc = self._agentic_memory_service
-                tools = list(tools or []) + [
-                    MemorySearchTool(svc, on_event=self._emit),
-                    MemoryStoreTool(svc, on_event=self._emit),
-                    MemoryConsolidateTool(svc, on_event=self._emit),
-                    MemoryRevokeTool(svc, on_event=self._emit),
-                ]
 
         # v17 Self-Evolution (feature-flagged, default off; requires agentic memory)
         # v17 自演化（特性开关控制，默认关闭；硬依赖 agentic memory）
@@ -470,7 +476,9 @@ class OrchestratorAgent:
         self._current_task_id = task_id
         self.llm_client.reset_usage()
         self._emit("task_start", {"task": spec.name, "task_id": task_id, "mode": "workflow"})
-        self._wire_guardrail_runtime()  # v19: guardrails apply to workflow tool steps too
+        # v19: wire event sink + confirm callback; WorkflowEngine itself now runs
+        # tool-input/output guardrails per step, and output is redacted below.
+        self._wire_guardrail_runtime()
 
         try:
             engine = WorkflowEngine(self._workflow_tools, on_event=self._emit)

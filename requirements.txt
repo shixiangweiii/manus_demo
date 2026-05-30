@@ -20,6 +20,10 @@ ddgs>=8.0.0
 httpx>=0.24.0
 mcp>=1.0.0
 
+# AgentBay SDK examples
+wuying-agentbay-sdk==0.21.0
+playwright==1.60.0
+
 # Testing (optional)
 pytest
 pytest-asyncio

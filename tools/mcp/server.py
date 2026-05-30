@@ -12,6 +12,7 @@ Exposed:
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -82,12 +83,10 @@ class MCPServerWrapper:
             self._register_one_tool(tool)
 
     def _register_one_tool(self, tool: BaseTool) -> None:
-        """Register a single BaseTool as an MCP tool with explicit schema.
-        将单个 BaseTool 注册为 MCP tool，显式传入 input schema。"""
-        # Fix-5: Removed dead make_handler function
+        """Register a single BaseTool as an MCP tool with a real input schema.
+        将单个 BaseTool 注册为 MCP tool，并暴露真实参数 schema。"""
         handler = self._create_tool_handler(tool)
         try:
-            # Fix-4: Register handler with explicit name/description
             self._mcp.add_tool(
                 fn=handler,
                 name=tool.name,
@@ -97,17 +96,49 @@ class MCPServerWrapper:
         except Exception as exc:
             logger.warning("[MCPServer] Failed to register tool '%s': %s", tool.name, exc)
 
-    @staticmethod
-    def _create_tool_handler(tool: BaseTool):
-        """Create an async handler function for a BaseTool.
-        为 BaseTool 创建异步处理函数。
-        Note: FastMCP 无法从 **kwargs 推断参数 schema，
-        但 add_tool() 使用 tool.name/description 作为 MCP tool 元数据，
-        handler 仅在调用时使用。参数 schema 通过 FastMCP 的内部 schema 生成
-        或在 get_registered_tool_names() 中通过 list_tools() 获取。"""
+    # JSON-schema type → Python type for synthesizing a real handler signature.
+    # JSON schema 类型 → Python 类型，用于合成真实 handler 签名。
+    _JSON_TO_PY = {
+        "string": str, "integer": int, "number": float,
+        "boolean": bool, "array": list, "object": dict,
+    }
+
+    @classmethod
+    def _create_tool_handler(cls, tool: BaseTool):
+        """Create an async handler whose SIGNATURE mirrors tool.parameters_schema.
+
+        为 BaseTool 创建异步 handler，其签名镜像 tool.parameters_schema。
+        FastMCP 经 inspect.signature(fn, eval_str=True) 从签名生成 input schema，
+        故必须给 handler 合成带类型注解的具名参数（而非裸 **kwargs，后者只会
+        生成退化的 kwargs 字段，外部 MCP client 拿到错误参数）。
+        """
+        schema = tool.parameters_schema or {}
+        props: dict[str, Any] = schema.get("properties", {}) or {}
+        required = set(schema.get("required", []) or [])
+
+        params: list[inspect.Parameter] = []
+        annotations: dict[str, Any] = {}
+        for pname, pschema in props.items():
+            py_type = cls._JSON_TO_PY.get(
+                (pschema or {}).get("type", "string"), str
+            )
+            annotations[pname] = py_type
+            if pname in required:
+                default = inspect.Parameter.empty
+            else:
+                default = (pschema or {}).get("default", None)
+            params.append(inspect.Parameter(
+                pname, inspect.Parameter.KEYWORD_ONLY,
+                default=default, annotation=py_type,
+            ))
+
         async def handler(**kwargs: Any) -> str:
             return await tool.execute(**kwargs)
+
+        # Real types (not strings) so FastMCP's eval_str=True introspection is a no-op.
         handler.__name__ = f"mcp_handler_{tool.name}"
+        handler.__signature__ = inspect.Signature(params)  # type: ignore[attr-defined]
+        handler.__annotations__ = {**annotations, "return": str}
         return handler
 
     # ------------------------------------------------------------------

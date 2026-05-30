@@ -269,17 +269,24 @@ class AgenticMemoryStore:
         if not os.path.exists(legacy_file):
             return 0
 
-        # Idempotent: skip if already migrated / 幂等：已迁移则跳过
-        if any(r.source == "legacy" for r in self._records.values()):
-            logger.info("Legacy migration already done, skipping")
-            return 0
-
         try:
             with open(legacy_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as exc:
             logger.warning("Failed to read legacy memory for migration: %s", exc)
             return 0
+
+        # Per-entry idempotency: track already-migrated legacy entries by a stable
+        # key so a partial migration (or entries appended to memory.json after a
+        # prior pass) can still be picked up — instead of skipping ALL legacy when
+        # any single legacy record already exists.
+        # 逐条幂等：按稳定 key 记录已迁移条目，避免「存在任一 legacy 记录即整体跳过」
+        # 漏迁部分失败或后续新增的条目。
+        existing_keys = {
+            r.metadata.get("legacy_key")
+            for r in self._records.values()
+            if r.source == "legacy" and r.metadata.get("legacy_key")
+        }
 
         migrated = 0
         for entry_data in data:
@@ -288,6 +295,10 @@ class AgenticMemoryStore:
             except Exception as e:
                 logger.warning("Skipping unparseable legacy entry: %s", e)
                 continue
+
+            legacy_key = self._legacy_entry_key(entry)
+            if legacy_key in existing_keys:
+                continue  # already migrated in a prior pass
 
             record = AgenticMemoryRecord(
                 kind=MemoryKind.EXPERIENTIAL,
@@ -299,11 +310,21 @@ class AgenticMemoryStore:
                 importance=0.5,
                 created_at=entry.timestamp,
                 updated_at=entry.timestamp,
+                metadata={"legacy_key": legacy_key},
             )
             self._records[record.id] = record
+            existing_keys.add(legacy_key)
             migrated += 1
 
         if migrated > 0:
             self._save()
             logger.info("Migrated %d legacy memory entries", migrated)
         return migrated
+
+    @staticmethod
+    def _legacy_entry_key(entry: "MemoryEntry") -> str:
+        """Stable per-entry key for legacy-migration dedup (recomputable).
+        legacy 迁移去重用的稳定 key（可复算，基于 task+summary+timestamp）。"""
+        import hashlib
+        raw = f"{entry.task}\x00{entry.summary}\x00{entry.timestamp}"
+        return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:16]

@@ -221,7 +221,16 @@ class AgenticMemoryService:
         ]
         text_lower = text.lower()
         for kw in keywords:
-            # Word boundary matching to avoid false positives (e.g. "web" in "webhook")
-            if _re.search(rf'\b{_re.escape(kw)}\b', text_lower) and len(tags) < max_tags:
+            if len(tags) >= max_tags:
+                break
+            if kw.isascii():
+                # Word boundary for ASCII to avoid false positives (e.g. "web" in "webhook").
+                matched = _re.search(rf'\b{_re.escape(kw)}\b', text_lower) is not None
+            else:
+                # CJK keywords have no \b word boundary in continuous Chinese text
+                # (CJK chars are \w under Unicode), so use plain substring matching.
+                # 中文关键词在连续中文里没有 \b 词边界，改用子串匹配。
+                matched = kw in text_lower
+            if matched:
                 tags.append(kw)
         return tags

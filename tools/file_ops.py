@@ -90,10 +90,14 @@ class FileOpsTool(BaseTool):
         在沙箱内解析文件名的绝对路径；若路径逃出沙箱则返回 None。
         通过 os.path.realpath 解析符号链接和 ../.. 等相对路径，防止路径穿越攻击。
         """
-        path = os.path.realpath(os.path.join(self._sandbox, filename))
-        if not path.startswith(os.path.realpath(self._sandbox)):
-            return None  # 路径逃出沙箱，拒绝访问
-        return path
+        # Use an os.sep boundary so a sibling dir sharing the sandbox name prefix
+        # (e.g. ~/.manus_demo/sandbox_escape) is NOT mistaken for inside-sandbox.
+        # 用 os.sep 边界，避免与沙箱同名前缀的兄弟目录被误判为沙箱内（sibling-prefix 逃逸）。
+        sandbox = os.path.realpath(self._sandbox)
+        target = os.path.realpath(os.path.join(sandbox, filename))
+        if target == sandbox or target.startswith(sandbox + os.sep):
+            return target
+        return None  # 路径逃出沙箱，拒绝访问
 
     def _list_files(self) -> str:
         """列出沙箱目录中的所有文件。"""

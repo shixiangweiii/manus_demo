@@ -92,3 +92,51 @@ class TestMemoryEvents:
         ]
         for e in events:
             assert isinstance(e, str) and len(e) > 0
+
+
+class TestMemoryToolsReachExecutionAgents:
+    """
+    P0-1 regression: memory tools must be registered BEFORE the execution
+    sub-agents are constructed, so they actually enter the executor / emergent
+    ReAct tool sets (not just _workflow_tools).
+    回归：memory 工具必须在执行型子智能体构造之前注册，才能真正进入
+    executor/emergent 的 ReAct 工具集，而不仅是 _workflow_tools。
+    """
+
+    def _build_orchestrator(self):
+        svc = MagicMock()  # AgenticMemoryService stand-in (only used at runtime)
+        with patch.object(config, "AGENTIC_MEMORY_ENABLED", True), \
+             patch.object(config, "MEMORY_TOOLS_ENABLED", True), \
+             patch.object(config, "TRACING_ENABLED", False), \
+             patch.object(config, "SUBAGENT_ENABLED", False), \
+             patch.object(config, "HITL_ENABLED", False), \
+             patch.object(config, "HANDOFF_ENABLED", False), \
+             patch.object(config, "REMOTE_SUBAGENT_ENABLED", False), \
+             patch.object(config, "ENABLE_GOAL_DRIVEN_PLANNER", True), \
+             patch.object(config, "SELF_EVOLUTION_ENABLED", False), \
+             patch.object(config, "TASK_RESUME_ENABLED", False):
+            from agents.orchestrator import OrchestratorAgent
+            return OrchestratorAgent(
+                llm_client=MagicMock(),
+                tools=[],
+                on_event=lambda *_: None,
+                interactive=False,
+                task_state_store=MagicMock(),
+                agentic_memory_service=svc,
+            )
+
+    def test_executor_has_memory_tools(self):
+        orch = self._build_orchestrator()
+        for name in ("memory_search", "memory_store", "memory_consolidate", "memory_revoke"):
+            assert name in orch.executor_agent.tools, f"{name} missing from executor"
+
+    def test_emergent_planner_has_memory_tools(self):
+        orch = self._build_orchestrator()
+        for name in ("memory_search", "memory_store", "memory_consolidate", "memory_revoke"):
+            assert name in orch.emergent_planner.tools, f"{name} missing from emergent planner"
+
+    def test_goal_driven_planner_has_memory_tools(self):
+        orch = self._build_orchestrator()
+        assert orch.goal_driven_planner is not None
+        for name in ("memory_search", "memory_store", "memory_consolidate", "memory_revoke"):
+            assert name in orch.goal_driven_planner.tools, f"{name} missing from goal-driven planner"

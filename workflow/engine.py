@@ -16,6 +16,7 @@ import logging
 import re
 from typing import Any, Callable
 
+import config
 from tools.base import BaseTool
 from workflow.models import WorkflowResult, WorkflowSpec, WorkflowStep
 
@@ -65,6 +66,22 @@ class WorkflowEngine:
             self._emit("workflow_failed", {"name": spec.name, "error": str(exc)})
             return result
 
+        # v19: resolve the guardrail once (None when GUARDRAILS_ENABLED is off →
+        # zero overhead; reads live config so eval variants are honored). Workflow
+        # steps are now gated by tool-input/output guardrails, same as ReAct loops.
+        # v19：解析护栏一次（关闭时 None，零开销）。确定性 workflow 步骤现与 ReAct
+        # 路径一样受 tool-input/output 护栏保护。
+        guardrail = None
+        _GAction = None
+        if config.GUARDRAILS_ENABLED:
+            try:
+                from guardrails.engine import current_guardrail
+                from guardrails.models import GuardrailAction as _GAction
+                guardrail = current_guardrail()
+            except Exception:
+                logger.debug("[WorkflowEngine] guardrail resolution failed; continuing without", exc_info=True)
+                guardrail = None
+
         step_results: dict[str, str] = {}
         last_output = ""
         for step in order:
@@ -83,6 +100,23 @@ class WorkflowEngine:
 
             try:
                 resolved = self._resolve_params(step.params, step_results)
+                # v19.1: tool-input guardrail — block dangerous params / write-op
+                # gating BEFORE execution (CONFIRM resolved internally → ALLOW/BLOCK).
+                if guardrail is not None:
+                    try:
+                        decision = await guardrail.check_tool_input(step.tool, resolved)
+                    except Exception:
+                        logger.debug("[WorkflowEngine] tool-input guardrail error (allowing)", exc_info=True)
+                        decision = None
+                    if decision is not None and decision.action == _GAction.BLOCK:
+                        msg = f"Error: [GUARDRAIL BLOCKED] {decision.reason}"
+                        logger.warning("[WorkflowEngine] step '%s' blocked: %s", step.id, decision.reason)
+                        result.failed_step = step.id
+                        result.error = msg
+                        result.step_results = step_results
+                        self._emit("workflow_step_failed", {"id": step.id, "error": msg})
+                        self._emit("workflow_failed", {"name": spec.name, "error": msg})
+                        return result
                 output = await tool.traced_execute(**resolved)
             except Exception as exc:  # tool raised
                 msg = f"Tool '{step.tool}' raised: {exc}"
@@ -104,6 +138,17 @@ class WorkflowEngine:
                 self._emit("workflow_step_failed", {"id": step.id, "error": output[:300]})
                 self._emit("workflow_failed", {"name": spec.name, "error": output[:300]})
                 return result
+
+            # v19.2: tool-output guardrail — neutralize injection in untrusted output
+            # BEFORE it flows into downstream ${step_id} templating / final output.
+            if guardrail is not None:
+                try:
+                    scan = guardrail.scan_tool_output(step.tool, output)
+                    if scan.transformed_text is not None:
+                        output = scan.transformed_text
+                        step_results[step.id] = output
+                except Exception:
+                    logger.debug("[WorkflowEngine] tool-output guardrail error (passthrough)", exc_info=True)
 
             last_output = output
             self._emit("workflow_step_complete", {"id": step.id, "output_preview": str(output)[:200]})

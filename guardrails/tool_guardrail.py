@@ -11,6 +11,8 @@ engine maps CONFIRM (write ops) per GUARDRAIL_WRITE_CONFIRM.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
+import ipaddress
 
 import config
 from guardrails.models import GuardrailAction, GuardrailDecision, GuardrailLayer
@@ -65,11 +67,26 @@ class ToolGuardrail:
             if hit:
                 return _block(f"dangerous shell pattern '{hit}'", risk="ASI02")
 
-        elif tool_name == "execute_python":
+        elif tool_name in {"execute_python", "agentbay_code"}:
             code = str(params.get("code", ""))
             hit = first_match(code, DANGEROUS_PYTHON_PATTERNS)
             if hit:
                 return _block(f"dangerous python pattern '{hit}'", risk="ASI02")
+
+        elif tool_name == "agentbay_browser":
+            url = str(params.get("url", ""))
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"}:
+                return _block("agentbay_browser only permits http(s) URLs", risk="ASI03")
+            host = (parsed.hostname or "").lower()
+            if host in {"localhost", "0.0.0.0"} or host.endswith(".local"):
+                return _block(f"agentbay_browser blocks local hostname '{host}'", risk="ASI03")
+            try:
+                ip = ipaddress.ip_address(host)
+            except ValueError:
+                ip = None
+            if ip and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast):
+                return _block(f"agentbay_browser blocks non-public IP '{host}'", risk="ASI03")
 
         elif tool_name == "file_ops":
             action = str(params.get("action", "")).lower()

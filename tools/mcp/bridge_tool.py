@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from tools.base import BaseTool
 from tools.mcp.schema_adapter import mcp_schema_to_openai
@@ -45,6 +45,7 @@ class MCPBridgeTool(BaseTool):
         original_tool_name: str,
         server_name: str,
         schema_mode: str = "loose",
+        on_event: Callable[[str, Any], None] | None = None,
     ):
         self._name = prefixed_name
         self._description = description
@@ -52,6 +53,7 @@ class MCPBridgeTool(BaseTool):
         self._client_manager = client_manager
         self._original_tool_name = original_tool_name
         self._server_name = server_name
+        self._on_event = on_event
 
         # Eagerly convert MCP schema -> OpenAI parameters_schema at init time.
         # Failures caught and result in minimal schema (loose) or warning (strict).
@@ -89,12 +91,16 @@ class MCPBridgeTool(BaseTool):
         失败时返回 "Error: ..." 字符串（BaseTool 惯例）。
         """
         try:
-            return await self._client_manager.call_tool(
+            result = await self._client_manager.call_tool(
                 self._name, kwargs,
             )
+            error = isinstance(result, str) and result.startswith("Error:")
+            self._emit_executed(error=error)
+            return result
         except asyncio.TimeoutError:
             msg = f"timed out after {self._client_manager.config.call_timeout_seconds}s"
             logger.error("[MCPBridgeTool] %s %s", self._name, msg)
+            self._emit_executed(error=True)
             return f"Error: MCP tool '{self._name}' {msg}"
         except Exception as exc:
             # Extract sub-exceptions from ExceptionGroup (Python 3.11+)
@@ -108,4 +114,17 @@ class MCPBridgeTool(BaseTool):
             if len(msg) > 500:
                 msg = msg[:500] + "..."
             logger.error("[MCPBridgeTool] %s failed: %s", self._name, msg)
+            self._emit_executed(error=True)
             return f"Error: MCP tool '{self._name}' failed: {msg}"
+
+    def _emit_executed(self, error: bool) -> None:
+        """Emit mcp_tool_executed for the evaluation probe / observability.
+        发出 mcp_tool_executed 供评测 probe / 可观测性统计。"""
+        if self._on_event is None:
+            return
+        try:
+            self._on_event("mcp_tool_executed", {
+                "tool": self._name, "server": self._server_name, "error": error,
+            })
+        except Exception:
+            logger.debug("[MCPBridgeTool] on_event failed", exc_info=True)

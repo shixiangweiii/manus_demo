@@ -499,7 +499,7 @@ class EvaluationProbe:
             if isinstance(data, dict) and data.get("error"):
                 self.mcp_tool_errors += 1
         elif event == "mcp_schema_error":
-            self.mcp_schema_errors += 1
+            self.mcp_schema_errors += data.get("count", 1) if isinstance(data, dict) else 1
 
         # --- v2 DAG detail events ---
         elif event == "node_rollback":
