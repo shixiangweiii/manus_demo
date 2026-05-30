@@ -95,6 +95,20 @@ async def execute_tool_calls(
     effective_truncation = effective_policy.truncation_limit
     prefix = log_prefix or "ReAct"
 
+    # v19: resolve the guardrail once (None when GUARDRAILS_ENABLED is off → zero
+    # overhead; reads live config so eval variants that flip the flag are honored).
+    # v19：解析护栏一次（关闭时为 None，零开销；读实时 config 兼容评测 variant 翻转）。
+    guardrail = None
+    _GAction = None
+    if config_module.GUARDRAILS_ENABLED:
+        try:
+            from guardrails.engine import current_guardrail
+            from guardrails.models import GuardrailAction as _GAction
+            guardrail = current_guardrail()
+        except Exception:
+            logger.debug("[%s] guardrail resolution failed; continuing without", prefix, exc_info=True)
+            guardrail = None
+
     async def _exec_one(tc: Any) -> tuple[Any, str, dict, str, bool, bool]:
         fn_name = tc.function.name
         _parser = parse_args or json.loads
@@ -110,10 +124,29 @@ async def execute_tool_calls(
             res = f"Error: Unknown tool '{fn_name}'"
             is_err, rl = classify_result(res, None)
             return tc, fn_name, fn_args, res, is_err, rl
+        # v19.1: tool-input guardrail — block dangerous calls / write-op gating
+        # BEFORE execution. The engine resolves CONFIRM internally → ALLOW/BLOCK.
+        if guardrail is not None:
+            try:
+                decision = await guardrail.check_tool_input(fn_name, fn_args)
+                if decision.action == _GAction.BLOCK:
+                    res = f"Error: [GUARDRAIL BLOCKED] {decision.reason}"
+                    is_err, rl = classify_result(res, None)
+                    return tc, fn_name, fn_args, res, is_err, rl
+            except Exception:
+                logger.debug("[%s] tool-input guardrail error (allowing)", prefix, exc_info=True)
         attribute_caller(t, agent_name)
         try:
             res = await t.traced_execute(**fn_args)
             is_err, rl = classify_result(res, None)
+            # v19.2: tool-output guardrail — neutralize injection in untrusted output.
+            if guardrail is not None and not is_err:
+                try:
+                    out = guardrail.scan_tool_output(fn_name, res)
+                    if out.transformed_text is not None:
+                        res = out.transformed_text
+                except Exception:
+                    logger.debug("[%s] tool-output guardrail error (passthrough)", prefix, exc_info=True)
             return tc, fn_name, fn_args, res, is_err, rl
         except Exception as exc:
             res = f"Error: Tool execution error: {exc}"

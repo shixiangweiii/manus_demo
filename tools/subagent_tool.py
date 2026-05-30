@@ -167,7 +167,7 @@ class SubAgentTool(BaseTool):
 
         # Validate and filter tool whitelist — always exclude blocked tools
         # v15: also block memory_store/memory_revoke to prevent SubAgent from polluting global memory
-        _BLOCKED_TOOLS = ("subagent", "ask_user", "memory_store", "memory_revoke")
+        _BLOCKED_TOOLS = ("subagent", "ask_user", "memory_store", "memory_revoke", "handoff", "remote_subagent")
         validated_whitelist = []
         for name in tool_whitelist:
             if name in _BLOCKED_TOOLS:

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # 自动读取项目根目录的 .env 文件（若存在），优先级低于系统环境变量
 
-VERSION = "v14.0-dev"  # 当前版本号，main.py 和 tracing 引用此值
+VERSION = "v19.0-dev"  # 当前版本号，main.py 和 tracing 引用此值
 
 # --- LLM API Configuration ---
 # --- LLM API 配置 ---
@@ -169,6 +169,68 @@ MEMORY_TOOLS_ENABLED = os.getenv("MEMORY_TOOLS_ENABLED", "false").lower() == "tr
 MEMORY_MIN_CONFIDENCE = float(os.getenv("MEMORY_MIN_CONFIDENCE", "0.35"))  # 记忆检索最低置信度阈值
 MEMORY_SEARCH_TOP_K = int(os.getenv("MEMORY_SEARCH_TOP_K", "3"))  # 记忆检索返回最大条数
 MEMORY_LLM_CONSOLIDATION_ENABLED = os.getenv("MEMORY_LLM_CONSOLIDATION_ENABLED", "false").lower() == "true"  # 启用 LLM 辅助记忆巩固（默认关闭）
+
+# --- v17 Self-Evolution ---
+# --- 自演化（v17 新增：经验学习 + 失败反思）---
+SELF_EVOLUTION_ENABLED = os.getenv("SELF_EVOLUTION_ENABLED", "false").lower() == "true"  # v17 主开关（需 AGENTIC_MEMORY_ENABLED=true 才生效）
+SELF_EVOLUTION_LLM_EXTRACTION = os.getenv("SELF_EVOLUTION_LLM_EXTRACTION", "false").lower() == "true"  # 用 LLM 提炼经验/失败三元组（关则走确定性提炼）
+SELF_EVOLUTION_MAX_HINTS = int(os.getenv("SELF_EVOLUTION_MAX_HINTS", "3"))  # 单次注入的失败避坑提示上限
+SELF_EVOLUTION_CONFIDENCE_CAP = float(os.getenv("SELF_EVOLUTION_CONFIDENCE_CAP", "0.6"))  # 自动学习记忆 confidence 上限（防 memory poisoning）
+SELF_EVOLUTION_PREFERENCE_ENABLED = os.getenv("SELF_EVOLUTION_PREFERENCE_ENABLED", "true").lower() == "true"  # v17.4：从 HITL 交互学习用户偏好（仅在 SELF_EVOLUTION_ENABLED + HITL 激活时生效）
+
+# --- v17.3 Classifier Calibration ---
+# --- 分类器校准（v17.3：外置决策阈值，离线网格搜索建议，禁止静默自改）---
+CLASSIFIER_SIMPLE_THRESHOLD = int(os.getenv("CLASSIFIER_SIMPLE_THRESHOLD", "-1"))   # 规则评分 <= 此值 → simple（默认 -1，等于原硬编码）
+CLASSIFIER_COMPLEX_THRESHOLD = int(os.getenv("CLASSIFIER_COMPLEX_THRESHOLD", "2"))  # 规则评分 >= 此值 → complex（默认 2，等于原硬编码）
+
+# --- v18.1 Workflow Engine ---
+# --- 确定性工具工作流（v18.1：声明式工具步骤，无每步 LLM）---
+WORKFLOW_ENABLED = os.getenv("WORKFLOW_ENABLED", "true").lower() == "true"  # Workflow 引擎开关（仅经 --workflow/run_workflow 显式触发，默认 true 不影响 agentic 路径）
+
+# --- v18.2 Handoff (context-passing + control transfer, default off) ---
+# --- 专家 Handoff 委派（v18.2：上下文传递 + 控制权转移，与 SubAgent 隔离式互补）---
+HANDOFF_ENABLED = os.getenv("HANDOFF_ENABLED", "false").lower() == "true"  # Handoff 主开关
+HANDOFF_ALLOW_ASK_USER = os.getenv("HANDOFF_ALLOW_ASK_USER", "false").lower() == "true"  # 专家 agent 是否可调 ask_user（路线图要求显式配置）
+HANDOFF_MAX_CALLS_PER_TASK = int(os.getenv("HANDOFF_MAX_CALLS_PER_TASK", "2"))  # 单任务 handoff 调用上限
+HANDOFF_TIMEOUT = int(os.getenv("HANDOFF_TIMEOUT", str(NODE_EXECUTION_TIMEOUT)))  # 专家执行超时（秒）
+HANDOFF_MAX_ITERATIONS = int(os.getenv("HANDOFF_MAX_ITERATIONS", str(MAX_REACT_ITERATIONS)))  # 专家 ReAct 迭代上限
+
+# --- v16 MCP Bridge ---
+# --- MCP 桥接（v16 新增）---
+MCP_BRIDGE_ENABLED = os.getenv("MCP_BRIDGE_ENABLED", "false").lower() == "true"  # MCP Bridge 客户端总开关（默认关闭）
+MCP_BRIDGE_CONFIG_PATH = os.getenv("MCP_BRIDGE_CONFIG_PATH", "")                # JSON 配置文件路径
+MCP_BRIDGE_SERVERS_JSON = os.getenv("MCP_BRIDGE_SERVERS_JSON", "")              # 内联 JSON 服务器配置（快速测试）
+MCP_BRIDGE_TOOL_PREFIX = os.getenv("MCP_BRIDGE_TOOL_PREFIX", "mcp")             # 工具名前缀：{prefix}_{server}_{tool}
+MCP_BRIDGE_SCHEMA_MODE = os.getenv("MCP_BRIDGE_SCHEMA_MODE", "loose").lower()   # Schema 转换模式：loose | strict
+MCP_BRIDGE_DISCOVERY_TTL = int(os.getenv("MCP_BRIDGE_DISCOVERY_TTL", "300"))    # 工具重新发现间隔（秒）
+MCP_BRIDGE_CALL_TIMEOUT = int(os.getenv("MCP_BRIDGE_CALL_TIMEOUT", "30"))       # 单次 MCP 工具调用超时（秒）
+
+# --- v16 MCP Server ---
+# --- MCP 服务端（v16 新增）---
+MCP_SERVER_ENABLED = os.getenv("MCP_SERVER_ENABLED", "false").lower() == "true"       # MCP Server 开关（默认关闭）
+MCP_SERVER_TRANSPORT = os.getenv("MCP_SERVER_TRANSPORT", "streamable_http").lower()   # 传输模式：streamable_http | stdio
+MCP_SERVER_HOST = os.getenv("MCP_SERVER_HOST", "127.0.0.1")                           # HTTP 监听地址
+MCP_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "8080"))                            # HTTP 监听端口
+
+# --- v18.3/18.4 Remote SubAgent + A2A ---
+# --- 远端 Agent（v18.3 通过 MCP 调远端 agent）+ A2A 原型（v18.4 AgentCard + 任务信封）---
+MCP_SERVER_EXPOSE_AGENT = os.getenv("MCP_SERVER_EXPOSE_AGENT", "false").lower() == "true"  # 服务端暴露 get_agent_card + a2a_run_task（需 MCP_SERVER_ENABLED）
+REMOTE_SUBAGENT_ENABLED = os.getenv("REMOTE_SUBAGENT_ENABLED", "false").lower() == "true"  # 客户端 remote_subagent 工具开关
+REMOTE_AGENT_SERVER_JSON = os.getenv("REMOTE_AGENT_SERVER_JSON", "")                       # 远端 agent server 的 MCPServerConfig 内联 JSON
+REMOTE_SUBAGENT_MAX_CALLS_PER_TASK = int(os.getenv("REMOTE_SUBAGENT_MAX_CALLS_PER_TASK", "2"))  # 单任务远端调用上限
+REMOTE_SUBAGENT_TIMEOUT = int(os.getenv("REMOTE_SUBAGENT_TIMEOUT", str(NODE_EXECUTION_TIMEOUT)))  # 远端任务超时（秒）
+REMOTE_AGENT_FETCH_CARD = os.getenv("REMOTE_AGENT_FETCH_CARD", "true").lower() == "true"   # 调用前是否先拉取 AgentCard
+
+# --- v19 Guardrails (security; OWASP Agentic Top 10 taxonomy) ---
+# --- 安全护栏（v19；以 OWASP ASI 为分类，默认关，向后兼容）---
+GUARDRAILS_ENABLED = os.getenv("GUARDRAILS_ENABLED", "false").lower() == "true"           # v19 主开关（关 → current_guardrail() 返回 None，零开销）
+GUARDRAIL_TOOL_ENABLED = os.getenv("GUARDRAIL_TOOL_ENABLED", "true").lower() == "true"     # 19.1 工具输入层
+GUARDRAIL_INPUT_ENABLED = os.getenv("GUARDRAIL_INPUT_ENABLED", "true").lower() == "true"   # 19.2 工具输出/上下文层
+GUARDRAIL_OUTPUT_ENABLED = os.getenv("GUARDRAIL_OUTPUT_ENABLED", "true").lower() == "true" # 19.3 输出层
+GUARDRAIL_TOOL_MODE = os.getenv("GUARDRAIL_TOOL_MODE", "block").lower()                    # block | observe
+GUARDRAIL_INPUT_MODE = os.getenv("GUARDRAIL_INPUT_MODE", "neutralize").lower()             # neutralize | annotate | observe
+GUARDRAIL_OUTPUT_MODE = os.getenv("GUARDRAIL_OUTPUT_MODE", "redact").lower()               # redact | observe
+GUARDRAIL_WRITE_CONFIRM = os.getenv("GUARDRAIL_WRITE_CONFIRM", "block").lower()            # block | confirm | allow
 
 # --- v14 Phase 3: Harness Configuration ---
 # --- Harness 配置层（v14 Phase 3 新增）---

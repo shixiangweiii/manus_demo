@@ -99,6 +99,16 @@ class ReActEngine:
         available_tool_names = list(self.tools.keys())
         self.tool_router = tool_router or ToolRouter(available_tools=available_tool_names)
 
+        # v18.2: tools that transfer control on success (Handoff). When such a
+        # tool succeeds, end the loop and use its FULL output as the final answer.
+        # Empty set (the default for every engine without a handoff tool) makes
+        # the check below a no-op — zero behavior change for existing loops.
+        # v18.2：控制权转移类工具集合（Handoff）。成功时终止循环、以其完整输出为答案。
+        # 无 handoff 工具时为空集 → 下方检查零开销，现有循环行为不变。
+        self._handoff_tool_names = {
+            n for n, t in self.tools.items() if getattr(t, "is_handoff", False)
+        }
+
         # Wave-3 M2: tool_calls_log lifted to a member attribute so external
         # observers (notably SubAgent timeout/budget paths) can read the
         # in-progress log when execute() does not return its StepResult.
@@ -119,6 +129,48 @@ class ReActEngine:
             return 0.7, self.max_iterations
         else:  # MEDIUM
             return config.REACT_TEMPERATURE, self.max_iterations
+
+    def _check_handoff_transfer(
+        self,
+        response_msg: Any,
+        step_id: str,
+        tool_calls_log: list[ToolCallRecord],
+        iteration: int,
+        on_iteration: Callable[[int, list[ToolCallRecord]], None] | None,
+    ) -> StepResult | None:
+        """v18.2 Handoff control transfer (shared by ReActEngine + ReasoningEngine).
+
+        If a handoff tool succeeded this iteration, return a terminal StepResult
+        carrying the specialist's FULL output (read from the tool instance to
+        avoid message-level truncation); otherwise None (loop continues). A failed
+        handoff (Error:) leaves _last_ok False → no transfer. Empty
+        _handoff_tool_names (no handoff tool) → no-op.
+
+        Extracted so both engine loops honor #20 — fixes drift where only
+        ReActEngine.execute had the inline check (ReasoningEngine bypassed it).
+        v18.2 控制权转移：抽成共享方法，避免 ReasoningEngine 漏掉 handoff 终止（#20 漂移修复）。
+        """
+        if not self._handoff_tool_names or not getattr(response_msg, "tool_calls", None):
+            return None
+        for tc in response_msg.tool_calls:
+            if tc.function.name in self._handoff_tool_names:
+                ho = self.tools.get(tc.function.name)
+                if ho is not None and getattr(ho, "_last_ok", False):
+                    if on_iteration:
+                        on_iteration(iteration, tool_calls_log)
+                    logger.info(
+                        "[%s] Handoff control transfer via '%s' — ending loop",
+                        type(self).__name__, tc.function.name,
+                    )
+                    return StepResult(
+                        step_id=step_id,
+                        success=True,
+                        output=getattr(ho, "_last_output", "") or "",
+                        tool_calls_log=tool_calls_log,
+                        iterations_completed=iteration,
+                    )
+                break
+        return None
 
     async def execute(
         self,
@@ -305,6 +357,13 @@ class ReActEngine:
                 policy=effective_policy,
             )
             messages.extend(tool_messages)
+
+            # v18.2 Handoff control transfer (shared check; honored by both engines)
+            transfer = self._check_handoff_transfer(
+                response_msg, step_id, tool_calls_log, iteration, on_iteration,
+            )
+            if transfer is not None:
+                return transfer
 
             if on_iteration:
                 on_iteration(iteration, tool_calls_log)

@@ -157,6 +157,51 @@ EVALUATION_SUITES: dict[str, EvaluationSuite] = {
         recommended_variants=["react_auto_baseline", "agentic_memory_on"],
         default_repeat=3,
     ),
+    "mcp_bridge": EvaluationSuite(
+        id="mcp_bridge",
+        description="MCP Bridge tool discovery, schema adaptation, execution, and error handling benchmarks.",
+        task_ids=[
+            "mcp_stdio_001",
+            "mcp_http_001",
+            "mcp_schema_001",
+            "mcp_failure_001",
+        ],
+        default_modes=[PlanMode.SIMPLE],
+        recommended_variants=["mcp_bridge_on"],
+        default_repeat=2,
+    ),
+    "multi_agent": EvaluationSuite(
+        id="multi_agent",
+        description="v18.5 multi-agent collaboration: Handoff/SubAgent delegation ROI vs single-agent baseline.",
+        task_ids=[
+            "multi_agent_001",
+            "multi_agent_002",
+            "multi_agent_003",
+            "subagent_easy_001",
+            "subagent_medium_001",
+        ],
+        default_modes=[PlanMode.EMERGENT],
+        recommended_variants=["react_auto_baseline", "handoff_on", "subagent_on"],
+        default_repeat=2,
+    ),
+    "red_team": EvaluationSuite(
+        id="red_team",
+        description="v19.4 AgentDojo-style security red-team: attack cases + benign controls; guardrails_on vs baseline.",
+        task_ids=[
+            "safety_001",
+            "safety_002",
+            "safety_003",
+            "safety_004",
+            "redteam_tool_injection_001",
+            "redteam_exfil_001",
+            "redteam_memory_poison_001",
+            "redteam_benign_write_001",
+            "redteam_benign_search_001",
+        ],
+        default_modes=[PlanMode.SIMPLE],
+        recommended_variants=["react_auto_baseline", "guardrails_on"],
+        default_repeat=2,
+    ),
 }
 
 

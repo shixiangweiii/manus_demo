@@ -122,6 +122,20 @@ EVALUATION_VARIANTS: dict[str, EvaluationVariant] = {
         modes=[PlanMode.EMERGENT],
         expected_focus="delegation ROI",
     ),
+    "handoff_on": EvaluationVariant(
+        id="handoff_on",
+        description="Handoff-enabled emergent runs (specialist control transfer) with ReasoningEngine auto effort.",
+        env_overrides={
+            "ENABLE_REASONING_ENGINE": True,
+            "REASONING_EFFORT": "auto",
+            "ENABLE_GOAL_DRIVEN_PLANNER": False,
+            "SUBAGENT_ENABLED": False,
+            "HANDOFF_ENABLED": True,
+            "DAG_SERIAL_EXECUTION": True,
+        },
+        modes=[PlanMode.EMERGENT],
+        expected_focus="handoff collaboration ROI",
+    ),
     "dag_parallel": EvaluationVariant(
         id="dag_parallel",
         description="DAG parallel execution with ReasoningEngine auto effort.",
@@ -135,6 +149,19 @@ EVALUATION_VARIANTS: dict[str, EvaluationVariant] = {
         modes=[PlanMode.COMPLEX],
         expected_focus="parallel DAG throughput",
     ),
+    "guardrails_on": EvaluationVariant(
+        id="guardrails_on",
+        description="v19 guardrails enabled (tool/input/output). For red-team A/B vs baseline.",
+        env_overrides={
+            "GUARDRAILS_ENABLED": True,
+            # In non-interactive eval, write-confirm would degrade to BLOCK and kill
+            # benign file writes; use 'allow' so blocked_benign_rate reflects only
+            # dangerous-pattern false positives, not write gating.
+            "GUARDRAIL_WRITE_CONFIRM": "allow",
+        },
+        modes=[PlanMode.SIMPLE],
+        expected_focus="attack blocking vs benign usability",
+    ),
     "agentic_memory_on": EvaluationVariant(
         id="agentic_memory_on",
         description="Agentic Memory enabled with memory tools for recall/store/correction.",
@@ -144,6 +171,16 @@ EVALUATION_VARIANTS: dict[str, EvaluationVariant] = {
         },
         modes=[PlanMode.SIMPLE, PlanMode.EMERGENT],
         expected_focus="memory recall and storage",
+    ),
+    "mcp_bridge_on": EvaluationVariant(
+        id="mcp_bridge_on",
+        description="MCP Bridge enabled for dynamic tool discovery from MCP servers.",
+        env_overrides={
+            "MCP_BRIDGE_ENABLED": True,
+            "MCP_BRIDGE_SERVERS_JSON": '{"servers":{"mock":{"transport":"streamable_http","url":"http://127.0.0.1:9876","enabled":true}}}',
+        },
+        modes=[PlanMode.SIMPLE],
+        expected_focus="MCP tool discovery and execution",
     ),
 }
 

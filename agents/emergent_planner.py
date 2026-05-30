@@ -426,40 +426,56 @@ class EmergentPlannerAgent(BaseAgent):
         if context:
             prompt += f"\n\nContext:\n{context}"
 
-        try:
-            data = await self.think_json(prompt, temperature=0.3)
-            for todo_data in data.get("todos", []):
-                self._todo_list.add_todo(
-                    description=todo_data.get("description", ""),
-                    dependencies=todo_data.get("dependencies", []),
-                )
-
-            logger.info(
-                "[EmergentPlanner] Initialized TODO list with %d items",
-                len(self._todo_list.todos)
-            )
-            self._emit("todo_list_initialized", self._get_todo_summary())
-
-        except Exception as exc:
-            logger.warning("[EmergentPlanner] Failed to parse initial TODOs: %s. Retrying...", exc)
+        # review F-eval-2: a parseable-but-empty/wrong-shape response (e.g. {"todos": []}
+        # or the list under another key) must NOT be silently accepted as 0 TODOs.
+        # Try twice (shape-tolerant extraction), then fall back to a single whole-task
+        # TODO — so emergent mode never spins on "0 TODOs processed".
+        # 可解析但空/异形的响应不再被静默当成 0 个 TODO：两次尝试 + 单 TODO 兜底。
+        attempts = [
+            (prompt, 0.3),
+            (prompt + "\n\nIMPORTANT: Respond with valid JSON only. Return at LEAST one TODO.", 0.1),
+        ]
+        for attempt_prompt, temp in attempts:
+            todo_dicts: list[dict] = []
             try:
                 self.reset()
-                data = await self.think_json(
-                    prompt + "\n\nIMPORTANT: Respond with valid JSON only.",
-                    temperature=0.1,
-                )
-                for todo_data in data.get("todos", []):
-                    self._todo_list.add_todo(
-                        description=todo_data.get("description", ""),
-                        dependencies=todo_data.get("dependencies", []),
-                    )
-                self._emit("todo_list_initialized", self._get_todo_summary())
-                return
-            except Exception as retry_exc:
-                logger.warning("[EmergentPlanner] Retry also failed: %s. Creating default.", retry_exc)
-                fallback = self._todo_list.add_todo(description=f"Complete task: {task}")
-                fallback.retry_count = config_module.MAX_TODO_RETRIES - 1  # 限制兜底 TODO 仅重试 1 次
-                self._emit("todo_list_initialized", self._get_todo_summary())
+                data = await self.think_json(attempt_prompt, temperature=temp)
+                todo_dicts = self._extract_todo_dicts(data)
+                if not todo_dicts:
+                    logger.debug("[EmergentPlanner] TODO init returned no items; data=%s", str(data)[:300])
+            except Exception as exc:
+                logger.warning("[EmergentPlanner] Failed to parse initial TODOs: %s", exc)
+            for td in todo_dicts:
+                desc = (td.get("description") or "").strip()
+                if desc:
+                    self._todo_list.add_todo(description=desc, dependencies=td.get("dependencies", []))
+            if self._todo_list.todos:
+                break  # got at least one actionable TODO
+
+        if not self._todo_list.todos:
+            logger.warning("[EmergentPlanner] TODO init empty after retries; using single-TODO fallback.")
+            fallback = self._todo_list.add_todo(description=f"Complete task: {task}")
+            fallback.retry_count = config_module.MAX_TODO_RETRIES - 1  # 兜底 TODO 仅重试 1 次
+
+        logger.info("[EmergentPlanner] Initialized TODO list with %d items", len(self._todo_list.todos))
+        self._emit("todo_list_initialized", self._get_todo_summary())
+
+    @staticmethod
+    def _extract_todo_dicts(data: Any) -> list[dict]:
+        """Shape-tolerant extraction of TODO dicts from an LLM JSON response.
+        容错抽取 TODO 列表：兼容 {"todos":[...]} / 裸 list / {"plan"|"items"|"steps"|"tasks":[...]} / 首个 list-of-dict 值。"""
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+        if not isinstance(data, dict):
+            return []
+        for key in ("todos", "plan", "items", "steps", "tasks"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [d for d in v if isinstance(d, dict)]
+        for v in data.values():  # last resort: first list-of-dict field
+            if isinstance(v, list) and v and all(isinstance(d, dict) for d in v):
+                return v
+        return []
 
     async def _update_todo_list(self, last_result: StepResult) -> None:
         """

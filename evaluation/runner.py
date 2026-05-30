@@ -123,6 +123,8 @@ class EvaluationRunner:
         original_hitl = config.HITL_ENABLED
         original_subagent = config.SUBAGENT_ENABLED
         original_goal_driven = config.ENABLE_GOAL_DRIVEN_PLANNER
+        original_handoff = config.HANDOFF_ENABLED
+        original_handoff_ask_user = config.HANDOFF_ALLOW_ASK_USER
         original_agentic_memory = config.AGENTIC_MEMORY_ENABLED
         original_memory_tools = config.MEMORY_TOOLS_ENABLED
         original_memory_dir = config.MEMORY_DIR
@@ -138,6 +140,7 @@ class EvaluationRunner:
         is_goal_driven_task = "goal_driven" in tags_lower
         is_resume_task = "resume" in tags_lower
         is_memory_task = "memory" in tags_lower
+        is_handoff_task = "handoff" in tags_lower
 
         # v15: Memory tasks get isolated MEMORY_DIR to avoid polluting user's real memory
         _memory_tmpdir: str | None = None
@@ -156,6 +159,12 @@ class EvaluationRunner:
             config.SUBAGENT_ENABLED = True
         if is_goal_driven_task:
             config.ENABLE_GOAL_DRIVEN_PLANNER = True
+        # v18.5: handoff-tagged tasks enable Handoff; handoff+hitl tasks must opt
+        # the specialist into ask_user explicitly (roadmap §10 requirement).
+        if is_handoff_task:
+            config.HANDOFF_ENABLED = True
+            if is_hitl_task:
+                config.HANDOFF_ALLOW_ASK_USER = True
 
         # v8: SimulatedUser for HITL tasks — intercepts ask_user_prompt event and
         # resolves the Future with a scripted response BEFORE the probe records it.
@@ -224,6 +233,8 @@ class EvaluationRunner:
                 config.HITL_ENABLED = original_hitl
                 config.SUBAGENT_ENABLED = original_subagent
                 config.ENABLE_GOAL_DRIVEN_PLANNER = original_goal_driven
+                config.HANDOFF_ENABLED = original_handoff
+                config.HANDOFF_ALLOW_ASK_USER = original_handoff_ask_user
                 config.AGENTIC_MEMORY_ENABLED = original_agentic_memory
                 config.MEMORY_TOOLS_ENABLED = original_memory_tools
                 config.MEMORY_DIR = original_memory_dir

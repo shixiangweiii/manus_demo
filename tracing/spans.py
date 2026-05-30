@@ -217,6 +217,12 @@ class AttrKey:
     ADAPTATION_ACTION_COUNT = "adaptation.action_count"
     ADAPTATION_SHOULD_ADAPT = "adaptation.should_adapt"
 
+    # --- MCP (v16) ---
+    MCP_SERVER_NAME = "mcp.server_name"
+    MCP_ORIGINAL_TOOL = "mcp.original_tool_name"
+    MCP_TRANSPORT = "mcp.transport"
+    MCP_SCHEMA_MODE = "mcp.schema_mode"
+
     # --- Performance ---
     LATENCY_MS = "latency_ms"
     ERROR_TYPE = "error.type"

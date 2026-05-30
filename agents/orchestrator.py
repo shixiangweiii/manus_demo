@@ -175,6 +175,49 @@ class OrchestratorAgent:
                 "[Orchestrator] HITL configured but suppressed (non-interactive mode)"
             )
 
+        # v18.2 Handoff tool (feature-flagged, default off). Registered AFTER the
+        # HITL block so ask_user is in available_tools (specialists may use it
+        # when HANDOFF_ALLOW_ASK_USER) and BEFORE sub-agents are created so it
+        # enters their ReAct engines' tool sets.
+        # v18.2 Handoff 工具：在 HITL 之后注册（专家可拿到 ask_user），在子 agent
+        # 创建之前注册（进入各 ReAct 引擎工具集）。
+        self._handoff_tool = None
+        if config.HANDOFF_ENABLED:
+            from tools.handoff_tool import HandoffTool
+            handoff_available = {t.name: t for t in (tools or [])}
+            self._handoff_tool = HandoffTool(
+                llm_client=self.llm_client,
+                available_tools=handoff_available,
+                context_manager=self.context_manager,
+                on_event=self._emit,
+                allow_ask_user=config.HANDOFF_ALLOW_ASK_USER,
+                interactive=interactive,
+                parent_name="OrchestratorAgent",
+            )
+            tools = list(tools or []) + [self._handoff_tool]
+            logger.info("[Orchestrator] Handoff tool (v18.2) enabled")
+
+        # v18.3 Remote SubAgent tool (feature-flagged, default off). Delegates to a
+        # remote MCP-hosted agent over a configurable transport (cross-process).
+        # v18.3 远端子智能体工具：通过可配传输委派给远端 MCP agent（跨进程）。
+        self._remote_subagent_tool = None
+        if config.REMOTE_SUBAGENT_ENABLED:
+            from tools.remote_subagent_tool import RemoteSubAgentTool, build_remote_server_config
+            server_cfg = build_remote_server_config(config.REMOTE_AGENT_SERVER_JSON)
+            if server_cfg is not None:
+                self._remote_subagent_tool = RemoteSubAgentTool(
+                    server_config=server_cfg,
+                    on_event=self._emit,
+                    parent_name="OrchestratorAgent",
+                )
+                tools = list(tools or []) + [self._remote_subagent_tool]
+                logger.info("[Orchestrator] Remote SubAgent tool (v18.3) enabled")
+            else:
+                logger.warning(
+                    "[Orchestrator] REMOTE_SUBAGENT_ENABLED but REMOTE_AGENT_SERVER_JSON "
+                    "is empty/invalid — remote subagent disabled"
+                )
+
         # Sub-agents（各专用子智能体）
         self.planner = PlannerAgent(self.llm_client, self.context_manager)
         self.executor_agent = ExecutorAgent(
@@ -238,6 +281,29 @@ class OrchestratorAgent:
                     MemoryRevokeTool(svc, on_event=self._emit),
                 ]
 
+        # v17 Self-Evolution (feature-flagged, default off; requires agentic memory)
+        # v17 自演化（特性开关控制，默认关闭；硬依赖 agentic memory）
+        self._experience_learner = None
+        if config.SELF_EVOLUTION_ENABLED and self._agentic_memory_service is not None:
+            from evolution.learner import ExperienceLearner
+            self._experience_learner = ExperienceLearner(
+                llm_client=self.llm_client,
+                memory_service=self._agentic_memory_service,
+                on_event=self._emit,
+            )
+            logger.info("[Orchestrator] Self-Evolution (v17) enabled")
+        elif config.SELF_EVOLUTION_ENABLED and self._agentic_memory_service is None:
+            logger.warning(
+                "[Orchestrator] SELF_EVOLUTION_ENABLED but AGENTIC_MEMORY_ENABLED is off "
+                "— self-evolution disabled"
+            )
+
+        # v18.1: capture the final tool set for the deterministic Workflow engine.
+        # Workflow steps only invoke tools named in the spec, so including
+        # subagent/handoff/memory tools here is harmless.
+        # v18.1：捕获最终工具集供确定性 Workflow 引擎使用。
+        self._workflow_tools = {t.name: t for t in (tools or [])}
+
         # Event callback for UI updates（UI 事件回调）
         self._on_event = on_event or (lambda *_: None)
 
@@ -251,6 +317,19 @@ class OrchestratorAgent:
         self._checkpoint_effort: ReasoningEffort | None = None
         self._checkpoint_created_at: float = 0.0
         self._task_state_store = task_state_store or TaskStateStore()
+
+        # v17 Self-Evolution: last-task outcome snapshot (set by execution paths,
+        # consumed by _learn_from_task after the task finishes).
+        # v17 自演化：最近一次任务的结果快照，由各执行路径写入，任务结束后供学习使用。
+        self._last_success: bool = False
+        self._last_reflection: Reflection | None = None
+        self._last_trajectory: list[StepResult] = []
+
+        # v17.4 Preference learning: captured HITL (question, answer) pairs for the
+        # current task. _pending_hitl maps prompt_id -> question until the answer arrives.
+        # v17.4 偏好学习：当前任务捕获的 HITL 问答对；_pending_hitl 在答案到达前暂存问题。
+        self._hitl_pairs: list[dict] = []
+        self._pending_hitl: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -277,6 +356,11 @@ class OrchestratorAgent:
         self._current_task_id = task_id
         self._checkpoint_task = task
         self._checkpoint_created_at = time.time()
+        # v17: reset outcome snapshot for the new task / 重置本任务结果快照
+        self._record_outcome(False, None, [])
+        # v17.4: reset HITL preference capture for the new task / 重置本任务偏好捕获
+        self._hitl_pairs = []
+        self._pending_hitl = {}
         self._emit("task_start", {"task": task, "task_id": task_id})
 
         # Token 追踪：重置记录，开始新任务
@@ -289,6 +373,17 @@ class OrchestratorAgent:
         # v13: Reset HITL per-task state for new task
         if self._ask_user_tool:
             self._ask_user_tool.reset_task_state()
+
+        # v18.2: Reset Handoff per-task state for new task
+        if self._handoff_tool:
+            self._handoff_tool.reset_task_state()
+
+        # v18.3: Reset Remote SubAgent per-task state for new task
+        if self._remote_subagent_tool:
+            self._remote_subagent_tool.reset_task_state()
+
+        # v19: wire guardrail runtime hooks (event sink + write-confirm callback)
+        self._wire_guardrail_runtime()
 
         if not config.EMERGENT_PLANNING_ENABLED:
             logger.info("[Orchestrator] Emergent planning mode is disabled via config")
@@ -332,12 +427,16 @@ class OrchestratorAgent:
                 self._emit("dag_created", dag)
                 final_answer = await self._execute_dag_and_reflect(dag, effort)
 
+            # v19.3: output guardrail — redact PII/credentials before store/emit/return.
+            final_answer = self._apply_output_guardrail(final_answer)
+
             # --- Phase 4: Store in memory ---
             # --- 阶段 4：存入长期记忆 ---
             # Token 追踪：输出汇总
             summary = self._finalize_token_usage()
             self._emit("token_usage_summary", summary)
             self._store_memory(task, final_answer)
+            await self._learn_from_task(task, final_answer)
             self.short_term.add({"role": "assistant", "content": final_answer})
             self._mark_task_completed()
             self._emit("task_complete", {"answer": final_answer})
@@ -345,6 +444,54 @@ class OrchestratorAgent:
         except Exception:
             self._mark_task_failed()
             raise
+        finally:
+            self._unwire_guardrail_runtime()
+
+    # ------------------------------------------------------------------
+    # v18.1 Deterministic Workflow entry (explicit dual-engine)
+    # v18.1 确定性工作流入口（显式双引擎）
+    # ------------------------------------------------------------------
+
+    async def run_workflow(self, spec: "Any") -> str:
+        """
+        Execute a declarative WorkflowSpec deterministically (no per-step LLM).
+        确定性执行声明式 WorkflowSpec（每步无 LLM 推理）。
+
+        This is the deterministic half of the explicit dual-engine architecture;
+        it deliberately bypasses classify / reflection / self-evolution.
+        这是显式双引擎中的"确定性"一侧，刻意不走分类/反思/自演化。
+        """
+        from workflow.engine import WorkflowEngine
+
+        if not config.WORKFLOW_ENABLED:
+            raise RuntimeError("Workflow engine is disabled (WORKFLOW_ENABLED=false)")
+
+        task_id = str(uuid.uuid4())[:8]
+        self._current_task_id = task_id
+        self.llm_client.reset_usage()
+        self._emit("task_start", {"task": spec.name, "task_id": task_id, "mode": "workflow"})
+        self._wire_guardrail_runtime()  # v19: guardrails apply to workflow tool steps too
+
+        try:
+            engine = WorkflowEngine(self._workflow_tools, on_event=self._emit)
+            result = await engine.execute(spec)
+
+            summary = self._finalize_token_usage()
+            self._emit("token_usage_summary", summary)
+
+            if result.success:
+                final_output = self._apply_output_guardrail(result.final_output)  # v19.3
+                self._emit("task_complete", {"answer": final_output})
+                return final_output
+            # Surface deterministic failure transparently (no fabrication).
+            failure = (
+                f"Workflow '{spec.name}' could not complete. "
+                f"Failed step: {result.failed_step or '(planning)'}. Error: {result.error}"
+            )
+            self._emit("task_complete", {"answer": failure})
+            return failure
+        finally:
+            self._unwire_guardrail_runtime()
 
     # ------------------------------------------------------------------
     # Context gathering
@@ -365,6 +512,8 @@ class OrchestratorAgent:
             agentic_context = self._agentic_memory_service.format_context(results)
             self._emit("memory_search_result", {"query": task, "count": len(results), "results": results})
             if results:
+                # v19.2: scan retrieved memory for injection (poisoning defense, ASI06)
+                agentic_context = self._apply_memory_guardrail(agentic_context)
                 combined += f"=== Agentic Memory ===\n{agentic_context}\n\n"
         else:
             # Legacy path / 旧路径
@@ -372,7 +521,23 @@ class OrchestratorAgent:
             memory_context = self.long_term.format_memories(memories)
             self._emit("memory", memory_context)
             if memories:
+                memory_context = self._apply_memory_guardrail(memory_context)  # v19.2
                 combined += f"=== Past Experience ===\n{memory_context}\n\n"
+
+        # v17 Self-Evolution: inject past-failure avoidance hints
+        # v17 自演化：注入过往失败避坑提示
+        if self._experience_learner is not None:
+            hints = self._experience_learner.build_avoidance_hints(task)
+            if hints:
+                combined += f"{hints}\n\n"
+                self._emit("avoidance_hints_injected", {"task": task[:80]})
+
+            # v17.4: inject known user preferences / 注入已知用户偏好
+            if config.SELF_EVOLUTION_PREFERENCE_ENABLED:
+                pref_hints = self._experience_learner.build_preference_hints(task)
+                if pref_hints:
+                    combined += f"{pref_hints}\n\n"
+                    self._emit("preference_hints_injected", {"task": task[:80]})
 
         knowledge_results = self.knowledge.search(task)
         knowledge_context = self.knowledge.format_results(knowledge_results)
@@ -410,6 +575,7 @@ class OrchestratorAgent:
         """
         all_results: list[StepResult] = _resume_results or []
         if _resume_reflection and _resume_reflection.passed:
+            self._record_outcome(True, _resume_reflection, all_results)
             return await self._compile_answer(task, all_results)
 
         for attempt in range(_resume_attempt, self.max_replan + 1):
@@ -500,6 +666,7 @@ class OrchestratorAgent:
             )
 
             if reflection.passed:
+                self._record_outcome(True, reflection, all_results)
                 return await self._compile_answer(task, all_results)
 
             if attempt < self.max_replan:
@@ -520,8 +687,10 @@ class OrchestratorAgent:
                 all_results = preserved + (failed[-1:] if failed else [])
             else:
                 logger.warning("Max re-plan attempts reached. Returning best effort.")
+                self._record_outcome(False, reflection, all_results)
                 return await self._compile_answer(task, all_results)
 
+        self._record_outcome(False, self._last_reflection, all_results)
         return "Task could not be completed after maximum attempts."
 
     async def _compile_answer(self, task: str, results: list[StepResult]) -> str:
@@ -648,18 +817,21 @@ class OrchestratorAgent:
                     t for t in self.goal_driven_planner._todo_list.todos.values()
                     if t.status == TodoStatus.BLOCKED
                 ]
+            gd_reflection: Reflection | None = None
             if blocked_todos:
                 logger.warning(
                     "[Orchestrator] Goal-driven planning completed with %d blocked TODOs",
                     len(blocked_todos),
                 )
-                self._emit("reflection", Reflection(
+                gd_reflection = Reflection(
                     passed=False, score=0.4,
                     feedback=f"Goal-driven planning completed but {len(blocked_todos)} TODOs were blocked: "
                              + "; ".join(t.description[:80] for t in blocked_todos[:3]),
                     suggestions=["Consider re-running with complex mode for structured planning"],
-                ))
+                )
+                self._emit("reflection", gd_reflection)
 
+            self._record_outcome(not blocked_todos, gd_reflection, [])
             self._emit("phase", "Goal-driven planning completed.")
             return final_answer
 
@@ -679,18 +851,21 @@ class OrchestratorAgent:
                 t for t in self.emergent_planner._todo_list.todos.values()
                 if t.status == TodoStatus.BLOCKED
             ]
+        em_reflection: Reflection | None = None
         if blocked_todos:
             logger.warning(
                 "[Orchestrator] Emergent planning completed with %d blocked TODOs",
                 len(blocked_todos),
             )
-            self._emit("reflection", Reflection(
+            em_reflection = Reflection(
                 passed=False, score=0.4,
                 feedback=f"Emergent planning completed but {len(blocked_todos)} TODOs were blocked: "
                          + "; ".join(t.description[:80] for t in blocked_todos[:3]),
                 suggestions=["Consider re-running with complex mode for structured planning"],
-            ))
+            )
+            self._emit("reflection", em_reflection)
 
+        self._record_outcome(not blocked_todos, em_reflection, [])
         self._emit("phase", "Emergent planning completed.")
         return final_answer
 
@@ -741,6 +916,7 @@ class OrchestratorAgent:
             self._emit("reflection", reflection)
 
             if reflection.passed:
+                self._record_outcome(True, reflection, results)
                 return final_output  # 反思通过，直接返回结果
 
             # 找出问题节点（FAILED 或 SKIPPED），准备局部重规划
@@ -769,8 +945,10 @@ class OrchestratorAgent:
             else:
                 logger.warning("No replan triggered (attempt %d/%d, %d problematic nodes). Returning best effort.",
                     attempt+1, self.max_replan+1, len(problematic_nodes))
+                self._record_outcome(False, reflection, results)
                 return final_output  # 达到最大重规划次数，返回当前最佳结果
 
+        self._record_outcome(False, self._last_reflection, [])
         return "Task could not be completed after maximum attempts."
 
     # ------------------------------------------------------------------
@@ -852,7 +1030,7 @@ class OrchestratorAgent:
                 task=task,
                 answer=answer,
                 task_id=self._current_task_id or "",
-                success=True,
+                success=self._last_success,
             )
             self._emit("memory_store", {"task_id": self._current_task_id})
         else:
@@ -864,6 +1042,136 @@ class OrchestratorAgent:
             )
             self.long_term.store(entry)
             self._emit("memory_stored", entry)
+
+    # ------------------------------------------------------------------
+    # v17 Self-Evolution: outcome capture & learning
+    # v17 自演化：结果捕获与学习
+    # ------------------------------------------------------------------
+
+    def _record_outcome(
+        self,
+        success: bool,
+        reflection: Reflection | None = None,
+        results: list[StepResult] | None = None,
+    ) -> None:
+        """Snapshot the task outcome for post-task self-evolution learning.
+        记录任务结果快照，供任务结束后的自演化学习使用。"""
+        self._last_success = success
+        self._last_reflection = reflection
+        self._last_trajectory = results or []
+
+    async def _learn_from_task(self, task: str, final_answer: str) -> None:
+        """Distill experience / failure lessons from the completed task (v17).
+        从已完成任务提炼经验 / 失败教训（v17）。学习失败不影响主流程。"""
+        if self._experience_learner is None:
+            return
+        from evolution.models import TaskOutcome
+        reflection = self._last_reflection
+        outcome = TaskOutcome(
+            task=task,
+            task_id=self._current_task_id or "",
+            complexity=self._active_complexity or "",
+            success=self._last_success,
+            final_answer=final_answer or "",
+            reflection_feedback=reflection.feedback if reflection else "",
+            reflection_score=reflection.score if reflection else 0.0,
+            suggestions=list(reflection.suggestions) if reflection else [],
+            trajectory=list(self._last_trajectory),
+        )
+        try:
+            await self._experience_learner.learn_from_task(outcome)
+        except Exception:
+            logger.debug("[Orchestrator] Self-evolution learn failed", exc_info=True)
+
+        # v17.4: learn user preferences from captured HITL pairs
+        # v17.4：从捕获的 HITL 问答对学习用户偏好
+        if config.SELF_EVOLUTION_PREFERENCE_ENABLED and self._hitl_pairs:
+            try:
+                await self._experience_learner.learn_preferences(task, self._hitl_pairs)
+            except Exception:
+                logger.debug("[Orchestrator] Self-evolution preference learn failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # v19 Guardrails: runtime wiring + output redaction + write confirm
+    # v19 安全护栏：运行时挂接 + 输出脱敏 + 写操作确认
+    # ------------------------------------------------------------------
+
+    def _wire_guardrail_runtime(self) -> None:
+        """Route guardrail events to _emit; register write-confirm cb in interactive mode."""
+        if not config.GUARDRAILS_ENABLED:
+            return
+        from guardrails.engine import set_confirm_callback, set_event_sink
+        set_event_sink(self._emit)
+        if self._hitl_active and config.GUARDRAIL_WRITE_CONFIRM == "confirm":
+            set_confirm_callback(self._guardrail_confirm)
+        else:
+            set_confirm_callback(None)
+
+    def _unwire_guardrail_runtime(self) -> None:
+        """Clear guardrail runtime hooks after a run (avoid cross-instance leaks)."""
+        if not config.GUARDRAILS_ENABLED:
+            return
+        try:
+            from guardrails.engine import reset_guardrail_runtime
+            reset_guardrail_runtime()
+        except Exception:
+            logger.debug("[Orchestrator] guardrail unwire failed", exc_info=True)
+
+    async def _guardrail_confirm(self, tool_name: str, params: dict) -> bool:
+        """Bridge a guardrail write-op confirmation to the HITL ask_user flow.
+        把护栏写操作确认桥接到 HITL ask_user 流程；超时/非交互 → 拒绝（fail-safe）。"""
+        if not self._hitl_active:
+            return False
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str] = loop.create_future()
+        prompt_id = str(uuid.uuid4())[:8]
+        question = (
+            f"[Guardrail] 工具 '{tool_name}' 将执行写/敏感操作，是否允许？(yes/no)\n"
+            f"参数: {str(params)[:200]}"
+        )
+        try:
+            self._handle_user_prompt(question, prompt_id, fut)
+            resp = await asyncio.wait_for(fut, timeout=config.HITL_USER_INPUT_TIMEOUT)
+        except Exception:
+            return False
+        if not isinstance(resp, str):
+            return False
+        if resp.startswith("User response: "):
+            resp = resp[len("User response: "):]
+        return resp.strip().lower() in ("yes", "y", "是", "确认", "allow", "ok")
+
+    def _apply_output_guardrail(self, text: str) -> str:
+        """v19.3: redact PII/credentials from the final answer (no-op when disabled)."""
+        if not config.GUARDRAILS_ENABLED:
+            return text
+        try:
+            from guardrails.engine import current_guardrail
+            g = current_guardrail()
+            if g is None:
+                return text
+            decision = g.scan_final_output(text)
+            if decision.transformed_text is not None:
+                return decision.transformed_text
+        except Exception:
+            logger.debug("[Orchestrator] output guardrail error (passthrough)", exc_info=True)
+        return text
+
+    def _apply_memory_guardrail(self, text: str) -> str:
+        """v19.2: neutralize indirect injection in retrieved memory before context
+        injection (memory poisoning defense, ASI06). No-op when disabled."""
+        if not config.GUARDRAILS_ENABLED or not text:
+            return text
+        try:
+            from guardrails.engine import current_guardrail
+            g = current_guardrail()
+            if g is None:
+                return text
+            decision = g.scan_memory(text)
+            if decision.transformed_text is not None:
+                return decision.transformed_text
+        except Exception:
+            logger.debug("[Orchestrator] memory guardrail error (passthrough)", exc_info=True)
+        return text
 
     @staticmethod
     def _make_multicast(*callbacks: Callable) -> Callable:
@@ -1090,14 +1398,25 @@ class OrchestratorAgent:
         self._checkpoint_context = checkpoint.context
         self._checkpoint_effort = ReasoningEffort(checkpoint.effort)
         self._checkpoint_created_at = checkpoint.created_at
+        # v17: reset outcome + HITL preference capture for the resumed run
+        self._record_outcome(False, None, [])
+        self._hitl_pairs = []
+        self._pending_hitl = {}
 
         self.llm_client.reset_usage()
         if self._subagent_tool:
             self._subagent_tool.reset_task_state()
         if self._ask_user_tool:
             self._ask_user_tool._prompt_count = checkpoint.hitl_prompt_count
+        # v18: reset handoff/remote per-task state for symmetry with run()
+        if self._handoff_tool:
+            self._handoff_tool.reset_task_state()
+        if self._remote_subagent_tool:
+            self._remote_subagent_tool.reset_task_state()
 
         self._emit("task_start", {"task": checkpoint.task, "task_id": task_id, "resumed": True})
+        # v19: wire guardrail runtime for the resumed run (same as run()/run_workflow())
+        self._wire_guardrail_runtime()
 
         try:
             # Dispatch to path-specific resume
@@ -1114,16 +1433,21 @@ class OrchestratorAgent:
                     raise ValueError(f"Cannot resume: no path-specific state in checkpoint for {task_id}")
             else:
                 raise ValueError(f"Cannot resume: unknown complexity '{checkpoint.complexity}' for {task_id}")
+
+            # v19.3: output guardrail — redact before store/emit/return (parity with run())
+            final_answer = self._apply_output_guardrail(final_answer)
+            self._mark_task_completed()
+            summary = self._finalize_token_usage()
+            self._emit("token_usage_summary", summary)
+            self._store_memory(checkpoint.task, final_answer)
+            await self._learn_from_task(checkpoint.task, final_answer)
+            self._emit("task_complete", {"answer": final_answer})
+            return final_answer
         except Exception:
             self._mark_task_failed()
             raise
-
-        self._mark_task_completed()
-        summary = self._finalize_token_usage()
-        self._emit("token_usage_summary", summary)
-        self._store_memory(checkpoint.task, final_answer)
-        self._emit("task_complete", {"answer": final_answer})
-        return final_answer
+        finally:
+            self._unwire_guardrail_runtime()
 
     async def _resume_simple(self, checkpoint: TaskCheckpoint) -> str:
         """Resume a simple-path task from checkpoint.
@@ -1177,7 +1501,7 @@ class OrchestratorAgent:
         self.emergent_planner._current_effort = effort
         self._emit("phase", "Resuming emergent planning...")
 
-        return await self.emergent_planner.resume_execute(
+        final_answer = await self.emergent_planner.resume_execute(
             task=checkpoint.task,
             context=checkpoint.context,
             effort=effort,
@@ -1187,6 +1511,13 @@ class OrchestratorAgent:
             stagnation_state=state.stagnation_state,
             on_checkpoint=self._checkpoint_emergent_progress,
         )
+        blocked = [
+            t for t in (self.emergent_planner._todo_list.todos.values()
+                        if self.emergent_planner._todo_list else [])
+            if t.status == TodoStatus.BLOCKED
+        ]
+        self._record_outcome(not blocked, None, all_results)
+        return final_answer
 
     async def _resume_goal_driven(self, checkpoint: TaskCheckpoint) -> str:
         """Resume a goal-driven-path task from checkpoint.
@@ -1208,7 +1539,7 @@ class OrchestratorAgent:
         if state.last_reflection:
             last_reflection = GoalReflection(**state.last_reflection)
 
-        return await self.goal_driven_planner.resume_execute(
+        final_answer = await self.goal_driven_planner.resume_execute(
             task=checkpoint.task,
             context=checkpoint.context,
             effort=effort,
@@ -1220,6 +1551,13 @@ class OrchestratorAgent:
             last_reflection=last_reflection,
             on_checkpoint=self._checkpoint_goal_driven_progress,
         )
+        blocked = [
+            t for t in (self.goal_driven_planner._todo_list.todos.values()
+                        if self.goal_driven_planner._todo_list else [])
+            if t.status == TodoStatus.BLOCKED
+        ]
+        self._record_outcome(not blocked, None, all_results)
+        return final_answer
 
     # ------------------------------------------------------------------
     # v13 HITL: User prompt bridging
@@ -1250,8 +1588,36 @@ class OrchestratorAgent:
                 "prompt_count": self._current_hitl_prompt_count(),
             },
         )
+
+        # v17.4: capture (question, answer) for preference learning. Hook the
+        # Future's done callback so we record the answer once the UI resolves it,
+        # without touching ask_user.py / main.py.
+        # v17.4：挂 Future 完成回调，在 UI resolve 后捕获问答对，零侵入 ask_user/main。
+        if self._experience_learner is not None and config.SELF_EVOLUTION_PREFERENCE_ENABLED:
+            self._pending_hitl[prompt_id] = question
+            response_future.add_done_callback(
+                lambda fut, pid=prompt_id: self._capture_hitl_answer(pid, fut)
+            )
+
         self._emit("ask_user_prompt", {
             "question": question,
             "prompt_id": prompt_id,
             "response_future": response_future,
         })
+
+    def _capture_hitl_answer(self, prompt_id: str, fut: asyncio.Future[str]) -> None:
+        """Record a resolved HITL (question, answer) pair for preference learning.
+        在 HITL 答案就绪时记录问答对，供 v17.4 偏好学习使用。"""
+        question = self._pending_hitl.pop(prompt_id, "")
+        if fut.cancelled():
+            return
+        try:
+            answer = fut.result()
+        except Exception:
+            return
+        if not answer or answer == "(user cancelled)":
+            return
+        # UI may pass back the raw answer; strip the tool's "User response: " prefix if present.
+        if answer.startswith("User response: "):
+            answer = answer[len("User response: "):]
+        self._hitl_pairs.append({"question": question, "answer": answer.strip()})

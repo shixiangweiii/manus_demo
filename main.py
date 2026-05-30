@@ -25,6 +25,8 @@ import logging
 import sys
 from typing import Any
 
+import config
+
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
@@ -468,6 +470,92 @@ def on_event(event: str, data: Any) -> None:
     elif event == "memory_consolidate":
         console.print("[dim]   Memory consolidated[/dim]")
 
+    # --- v17 Self-Evolution Events ---
+    # --- v17 自演化事件 ---
+    elif event == "experience_learned":
+        summary = data.get("summary", "") if isinstance(data, dict) else ""
+        console.print(f"[dim]   🧠 Experience learned: {summary[:80]}[/dim]")
+    elif event == "failure_lesson_stored":
+        reason = data.get("failure_reason", "") if isinstance(data, dict) else ""
+        console.print(f"[dim]   🧠 Failure lesson stored: {reason[:80]}[/dim]")
+    elif event == "avoidance_hints_injected":
+        console.print("[dim]   🧭 Past-failure avoidance hints injected[/dim]")
+    elif event == "preference_learned":
+        value = data.get("value", "") if isinstance(data, dict) else ""
+        console.print(f"[dim]   🧠 User preference learned: {value[:80]}[/dim]")
+    elif event == "preference_hints_injected":
+        console.print("[dim]   🧭 Known user preferences injected[/dim]")
+
+    # --- v18.1 Workflow Engine Events ---
+    # --- v18.1 工作流引擎事件 ---
+    elif event == "workflow_start":
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        steps = data.get("steps", 0) if isinstance(data, dict) else 0
+        console.print(f"[bold cyan]⚙️  Workflow '{name}' ({steps} steps, deterministic)[/bold cyan]")
+    elif event == "workflow_step_start":
+        sid = data.get("id", "") if isinstance(data, dict) else ""
+        tool = data.get("tool", "") if isinstance(data, dict) else ""
+        console.print(f"[dim]   → step '{sid}' ({tool})[/dim]")
+    elif event == "workflow_step_complete":
+        sid = data.get("id", "") if isinstance(data, dict) else ""
+        console.print(f"[green]   ✓ step '{sid}'[/green]")
+    elif event == "workflow_step_failed":
+        sid = data.get("id", "") if isinstance(data, dict) else ""
+        err = data.get("error", "") if isinstance(data, dict) else ""
+        console.print(f"[red]   ✗ step '{sid}': {err[:120]}[/red]")
+    elif event == "workflow_complete":
+        console.print("[bold green]⚙️  Workflow complete[/bold green]")
+    elif event == "workflow_failed":
+        err = data.get("error", "") if isinstance(data, dict) else ""
+        console.print(f"[red]⚙️  Workflow failed: {err[:120]}[/red]")
+
+    # --- v18.2 Handoff Events ---
+    # --- v18.2 专家委派事件 ---
+    elif event == "handoff_start":
+        target = data.get("target", "") if isinstance(data, dict) else ""
+        console.print(f"[magenta]🤝 Handoff → specialist '{target}' (control transfer)[/magenta]")
+    elif event == "handoff_complete":
+        target = data.get("target", "") if isinstance(data, dict) else ""
+        console.print(f"[green]🤝 Handoff '{target}' complete[/green]")
+    elif event == "handoff_failed":
+        err = data.get("error", "") if isinstance(data, dict) else ""
+        console.print(f"[red]🤝 Handoff failed: {err[:120]}[/red]")
+
+    # --- v18.3/18.4 Remote SubAgent + A2A Events ---
+    # --- v18.3/18.4 远端子智能体 + A2A 事件 ---
+    elif event == "remote_subagent_start":
+        server = data.get("server", "") if isinstance(data, dict) else ""
+        console.print(f"[magenta]🛰️  Remote SubAgent → '{server}' (cross-process via MCP/A2A)[/magenta]")
+    elif event == "a2a_card_fetched":
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        skills = data.get("skills", []) if isinstance(data, dict) else []
+        console.print(f"[dim]   📇 AgentCard '{name}' — skills: {', '.join(skills) if skills else '(none)'}[/dim]")
+    elif event == "remote_subagent_complete":
+        console.print("[green]🛰️  Remote SubAgent complete[/green]")
+    elif event == "remote_subagent_failed":
+        err = data.get("error", "") if isinstance(data, dict) else ""
+        console.print(f"[red]🛰️  Remote SubAgent failed: {err[:120]}[/red]")
+
+    # --- v19 Guardrail Events ---
+    # --- v19 安全护栏事件 ---
+    elif event == "guardrail_blocked":
+        tool = data.get("tool", "") if isinstance(data, dict) else ""
+        reason = data.get("reason", "") if isinstance(data, dict) else ""
+        risk = data.get("risk", "") if isinstance(data, dict) else ""
+        console.print(f"[bold red]🛡️  Guardrail BLOCKED {tool} ({risk}): {reason[:100]}[/bold red]")
+    elif event == "guardrail_injection_neutralized":
+        tool = data.get("tool", "") if isinstance(data, dict) else ""
+        console.print(f"[yellow]🛡️  Injection neutralized in {tool} output[/yellow]")
+    elif event == "guardrail_output_redacted":
+        reason = data.get("reason", "") if isinstance(data, dict) else ""
+        console.print(f"[yellow]🛡️  Output redacted: {reason[:100]}[/yellow]")
+    elif event == "guardrail_write_confirm":
+        tool = data.get("tool", "") if isinstance(data, dict) else ""
+        console.print(f"[magenta]🛡️  Write-op confirmation requested for {tool}[/magenta]")
+    elif event == "guardrail_violation":
+        reason = data.get("reason", "") if isinstance(data, dict) else ""
+        console.print(f"[dim]🛡️  Guardrail (observe): {reason[:100]}[/dim]")
+
     elif event == "token_usage_summary":
         # Token 消耗追踪汇总：显示明细表 + 引擎汇总 + 总计
         summary: TokenUsageSummary = data
@@ -671,7 +759,7 @@ async def run_interactive() -> None:
 
     llm_client = LLMClient()
     # 注册五个工具：网络搜索、URL页面抓取、Python 代码执行、文件读写、Shell 命令执行
-    tools = _build_tools()
+    tools = await _build_tools()
     agentic_service = _build_agentic_service()
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
@@ -681,42 +769,55 @@ async def run_interactive() -> None:
         agentic_memory_service=agentic_service,
     )
 
-    while True:
-        console.print()
-        try:
-            user_input = console.input("[bold blue]You > [/bold blue]").strip()
-        except (EOFError, KeyboardInterrupt):
-            break  # Ctrl+C 或 EOF 退出
+    # v16: Start MCP Server in background
+    _mcp_server_task = _start_mcp_server_background(tools, agentic_service, llm_client=llm_client)
 
-        if not user_input:
-            continue  # 跳过空输入
-        if user_input.lower() in ("quit", "exit", "q"):
-            console.print("[dim]Goodbye![/dim]")
-            break
+    try:
+        while True:
+            console.print()
+            try:
+                user_input = console.input("[bold blue]You > [/bold blue]").strip()
+            except (EOFError, KeyboardInterrupt):
+                break  # Ctrl+C 或 EOF 退出
 
-        # v14.5: /resume command to resume a checkpointed task
-        if user_input.lower().startswith("/resume"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) == 2:
-                task_id = parts[1].strip()
-                try:
-                    answer = await orchestrator.resume(task_id)
-                except ValueError as exc:
-                    console.print(f"[red]Resume error: {exc}[/red]")
-                except Exception as exc:
-                    console.print(f"[red]Resume failed: {exc}[/red]")
-                    logging.exception("Resume error")
-            else:
-                _list_tasks()
-            continue
+            if not user_input:
+                continue  # 跳过空输入
+            if user_input.lower() in ("quit", "exit", "q"):
+                console.print("[dim]Goodbye![/dim]")
+                break
 
-        try:
-            answer = await orchestrator.run(user_input)
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Task interrupted.[/yellow]")
-        except Exception as exc:
-            console.print(f"\n[red]Error: {exc}[/red]")
-            logging.exception("Unhandled error")
+            # v14.5: /resume command to resume a checkpointed task
+            if user_input.lower().startswith("/resume"):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) == 2:
+                    task_id = parts[1].strip()
+                    try:
+                        answer = await orchestrator.resume(task_id)
+                    except ValueError as exc:
+                        console.print(f"[red]Resume error: {exc}[/red]")
+                    except Exception as exc:
+                        console.print(f"[red]Resume failed: {exc}[/red]")
+                        logging.exception("Resume error")
+                else:
+                    _list_tasks()
+                continue
+
+            try:
+                answer = await orchestrator.run(user_input)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Task interrupted.[/yellow]")
+            except Exception as exc:
+                console.print(f"\n[red]Error: {exc}[/red]")
+                logging.exception("Unhandled error")
+    finally:
+        # Fix-7: Cancel MCP server background task on exit
+        if _mcp_server_task and not _mcp_server_task.done():
+            _mcp_server_task.cancel()
+            try:
+                await _mcp_server_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            logger.info("[main] MCP Server background task cancelled")
 
 
 async def run_single(task: str) -> None:
@@ -726,7 +827,7 @@ async def run_single(task: str) -> None:
     用于 `python main.py "任务描述"` 的命令行用法。
     """
     llm_client = LLMClient()
-    tools = _build_tools()
+    tools = await _build_tools()
     agentic_service = _build_agentic_service()
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
@@ -739,14 +840,123 @@ async def run_single(task: str) -> None:
     await orchestrator.run(task)
 
 
-def _build_tools() -> list:
+async def run_workflow_file(path: str) -> None:
+    """
+    Run a deterministic workflow from a JSON spec file (v18.1).
+    从 JSON 定义文件运行确定性工作流（v18.1）。
+    """
+    from workflow.loader import load_workflow_spec
+
+    try:
+        spec = load_workflow_spec(path)
+    except Exception as exc:
+        console.print(f"[red]Failed to load workflow spec '{path}': {exc}[/red]")
+        return
+
+    llm_client = LLMClient()
+    tools = await _build_tools()
+    agentic_service = _build_agentic_service()
+    orchestrator = OrchestratorAgent(
+        llm_client=llm_client,
+        tools=tools,
+        on_event=on_event,
+        interactive=False,
+        agentic_memory_service=agentic_service,
+    )
+    await orchestrator.run_workflow(spec)
+
+
+async def _build_tools() -> list:
     """Build the base tool list (memory tools registered by OrchestratorAgent)."""
     from tools.base import BaseTool
     tools: list[BaseTool] = [
         WebSearchTool(), FetchUrlTool(), UserLocationTool(),
         CodeExecutorTool(), FileOpsTool(), ShellTool(),
     ]
+
+    # v16: MCP Bridge tools (feature-flagged, default off)
+    if config.MCP_BRIDGE_ENABLED:
+        mcp_tools = await _discover_mcp_bridge_tools()
+        if mcp_tools:
+            tools.extend(mcp_tools)
+            logger.info("[main] Registered %d MCP bridge tools", len(mcp_tools))
+
     return tools
+
+
+async def _discover_mcp_bridge_tools() -> list:
+    """
+    Discover and instantiate MCPBridgeTool instances from configured servers.
+    Async — runs within the existing event loop.
+
+    从已配置的服务器发现并实例化 MCPBridgeTool。
+    异步调用，在已有事件循环中运行。
+    """
+    from tools.mcp.config import load_mcp_bridge_config
+    from tools.mcp.client import MCPClientManager
+    from tools.mcp.bridge_tool import MCPBridgeTool
+
+    bridge_config = load_mcp_bridge_config()
+    if not bridge_config.servers:
+        logger.warning("[main] MCP_BRIDGE_ENABLED but no servers configured")
+        return []
+
+    manager = MCPClientManager(bridge_config)
+
+    try:
+        discovered = await manager.discover_all_tools()
+    except Exception as exc:
+        logger.error("[main] MCP tool discovery failed: %s", exc)
+        return []
+
+    bridge_tools: list = []
+    for dt in discovered:
+        bridge_tool = MCPBridgeTool(
+            prefixed_name=dt.prefixed_name,
+            description=dt.description,
+            mcp_tool_schema=dt.input_schema,
+            client_manager=manager,
+            original_tool_name=dt.original_tool_name,
+            server_name=dt.server_name,
+            schema_mode=bridge_config.schema_mode,
+        )
+        bridge_tools.append(bridge_tool)
+
+    return bridge_tools
+
+
+def _start_mcp_server_background(tools: list, agentic_service, llm_client=None) -> "asyncio.Task | None":
+    """Start MCP Server as a background asyncio task if enabled (v16).
+    如果 MCP Server 已启用，作为后台 asyncio 任务启动。
+    v18.3/18.4: when MCP_SERVER_EXPOSE_AGENT, also expose get_agent_card + a2a_run_task."""
+    if not config.MCP_SERVER_ENABLED:
+        return None
+
+    from tools.mcp.server import MCPServerWrapper
+
+    try:
+        server = MCPServerWrapper(
+            tools=tools,
+            memory_service=agentic_service,
+            host=config.MCP_SERVER_HOST,
+            port=config.MCP_SERVER_PORT,
+            llm_client=llm_client if config.MCP_SERVER_EXPOSE_AGENT else None,
+            expose_agent=config.MCP_SERVER_EXPOSE_AGENT,
+        )
+
+        if config.MCP_SERVER_TRANSPORT == "stdio":
+            task = asyncio.create_task(server.run_stdio())
+        else:
+            task = asyncio.create_task(server.run_streamable_http())
+
+        logger.info(
+            "[main] MCP Server started (%s, %s:%d)",
+            config.MCP_SERVER_TRANSPORT, config.MCP_SERVER_HOST, config.MCP_SERVER_PORT,
+        )
+        return task
+    except Exception as exc:
+        logger.error("[main] MCP Server startup failed: %s", exc)
+        return None
 
 
 def _build_agentic_service():
@@ -788,7 +998,7 @@ def _list_tasks() -> None:
 async def run_resume(task_id: str) -> None:
     """Resume a checkpointed task. / 恢复一个 checkpointed 任务。"""
     llm_client = LLMClient()
-    tools = _build_tools()
+    tools = await _build_tools()
     agentic_service = _build_agentic_service()
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
@@ -828,6 +1038,15 @@ def main() -> None:
             asyncio.run(run_resume(task_id))
         else:
             console.print("[red]Error: --resume requires a task_id[/red]")
+        return
+
+    # v18.1: --workflow <spec.json> — deterministic workflow engine
+    if "--workflow" in sys.argv:
+        wf_idx = sys.argv.index("--workflow")
+        if wf_idx + 1 < len(sys.argv):
+            asyncio.run(run_workflow_file(sys.argv[wf_idx + 1]))
+        else:
+            console.print("[red]Error: --workflow requires a spec JSON path[/red]")
         return
 
     # 过滤掉以 - 开头的选项参数，保留位置参数

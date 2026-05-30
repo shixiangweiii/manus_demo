@@ -409,22 +409,13 @@ class PlannerAgent(BaseAgent):
         logger.info("[Planner] Rule classifier: ambiguous, invoking LLM classifier")
         return await self._llm_classify(task)
 
-    def _rule_classify(self, task: str) -> str:
+    @classmethod
+    def _rule_score(cls, task: str) -> int:
         """
-        Stage 1: Rule-based heuristic classifier.
-        Stage 1：基于规则启发式的快速分类器。
+        Compute the rule-based complexity score (weights hardcoded).
+        计算规则复杂度评分（评分权重硬编码，供分类与 v17.3 校准复用）。
 
-        Scores the task text on multiple dimensions. Returns:
-          - "simple"    if score <= -1  (strongly simple signals)
-          - "complex"   if score >= 2   (strongly complex signals)
-          - "emergent"  if exploratory/uncertainty patterns detected (v5 routing)
-          - "ambiguous" otherwise       (needs LLM to decide)
-
-        按多个维度对任务文本打分。返回：
-          - "simple"    分数 <= -1（强简单信号）
-          - "complex"   分数 >= 2 （强复杂信号）
-          - "emergent"  探索性/不确定性模式检测到时（v5 路由）
-          - "ambiguous" 其他（需要 LLM 裁决）
+        权重保持硬编码；v17.3 只外置 simple/complex 两个决策阈值，便于离线校准。
         """
         score = 0
 
@@ -438,19 +429,19 @@ class PlannerAgent(BaseAgent):
         elif text_len > 120:
             score += 1
 
-        multi_step_hits = len(self._MULTI_STEP_PATTERN.findall(task))
+        multi_step_hits = len(cls._MULTI_STEP_PATTERN.findall(task))
         if multi_step_hits >= 2:
             score += 3
         elif multi_step_hits == 1:
             score += 1
 
-        if self._CONDITIONAL_PATTERN.search(task):
+        if cls._CONDITIONAL_PATTERN.search(task):
             score += 2
 
-        if self._PARALLEL_PATTERN.search(task):
+        if cls._PARALLEL_PATTERN.search(task):
             score += 2
 
-        action_verb_count = len(self._ACTION_VERB_PATTERN.findall(task))
+        action_verb_count = len(cls._ACTION_VERB_PATTERN.findall(task))
         if action_verb_count >= 3:
             score += 2
         elif action_verb_count == 2:
@@ -458,24 +449,72 @@ class PlannerAgent(BaseAgent):
         elif action_verb_count <= 1:
             score -= 1
 
-        # 修复 High #7: 检测探索性/不确定性任务模式
-        exploratory_hits = len(self._EXPLORATORY_PATTERN.findall(task))
-        uncertainty_hits = len(self._UNCERTAINTY_PATTERN.findall(task))
-        if exploratory_hits >= 1 or uncertainty_hits >= 1:
-            logger.debug("[Planner] Detected exploratory/uncertainty patterns: exploratory=%d, uncertainty=%d",
-                         exploratory_hits, uncertainty_hits)
+        return score
+
+    @classmethod
+    def _is_emergent_by_rule(cls, task: str) -> bool:
+        """
+        Detect exploratory/uncertainty patterns that route to emergent (v5).
+        检测探索性/不确定性模式（路由到 emergent，优先于阈值判定）。
+        """
+        exploratory_hits = len(cls._EXPLORATORY_PATTERN.findall(task))
+        uncertainty_hits = len(cls._UNCERTAINTY_PATTERN.findall(task))
+        return exploratory_hits >= 1 or uncertainty_hits >= 1
+
+    @classmethod
+    def classify_by_rule(
+        cls,
+        task: str,
+        simple_threshold: int,
+        complex_threshold: int,
+    ) -> str:
+        """
+        Rule classification under explicit thresholds — no instance / no LLM needed.
+        给定阈值的规则分类（分类器与 v17.3 校准器共用，无需实例、无需 LLMClient）。
+
+        Returns "simple" / "complex" / "emergent" / "ambiguous".
+        emergent 检测优先于阈值判定（与历史行为一致）。
+        """
+        if cls._is_emergent_by_rule(task):
             return "emergent"
-
-        logger.debug("[Planner] Rule score for '%s...': %d", task[:40], score)
-
-        # 修复 M1: 使用更合理的阈值区间
-        # score <= -1: simple (原 -2 过于严格，单点差异导致类别突变)
-        # score >= 2: complex (原 3)
-        if score <= -1:
+        score = cls._rule_score(task)
+        if score <= simple_threshold:
             return "simple"
-        elif score >= 2:
+        if score >= complex_threshold:
             return "complex"
         return "ambiguous"
+
+    def _rule_classify(self, task: str) -> str:
+        """
+        Stage 1: Rule-based heuristic classifier.
+        Stage 1：基于规则启发式的快速分类器。
+
+        Scores the task text on multiple dimensions. Returns:
+          - "simple"    if score <= CLASSIFIER_SIMPLE_THRESHOLD  (strongly simple signals)
+          - "complex"   if score >= CLASSIFIER_COMPLEX_THRESHOLD (strongly complex signals)
+          - "emergent"  if exploratory/uncertainty patterns detected (v5 routing)
+          - "ambiguous" otherwise       (needs LLM to decide)
+
+        按多个维度对任务文本打分。返回：
+          - "simple"    分数 <= CLASSIFIER_SIMPLE_THRESHOLD（强简单信号）
+          - "complex"   分数 >= CLASSIFIER_COMPLEX_THRESHOLD（强复杂信号）
+          - "emergent"  探索性/不确定性模式检测到时（v5 路由）
+          - "ambiguous" 其他（需要 LLM 裁决）
+
+        v17.3: 决策阈值从 config 读取（默认 -1 / 2，等于历史硬编码值），
+        可由离线校准器建议、人工通过环境变量应用，禁止静默自改。
+        """
+        result = self.classify_by_rule(
+            task,
+            config.CLASSIFIER_SIMPLE_THRESHOLD,
+            config.CLASSIFIER_COMPLEX_THRESHOLD,
+        )
+        if result != "emergent":
+            logger.debug(
+                "[Planner] Rule score for '%s...': %d -> %s",
+                task[:40], self._rule_score(task), result,
+            )
+        return result
 
     async def _llm_classify(self, task: str) -> str:
         """

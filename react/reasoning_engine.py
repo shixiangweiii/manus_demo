@@ -279,6 +279,13 @@ class ReasoningEngine(ReActEngine):
             )
             messages.extend(tool_messages)
 
+            # v18.2 Handoff control transfer (shared with ReActEngine; #20 drift fix)
+            transfer = self._check_handoff_transfer(
+                response_msg, step_id, tool_calls_log, iteration, on_iteration,
+            )
+            if transfer is not None:
+                return transfer
+
             if on_iteration:
                 on_iteration(iteration, tool_calls_log)
 
