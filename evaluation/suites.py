@@ -202,6 +202,19 @@ EVALUATION_SUITES: dict[str, EvaluationSuite] = {
         recommended_variants=["react_auto_baseline", "guardrails_on"],
         default_repeat=2,
     ),
+    "skill": EvaluationSuite(
+        id="skill",
+        description="v20.4 Skill activation quality: activation rate, false activation, output quality, token overhead.",
+        task_ids=[
+            "skill_activate_001", "skill_activate_002", "skill_activate_003",
+            "skill_activate_004", "skill_activate_005", "skill_activate_006", "skill_activate_007",
+            "skill_noactivate_001", "skill_noactivate_002", "skill_noactivate_003", "skill_noactivate_004",
+            "skill_security_001", "skill_security_002", "skill_security_003",
+        ],
+        default_modes=[PlanMode.SIMPLE, PlanMode.EMERGENT],
+        recommended_variants=["react_auto_baseline", "skills_on"],
+        default_repeat=2,
+    ),
 }
 
 

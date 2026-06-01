@@ -53,6 +53,9 @@ class SimplePathState(BaseModel):
     attempt: int = Field(default=0, description="Replan attempt counter")
     reflection: dict | None = Field(default=None, description="Reflection.model_dump() or None")
     current_step_index: int = Field(default=0, description="Index of the next step to execute")
+    # v20.4: Skill activation state at checkpoint time
+    active_skills: list[str] = Field(default_factory=list, description="Skill names active at checkpoint time")
+    skill_activation_count: int = Field(default=0, description="Skill activation count at checkpoint time")
 
 
 class DAGPathState(BaseModel):
@@ -65,6 +68,9 @@ class DAGPathState(BaseModel):
     )
     attempt: int = Field(default=0, description="Replan attempt counter")
     reflection: dict | None = Field(default=None, description="Reflection.model_dump() or None")
+    # v20.4: Skill activation state at checkpoint time
+    active_skills: list[str] = Field(default_factory=list, description="Skill names active at checkpoint time")
+    skill_activation_count: int = Field(default=0, description="Skill activation count at checkpoint time")
 
 
 class EmergentPathState(BaseModel):
@@ -80,6 +86,9 @@ class EmergentPathState(BaseModel):
         default_factory=dict,
         description='{"prev_completed": int, "stagnation_rounds": int}',
     )
+    # v20.4: Skill activation state at checkpoint time
+    active_skills: list[str] = Field(default_factory=list, description="Skill names active at checkpoint time")
+    skill_activation_count: int = Field(default=0, description="Skill activation count at checkpoint time")
 
 
 class GoalDrivenPathState(BaseModel):
@@ -93,13 +102,16 @@ class GoalDrivenPathState(BaseModel):
     milestone_plan: dict | None = Field(default=None, description="MilestonePlan.model_dump()")
     last_reflection: dict | None = Field(default=None, description="GoalReflection.model_dump()")
     reanchor_counter: int = Field(default=0)
+    # v20.4: Skill activation state at checkpoint time
+    active_skills: list[str] = Field(default_factory=list, description="Skill names active at checkpoint time")
+    skill_activation_count: int = Field(default=0, description="Skill activation count at checkpoint time")
 
 
 # ======================================================================
 # Top-Level Checkpoint Model
 # ======================================================================
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2  # v20.4: adds active_skills + skill_activation_count to PathState
 
 
 class TaskCheckpoint(BaseModel):

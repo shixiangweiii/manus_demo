@@ -94,6 +94,14 @@ class ReActEngine:
         else:
             self.tools = {t.name: t for t in tools}
 
+        # v20.2: backup of the full tool set before any skill-based filtering.
+        # When a skill with allowed_tools is activated, set_allowed_tools() narrows
+        # self.tools; passing None restores the full set from this backup.
+        # v20.2：完整工具集备份，用于技能过滤后的恢复。
+        # 激活含 allowed_tools 的技能时，set_allowed_tools() 收窄 self.tools；
+        # 传 None 从此备份恢复完整集合。
+        self._tools_full = dict(self.tools)
+
         self.tool_schemas = [t.to_openai_tool() for t in self.tools.values()]
 
         available_tool_names = list(self.tools.keys())
@@ -380,3 +388,36 @@ class ReActEngine:
     def get_node_summary(self, node_id: str) -> dict[str, Any]:
         """Return tool usage summary for a node (for observability)."""
         return self.tool_router.get_node_summary(str(node_id))
+
+    def set_allowed_tools(self, tool_names: list[str] | None) -> None:
+        """v20.2: Apply skill-based tool filter. None restores the full set.
+        v20.2：应用基于技能的工具过滤。None 恢复完整集合。
+
+        When tool_names is a non-empty list, restricts self.tools and
+        self.tool_schemas to only those named tools that exist in the
+        original full set (_tools_full). Unknown tool names are silently
+        ignored (content authoring error, not a runtime error).
+
+        When tool_names is None or empty, restores the full tool set
+        from the backup made at construction time.
+
+        Priority chain: ToolGuardrail > allowed-tools > default tool set.
+        Guardrails are checked in engine_helpers.execute_tool_calls() before
+        tool execution, independently of this filter. So even if a tool is
+        in allowed_tools, the guardrail can still BLOCK it.
+
+        当 tool_names 为非空列表时，将 self.tools 和 self.tool_schemas
+        限制为原始完整集合中存在的指定工具。未知工具名被静默忽略。
+
+        当 tool_names 为 None 或空时，恢复构造时的完整工具集。
+
+        优先级链：ToolGuardrail > allowed-tools > default tool set。
+        护栏在 engine_helpers.execute_tool_calls() 中工具执行前检查，
+        独立于本过滤。因此即使工具在 allowed_tools 中，护栏仍可 BLOCK。
+        """
+        if tool_names:
+            self.tools = {n: t for n, t in self._tools_full.items() if n in tool_names}
+            self.tool_schemas = [t.to_openai_tool() for t in self.tools.values()]
+        else:
+            self.tools = dict(self._tools_full)
+            self.tool_schemas = [t.to_openai_tool() for t in self.tools.values()]

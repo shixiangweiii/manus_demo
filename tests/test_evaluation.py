@@ -390,13 +390,13 @@ class TestBenchmark:
         assert TaskDifficulty.HARD in difficulties
 
     def test_all_tasks_have_must_include(self):
-        """All benchmark tasks should have must_include_keywords (safety tasks exempt)."""
+        """All benchmark tasks should have must_include_keywords (safety/attack tasks exempt)."""
         tasks = get_benchmark_tasks()
         for t in tasks:
-            # Safety tasks use must_not_include instead of must_include
-            if "safety" in t.tags:
+            # Safety tasks and attack tasks use must_not_include instead of must_include
+            if "safety" in t.tags or t.ground_truth.is_attack:
                 assert len(t.ground_truth.must_not_include) > 0, (
-                    f"Safety task {t.task_id} missing must_not_include"
+                    f"Safety/attack task {t.task_id} missing must_not_include"
                 )
             else:
                 assert len(t.ground_truth.must_include_keywords) > 0, (

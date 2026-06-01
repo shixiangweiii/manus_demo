@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from typing import Any, Callable
@@ -254,6 +255,49 @@ class OrchestratorAgent:
                     MemoryRevokeTool(svc, on_event=self._emit),
                 ]
 
+        # v20 Agent Skills (feature-flagged, default off)
+        # v20 智能体技能（特性开关控制，默认关闭）
+        # NOTE: must run BEFORE sub-agents are created — executor / emergent /
+        # goal-driven snapshot the `tools` list into their own dict at construction
+        # (see executor.py / emergent_planner.py). Skills appended after that point
+        # would never reach their ReAct loops.
+        # 注意：必须在下方子智能体构造之前完成——executor/emergent/goal-driven
+        # 在构造时把 tools 快照成自己的 dict，之后再追加的工具进不了 ReAct 循环。
+        self._skill_registry = None
+        self._skill_activation_tool = None
+        self._active_skill_tools: list[str] | None = None
+        if config.SKILLS_ENABLED:
+            from skills.loader import SkillLoader
+            from skills.registry import SkillRegistry
+            from skills.activation import SkillActivationTool
+            from agents.prompt_utils import set_skill_descriptions
+
+            self._skill_registry = SkillRegistry()
+            skill_dirs = self._resolve_skill_dirs()
+            discovered = SkillLoader.discover(skill_dirs)
+            for skill in discovered:
+                self._skill_registry.register(skill)
+
+            self._skill_activation_tool = SkillActivationTool(
+                registry=self._skill_registry,
+                on_event=on_event or (lambda *_: None),  # Use constructor arg, self._emit not yet set
+                tool_filter_callback=self._apply_skill_tool_filter,
+            )
+            tools = list(tools or []) + [self._skill_activation_tool]
+
+            set_skill_descriptions(self._skill_registry.format_descriptions())
+            # Use constructor arg for event emission; self._on_event is not yet assigned
+            # 使用构造函数参数发送事件；self._on_event 尚未赋值
+            _emit_fn = on_event or (lambda *_: None)
+            _emit_fn("skills_discovered", {
+                "count": len(discovered),
+                "names": [s.meta.name for s in discovered],
+            })
+            logger.info(
+                "[Orchestrator] Skills (v20) enabled: %d skills discovered",
+                len(discovered),
+            )
+
         # Sub-agents（各专用子智能体）
         self.planner = PlannerAgent(self.llm_client, self.context_manager)
         self.executor_agent = ExecutorAgent(
@@ -387,6 +431,25 @@ class OrchestratorAgent:
         # v18.3: Reset Remote SubAgent per-task state for new task
         if self._remote_subagent_tool:
             self._remote_subagent_tool.reset_task_state()
+
+        # v20: Reset skill activation per-task state
+        if self._skill_activation_tool:
+            self._skill_activation_tool.reset_task_state()
+            self._active_skill_tools = None
+            # Restore ReAct engines' full tool sets / 恢复 ReAct 引擎的完整工具集
+            if hasattr(self.executor_agent, '_react_engine') and self.executor_agent._react_engine:
+                self.executor_agent._react_engine.set_allowed_tools(None)
+            if hasattr(self.emergent_planner, '_react_engine') and self.emergent_planner._react_engine:
+                self.emergent_planner._react_engine.set_allowed_tools(None)
+            if self.goal_driven_planner is not None:
+                if hasattr(self.goal_driven_planner, '_tools_full'):
+                    self.goal_driven_planner.set_allowed_tools(None)
+                elif hasattr(self.goal_driven_planner, '_original_tools'):
+                    # Restore from backup / 从备份恢复
+                    self.goal_driven_planner.tools = dict(self.goal_driven_planner._original_tools)
+                    self.goal_driven_planner.tool_schemas = [
+                        t.to_openai_tool() for t in self.goal_driven_planner.tools.values()
+                    ]
 
         # v19: wire guardrail runtime hooks (event sink + write-confirm callback)
         self._wire_guardrail_runtime()
@@ -553,8 +616,138 @@ class OrchestratorAgent:
         if knowledge_results:
             combined += f"=== Relevant Knowledge ===\n{knowledge_context}\n\n"
 
+        # v20: Inject available skill descriptions into context (progressive disclosure tier 1)
+        # v20：将可用技能描述注入上下文（渐进式披露第一层）
+        if self._skill_registry is not None:
+            skill_descs = self._skill_registry.format_descriptions()
+            if skill_descs:
+                combined += f"=== Available Skills ===\n{skill_descs}\n\n"
+
         self.short_term.add({"role": "user", "content": task})
         return combined
+
+    # ------------------------------------------------------------------
+    # v20 Skill helpers
+    # v20 技能辅助方法
+    # ------------------------------------------------------------------
+
+    def _resolve_skill_dirs(self) -> list[str]:
+        """Resolve the ordered list of skill search directories.
+        解析技能搜索目录的有序列表。
+
+        Order: project dir (trusted) > user dir (semi-trusted) > SKILLS_DIRS (extra).
+        Name-based override (later dirs override earlier ones for the same skill name)
+        is handled by SkillLoader.discover() and SkillRegistry.register().
+        优先级：项目目录（可信）> 用户目录（半可信）> SKILLS_DIRS（额外）。
+        同名覆盖（后者覆盖前者）由 SkillLoader.discover() 和 SkillRegistry.register() 处理。
+        """
+        dirs: list[str] = []
+        if os.path.isdir(config.SKILLS_PROJECT_DIR):
+            dirs.append(config.SKILLS_PROJECT_DIR)
+        if os.path.isdir(config.SKILLS_USER_DIR):
+            dirs.append(config.SKILLS_USER_DIR)
+        if config.SKILLS_DIRS:
+            for d in config.SKILLS_DIRS.split(","):
+                d = d.strip()
+                if d and os.path.isdir(d):
+                    dirs.append(d)
+        return dirs
+
+    def _apply_skill_tool_filter(self, allowed_tools: list[str]) -> None:
+        """v20.2: Filter available tools based on activated skill's allowed_tools list.
+        v20.2：基于已激活技能的 allowed_tools 列表过滤可用工具。
+
+        This callback is invoked by SkillActivationTool.execute() after activation.
+        It restricts the current ReAct loop's tool set to only those tools the
+        skill pre-authorizes, mirroring the SpecialistAgent tool-whitelist pattern.
+
+        Priority: ToolGuardrail > allowed-tools > default tool set.
+        Even if a skill pre-authorizes a tool, guardrails can still block it.
+        优先级：ToolGuardrail > allowed-tools > default tool set。
+        即使技能预授权了某个工具，护栏仍可阻止其执行。
+        """
+        if not allowed_tools:
+            return  # empty list = all tools allowed, no filtering needed
+
+        # Always preserve meta-tools: activate_skill itself + handoff/subagent/ask_user
+        # 始终保留元工具：activate_skill 自身 + handoff/subagent/ask_user
+        effective = list(allowed_tools)
+        if "activate_skill" not in effective:
+            effective.append("activate_skill")
+        for meta_tool in ("handoff", "subagent", "ask_user", "remote_subagent"):
+            if meta_tool in self.executor_agent.tools:
+                effective.append(meta_tool)
+
+        self._active_skill_tools = effective
+
+        # v20.3: Check allowed_tools against ToolGuardrail rules
+        # v20.3：对照 ToolGuardrail 规则检查 allowed_tools
+        # Enforces priority: ToolGuardrail > allowed-tools > default tool set
+        # 强制优先级：ToolGuardrail > allowed-tools > default tool set
+        if config.GUARDRAILS_ENABLED:
+            try:
+                from guardrails.engine import current_guardrail
+                guardrail = current_guardrail()
+                if guardrail is not None:
+                    blocked = []
+                    for tool_name in list(effective):
+                        if tool_name == "activate_skill":
+                            continue  # Never block the activation tool itself
+                        decision = guardrail._tool.check_skill_allowed_tools("skill", tool_name)
+                        if decision.action.value == "block":
+                            blocked.append(tool_name)
+                            effective.remove(tool_name)
+                    if blocked:
+                        logger.warning(
+                            "[Orchestrator] Skill allowed_tools blocked by guardrail: %s",
+                            blocked,
+                        )
+                        _emit_fn = self._on_event or (lambda *_: None)
+                        _emit_fn("skill_allowed_tools_blocked", {
+                            "blocked_tools": blocked,
+                            "reason": "ToolGuardrail > allowed-tools priority",
+                        })
+                        # Update active_skill_tools after removal / 移除后更新
+                        self._active_skill_tools = effective
+            except Exception:
+                pass  # Fail-open on guardrail errors
+
+        # Propagate filter to all ReAct engines / 传播过滤到所有 ReAct 引擎
+        # NOTE: In parallel DAG execution (DAG_SERIAL_EXECUTION=false), the executor's
+        # _react_engine is shared across concurrent nodes. Mutating its tool set mid-run
+        # could corrupt another node's execution. We apply the filter anyway — the
+        # alternative (no filtering) is worse. In practice, DAG_SERIAL_EXECUTION=true
+        # (the default) means nodes execute sequentially, so this is safe.
+        # 注意：在并行 DAG 执行中（DAG_SERIAL_EXECUTION=false），executor 的
+        # _react_engine 被并发节点共享。运行时修改其工具集可能损坏其他节点的执行。
+        # 我们仍然应用过滤——不过滤更危险。默认 DAG_SERIAL_EXECUTION=true 意味着
+        # 节点顺序执行，因此默认情况下是安全的。
+        if hasattr(self.executor_agent, '_react_engine') and self.executor_agent._react_engine:
+            self.executor_agent._react_engine.set_allowed_tools(effective)
+        if hasattr(self.emergent_planner, '_react_engine') and self.emergent_planner._react_engine:
+            self.emergent_planner._react_engine.set_allowed_tools(effective)
+        # GoalDrivenPlannerAgent has inline ReAct loop (no _react_engine);
+        # apply filter directly to its tools/tool_schemas dicts.
+        # GoalDrivenPlannerAgent 使用内联 ReAct 循环（无 _react_engine），
+        # 直接操作其 tools/tool_schemas 字典。
+        if self.goal_driven_planner is not None:
+            if hasattr(self.goal_driven_planner, '_tools_full'):
+                # Future-proof: if it gains _tools_full, use set_allowed_tools
+                self.goal_driven_planner.set_allowed_tools(effective)
+            else:
+                # Current: filter tools and rebuild tool_schemas in-place.
+                # Save backup on first filter for later restore.
+                # 直接操作 tools/tool_schemas。首次过滤时保存备份供后续恢复。
+                if not hasattr(self.goal_driven_planner, '_original_tools'):
+                    self.goal_driven_planner._original_tools = dict(self.goal_driven_planner.tools)
+                self.goal_driven_planner.tools = {
+                    n: t for n, t in self.goal_driven_planner._original_tools.items() if n in effective
+                }
+                self.goal_driven_planner.tool_schemas = [
+                    t.to_openai_tool() for t in self.goal_driven_planner.tools.values()
+                ]
+
+        logger.info("[Orchestrator] Skill tool filter applied: %s", effective)
 
     # ------------------------------------------------------------------
     # Simple Execute-Reflect loop (v1 path)
@@ -642,6 +835,7 @@ class OrchestratorAgent:
                         all_results=[r.model_dump() for r in all_results],
                         attempt=attempt,
                         current_step_index=i + 1,
+                        **self._skill_checkpoint_data(),
                     ),
                 )
 
@@ -670,6 +864,7 @@ class OrchestratorAgent:
                     attempt=attempt,
                     reflection=reflection.model_dump(),
                     current_step_index=plan.current_step_index,
+                    **self._skill_checkpoint_data(),
                 ),
             )
 
@@ -1261,6 +1456,16 @@ class OrchestratorAgent:
             resume_metadata=resume_metadata or {},
         )
 
+    def _skill_checkpoint_data(self) -> dict:
+        """v20.4: Get skill state for checkpoint persistence.
+        获取 checkpoint 持久化所需的 skill 状态。"""
+        if self._skill_activation_tool:
+            return {
+                "active_skills": self._skill_activation_tool.active_skills,
+                "skill_activation_count": self._skill_activation_tool._activation_count,
+            }
+        return {"active_skills": [], "skill_activation_count": 0}
+
     def _save_path_checkpoint(
         self,
         *,
@@ -1309,6 +1514,7 @@ class OrchestratorAgent:
             dag_state=DAGPathState(
                 dag=dag.to_dict(),
                 results=[r.model_dump() for r in results],
+                **self._skill_checkpoint_data(),
             ),
         )
 
@@ -1324,6 +1530,7 @@ class OrchestratorAgent:
                 all_results=payload.get("all_results", []),
                 iteration=payload.get("iteration", 0),
                 stagnation_state=payload.get("stagnation_state", {}),
+                **self._skill_checkpoint_data(),
             ),
         )
 
@@ -1343,6 +1550,7 @@ class OrchestratorAgent:
                 milestone_plan=payload.get("milestone_plan"),
                 last_reflection=payload.get("last_reflection"),
                 reanchor_counter=payload.get("reanchor_counter", 0),
+                **self._skill_checkpoint_data(),
             ),
         )
 
@@ -1421,6 +1629,35 @@ class OrchestratorAgent:
             self._handoff_tool.reset_task_state()
         if self._remote_subagent_tool:
             self._remote_subagent_tool.reset_task_state()
+        # v20: reset skill activation per-task state for symmetry with run()
+        if self._skill_activation_tool:
+            self._skill_activation_tool.reset_task_state()
+            self._active_skill_tools = None
+            # Restore ReAct engines' full tool sets / 恢复 ReAct 引擎的完整工具集
+            if hasattr(self.executor_agent, '_react_engine') and self.executor_agent._react_engine:
+                self.executor_agent._react_engine.set_allowed_tools(None)
+            if hasattr(self.emergent_planner, '_react_engine') and self.emergent_planner._react_engine:
+                self.emergent_planner._react_engine.set_allowed_tools(None)
+            if self.goal_driven_planner is not None:
+                if hasattr(self.goal_driven_planner, '_tools_full'):
+                    self.goal_driven_planner.set_allowed_tools(None)
+                elif hasattr(self.goal_driven_planner, '_original_tools'):
+                    self.goal_driven_planner.tools = dict(self.goal_driven_planner._original_tools)
+                    self.goal_driven_planner.tool_schemas = [
+                        t.to_openai_tool() for t in self.goal_driven_planner.tools.values()
+                    ]
+            # v20.4: Restore skill activation state from checkpoint
+            path_state = (checkpoint.simple_state or checkpoint.dag_state or
+                          checkpoint.emergent_state or checkpoint.goal_driven_state)
+            if path_state and path_state.active_skills:
+                self._skill_activation_tool._active_skills = list(path_state.active_skills)
+                self._skill_activation_tool._activation_count = path_state.skill_activation_count
+                # Re-apply tool filter for skills with allowed_tools
+                for skill_name in path_state.active_skills:
+                    skill = self._skill_registry.get(skill_name) if self._skill_registry else None
+                    if skill and skill.meta.allowed_tools:
+                        self._apply_skill_tool_filter(skill.meta.allowed_tools)
+                        break  # only one skill's filter applies at a time; last one wins
 
         self._emit("task_start", {"task": checkpoint.task, "task_id": task_id, "resumed": True})
         # v19: wire guardrail runtime for the resumed run (same as run()/run_workflow())

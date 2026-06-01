@@ -159,6 +159,73 @@ def get_hitl_guidance() -> str:
     )
 
 
+# v20 Skill activation guidance (injected when SKILLS_ENABLED=true AND skills exist)
+# v20 技能激活引导（SKILLS_ENABLED=true 且存在技能时追加到系统提示词）
+#
+# Uses the same module-level variable pattern as HITL's _HITL_RUNTIME_OVERRIDE:
+# OrchestratorAgent calls set_skill_descriptions() after discovery, and
+# get_skill_guidance() reads it at system prompt build time. This avoids
+# changing ExecutorAgent/EmergentPlannerAgent constructor signatures.
+# 使用与 HITL _HITL_RUNTIME_OVERRIDE 相同的模块级变量模式：
+# OrchestratorAgent 在发现技能后调用 set_skill_descriptions()，
+# get_skill_guidance() 在系统提示词构建时读取。避免修改各 Agent 构造函数签名。
+_SKILL_DESCRIPTIONS: str = ""
+
+
+def set_skill_descriptions(descriptions: str) -> None:
+    """Set the formatted skill descriptions for guidance injection.
+    设置格式化的技能描述供引导注入。
+
+    Called by OrchestratorAgent.__init__ after SkillLoader.discover() completes.
+    Only when SKILLS_ENABLED=true; otherwise should not be called.
+    """
+    global _SKILL_DESCRIPTIONS
+    _SKILL_DESCRIPTIONS = descriptions
+
+
+_SKILL_GUIDANCE_TEMPLATE = """
+
+## Tool Selection: When to Use the "activate_skill" Tool
+
+You have access to an "activate_skill" tool that loads detailed instructions
+for a capability (a "skill"). Skills are listed in the "=== Available Skills ==="
+section of your context.
+
+Use activate_skill ONLY when:
+- A skill's description matches the current task's needs
+- You need specialized instructions or constraints for a domain
+- The skill's pre-authorized tools would be useful for the task
+
+DO NOT use activate_skill for:
+- Tasks you can complete with built-in tools without specialized guidance
+- Activating multiple skills at once (max {max_activations} per task)
+- Activating a skill "just in case" — only activate when genuinely needed
+
+After activation, the skill's full instructions appear in your context and
+any tool pre-authorizations take effect.
+"""
+
+
+def get_skill_guidance() -> str:
+    """Return skill guidance string if Skills are enabled and skills exist, empty string otherwise.
+    Skills 启用且存在技能时返回引导文本，否则返回空字符串。
+
+    The guidance is only injected when BOTH conditions are met:
+    1. config.SKILLS_ENABLED is True (master switch)
+    2. _SKILL_DESCRIPTIONS is non-empty (skills were discovered)
+
+    This prevents injecting the guidance when no skills are available,
+    which would confuse the LLM into trying to activate non-existent skills.
+    """
+    if not config.SKILLS_ENABLED:
+        return ""
+    if not _SKILL_DESCRIPTIONS:
+        return ""
+    return _SKILL_GUIDANCE_TEMPLATE.format(
+        max_activations=config.SKILLS_MAX_ACTIVATIONS_PER_TASK
+    )
+
+
 def build_context_injection() -> str:
     """
     Build runtime context to inject into system prompts: today's date, weekday, etc.
@@ -192,9 +259,10 @@ def build_system_prompt(
     inject_location_guidance: bool = True,
     inject_search_guidance: bool = True,
     inject_hitl_guidance: bool = True,
+    inject_skill_guidance: bool = True,
 ) -> str:
-    """Compose a system prompt with optional context / location / search / subagent / HITL guidance.
-    组合系统提示词，按需注入运行时上下文、位置工具引导、搜索工具引导、子智能体引导和人机交互引导。
+    """Compose a system prompt with optional context / location / search / subagent / HITL / skill guidance.
+    组合系统提示词，按需注入运行时上下文、位置工具引导、搜索工具引导、子智能体引导、人机交互引导和技能引导。
 
     Args:
         base_prompt: The agent's base system prompt.
@@ -212,6 +280,9 @@ def build_system_prompt(
         inject_hitl_guidance: When True (default), append HITL (ask_user) tool
             usage guidance (only emitted if HITL_ENABLED=true). Set False for
             agents that do not call tools (e.g., Planner, Reflector).
+        inject_skill_guidance: When True (default), append Skill activation
+            tool usage guidance (only emitted if SKILLS_ENABLED=true and skills
+            were discovered). Set False for agents that do not call tools.
     """
     parts = [base_prompt]
     if inject_context:
@@ -228,6 +299,10 @@ def build_system_prompt(
         hitl_guidance = get_hitl_guidance()
         if hitl_guidance:
             parts.append(hitl_guidance)
+    if inject_skill_guidance:
+        skill_guidance = get_skill_guidance()
+        if skill_guidance:
+            parts.append(skill_guidance)
     return "".join(parts)
 
 

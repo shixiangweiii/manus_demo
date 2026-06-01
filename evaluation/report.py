@@ -89,6 +89,7 @@ def render_comparison_table(
         or any(r.resume_attempted for r in m.results)
         for m in metrics_by_mode.values()
     )
+    has_skill = any(m.avg_skill_activations > 0 for m in metrics_by_mode.values())
 
     # Row data
     rows = [
@@ -134,6 +135,11 @@ def render_comparison_table(
     if has_resume:
         rows.append(("Resume Success Rate / 恢复成功率", "resume_success_rate", ".1%", True))
         rows.append(("Avg Checkpoints / 平均检查点数", "checkpoint_avg_count", ".2f", True))
+    if has_skill:
+        rows.append(("Avg Skill Activations / 平均技能激活次数", "avg_skill_activations", ".2f", False))
+        rows.append(("Skill Activation Rate / 技能激活率", "skill_activation_rate", ".1%", True))
+        rows.append(("Skill False Activation Rate / 技能误激活率", "skill_false_activation_rate", ".1%", False))
+        rows.append(("Skill Token Overhead / 技能Token开销", "skill_token_overhead", ".1%", False))
 
     for label, attr, fmt, higher_better in rows:
         values = {}
@@ -241,6 +247,7 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
         show_judge = any(r.judge_overrode for r in metrics.results)
         show_verifier = any(r.verifier_total > 0 for r in metrics.results)
         show_resume = any(r.resume_attempted for r in metrics.results)
+        show_skill = any(r.execution.skill_activations > 0 for r in metrics.results)
 
         task_table = Table(
             title=f"Per-Task Results ({mode})",
@@ -268,6 +275,8 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
             task_table.add_column("Verifier", justify="center", width=12)
         if show_resume:
             task_table.add_column("Resume", justify="center", width=12)
+        if show_skill:
+            task_table.add_column("Skill", justify="center", width=10)
 
         for r in metrics.results:
             success_str = "[green]✓[/green]" if r.execution.task_success else "[red]✗[/red]"
@@ -309,6 +318,12 @@ def render_mode_detail(metrics: AggregatedMetrics) -> None:
                 if r.resume_attempted:
                     status = "ok" if r.resume_success else "fail"
                     row.append(f"{status} cp={r.checkpoint_count}")
+                else:
+                    row.append("-")
+            if show_skill:
+                n = r.execution.skill_activations
+                if n > 0:
+                    row.append(f"{n}")
                 else:
                     row.append("-")
             task_table.add_row(*row)

@@ -164,6 +164,13 @@ class ExecutionMetrics(BaseModel):
     dag_rollback_count: int = 0                 # 节点回滚次数
     condition_eval_count: int = 0               # 条件边评估次数
 
+    # v20.4 Skill evaluation specifics
+    # v20.4 技能评估指标
+    skill_activations: int = 0                  # skill 激活总次数
+    skill_activation_failures: int = 0          # skill 激活失败次数
+    skill_content_guarded: int = 0              # skill 内容被 guardrail 处理次数
+    skill_allowed_tools_blocked: int = 0        # skill 预授权工具被 guardrail 阻止次数
+
 
 class EfficiencyMetrics(BaseModel):
     """
@@ -282,6 +289,9 @@ class TaskEvaluationResult(BaseModel):
 
     # v16 MCP Bridge per-task metrics
     mcp_metrics: dict[str, Any] = Field(default_factory=dict)
+
+    # v20.4 Skill per-task metrics
+    skill_metrics: dict[str, Any] = Field(default_factory=dict)
 
     # v8 Pass^k reliability (TauBench-style; only populated when --repeat k>1)
     # v8 借鉴 TauBench：单任务多次重跑度量稳定性
@@ -431,6 +441,14 @@ class AggregatedMetrics(BaseModel):
     mcp_tools_executed: int = 0                 # MCP 工具执行总数
     mcp_tool_errors: int = 0                    # MCP 工具执行错误总数
     mcp_schema_errors: int = 0                  # MCP schema 转换错误总数
+
+    # v20.4 Skill evaluation aggregates
+    avg_skill_activations: float = 0.0          # 平均 skill 激活次数
+    skill_activation_rate: float = 0.0           # 应激活任务中实际激活比例
+    skill_false_activation_rate: float = 0.0     # 不应激活任务中误激活比例
+    skill_token_overhead: float = 0.0            # skill 机制额外 token 占比
+    avg_skill_content_guarded: float = 0.0       # 平均 skill 内容被 guardrail 处理次数
+    avg_skill_allowed_tools_blocked: float = 0.0 # 平均 skill 预授权工具被阻止次数
 
     # Raw results for drill-down
     results: list[TaskEvaluationResult] = Field(default_factory=list)
@@ -788,6 +806,35 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
     mcp_errors = sum(r.mcp_metrics.get("tool_errors", 0) for r in results)
     mcp_schema_errs = sum(r.mcp_metrics.get("schema_errors", 0) for r in results)
 
+    # v20.4 Skill evaluation aggregates
+    skill_results = [r for r in results if r.execution.skill_activations > 0 or r.skill_metrics]
+    avg_skill_acts = 0.0
+    skill_act_rate = 0.0
+    skill_false_act_rate = 0.0
+    skill_tok_overhead = 0.0
+    avg_skill_guarded = 0.0
+    avg_skill_blocked = 0.0
+    if skill_results:
+        avg_skill_acts = sum(r.execution.skill_activations for r in skill_results) / len(skill_results)
+        avg_skill_guarded = sum(r.execution.skill_content_guarded for r in skill_results) / len(skill_results)
+        avg_skill_blocked = sum(r.execution.skill_allowed_tools_blocked for r in skill_results) / len(skill_results)
+    # Activation rate: should-activate tasks where skill was actually activated
+    should_activate = [r for r in results if r.skill_metrics.get("expected_activation", False)]
+    should_not_activate = [r for r in results if r.skill_metrics.get("expected_activation") is False]
+    if should_activate:
+        activated = sum(1 for r in should_activate if r.execution.skill_activations > 0)
+        skill_act_rate = activated / len(should_activate)
+    if should_not_activate:
+        falsely_activated = sum(1 for r in should_not_activate if r.execution.skill_activations > 0)
+        skill_false_act_rate = falsely_activated / len(should_not_activate)
+    # Token overhead: skill tasks vs non-skill tasks avg token comparison
+    skill_task_tokens = [r.efficiency.total_tokens for r in results if r.skill_metrics and r.efficiency.total_tokens > 0]
+    non_skill_task_tokens = [r.efficiency.total_tokens for r in results if not r.skill_metrics and r.efficiency.total_tokens > 0]
+    if non_skill_task_tokens:
+        skill_avg = sum(skill_task_tokens) / len(skill_task_tokens) if skill_task_tokens else 0
+        non_skill_avg = sum(non_skill_task_tokens) / len(non_skill_task_tokens)
+        skill_tok_overhead = (skill_avg - non_skill_avg) / non_skill_avg if non_skill_avg > 0 else 0.0
+
     return AggregatedMetrics(
         planning_mode=mode,
         total_tasks=n,
@@ -858,5 +905,12 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
         mcp_tools_executed=mcp_executed,
         mcp_tool_errors=mcp_errors,
         mcp_schema_errors=mcp_schema_errs,
+        # v20.4: skill evaluation aggregates
+        avg_skill_activations=avg_skill_acts,
+        skill_activation_rate=skill_act_rate,
+        skill_false_activation_rate=skill_false_act_rate,
+        skill_token_overhead=skill_tok_overhead,
+        avg_skill_content_guarded=avg_skill_guarded,
+        avg_skill_allowed_tools_blocked=avg_skill_blocked,
         results=results,
     )

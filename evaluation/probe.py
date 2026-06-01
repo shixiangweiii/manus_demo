@@ -169,6 +169,13 @@ class EvaluationProbe:
         self.dag_rollback_count: int = 0
         self.condition_eval_count: int = 0
 
+        # v20.4 Skill evaluation specifics
+        self.skill_activations: int = 0
+        self.skill_activation_failures: int = 0
+        self.skill_content_guarded: int = 0
+        self.skill_allowed_tools_blocked: int = 0
+        self._skill_names_activated: list[str] = []
+
         # Phase tracking
         self._phase_started: dict[str, float] = {}
 
@@ -436,6 +443,18 @@ class EvaluationProbe:
         elif event == "guardrail_output_redacted":
             self.guardrail_redactions += 1
 
+        # --- v20.4 Skill events ---
+        elif event == "skill_activated":
+            self.skill_activations += 1
+            name = data.get("name", "unknown") if isinstance(data, dict) else "unknown"
+            self._skill_names_activated.append(name)
+        elif event == "skill_activation_failed":
+            self.skill_activation_failures += 1
+        elif event == "skill_content_guarded":
+            self.skill_content_guarded += 1
+        elif event == "skill_allowed_tools_blocked":
+            self.skill_allowed_tools_blocked += 1
+
         # --- v13 HITL events ---
         elif event == "ask_user_prompt":
             self.hitl_calls += 1
@@ -693,6 +712,10 @@ class EvaluationProbe:
             hitl_cancelled_count=self.hitl_cancelled_count,
             dag_rollback_count=self.dag_rollback_count,
             condition_eval_count=self.condition_eval_count,
+            skill_activations=self.skill_activations,
+            skill_activation_failures=self.skill_activation_failures,
+            skill_content_guarded=self.skill_content_guarded,
+            skill_allowed_tools_blocked=self.skill_allowed_tools_blocked,
         )
 
         # Efficiency metrics
@@ -784,6 +807,20 @@ class EvaluationProbe:
             "schema_errors": self.mcp_schema_errors,
         }
 
+        # v20.4: Skill metrics
+        skill_metrics: dict[str, Any] = {}
+        if self.skill_activations > 0 or self.skill_activation_failures > 0:
+            skill_metrics = {
+                "activations": self.skill_activations,
+                "activation_failures": self.skill_activation_failures,
+                "content_guarded": self.skill_content_guarded,
+                "allowed_tools_blocked": self.skill_allowed_tools_blocked,
+                "activated_skills": list(self._skill_names_activated),
+            }
+        # Mark expected activation in skill_metrics for aggregate_results()
+        if gt.expected_skill_activations is not None:
+            skill_metrics["expected_activation"] = gt.expected_skill_activations[0] > 0
+
         # Ground truth range validation
         if gt.expected_hitl_calls is not None:
             lo, hi = gt.expected_hitl_calls
@@ -805,6 +842,14 @@ class EvaluationProbe:
                 self.failures.append(FailureRecord(
                     category=FailureCategory.PLAN_INCOMPLETE,
                     detail=f"handoff_calls={ho_calls} not in expected range [{lo},{hi}]",
+                ))
+        # v20.4: expected_skill_activations range check
+        if gt.expected_skill_activations is not None:
+            lo, hi = gt.expected_skill_activations
+            if not (lo <= self.skill_activations <= hi):
+                self.failures.append(FailureRecord(
+                    category=FailureCategory.PLAN_INCOMPLETE,
+                    detail=f"skill_activations={self.skill_activations} not in expected range [{lo},{hi}]",
                 ))
         if gt.expected_goal_features and forced_mode == PlanMode.EMERGENT:
             actual_features = set()
@@ -855,6 +900,7 @@ class EvaluationProbe:
             guardrail_metrics=guardrail_metrics,
             memory_metrics=memory_metrics,
             mcp_metrics=mcp_metrics,
+            skill_metrics=skill_metrics,
             verifier_total=verifier_total,
             verifier_passed=verifier_passed,
             verifier_failed=verifier_failed,

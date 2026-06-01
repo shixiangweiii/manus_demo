@@ -129,6 +129,7 @@ class EvaluationRunner:
         original_memory_tools = config.MEMORY_TOOLS_ENABLED
         original_memory_dir = config.MEMORY_DIR
         original_mcp_bridge = config.MCP_BRIDGE_ENABLED
+        original_skills = config.SKILLS_ENABLED
 
         config.PLAN_MODE = mode.value
         if mode == PlanMode.EMERGENT:
@@ -143,6 +144,7 @@ class EvaluationRunner:
         is_memory_task = "memory" in tags_lower
         is_handoff_task = "handoff" in tags_lower
         is_mcp_task = "mcp" in tags_lower
+        is_skill_task = "skill" in tags_lower
 
         # v15: Memory tasks get isolated MEMORY_DIR to avoid polluting user's real memory
         _memory_tmpdir: str | None = None
@@ -171,6 +173,9 @@ class EvaluationRunner:
         # still required for discovery to yield tools; variants may also flip the flag).
         if is_mcp_task:
             config.MCP_BRIDGE_ENABLED = True
+        # v20.4: skill-tagged tasks enable the Skills system
+        if is_skill_task:
+            config.SKILLS_ENABLED = True
 
         # v8: SimulatedUser for HITL tasks — intercepts ask_user_prompt event and
         # resolves the Future with a scripted response BEFORE the probe records it.
@@ -258,6 +263,7 @@ class EvaluationRunner:
                 config.MEMORY_TOOLS_ENABLED = original_memory_tools
                 config.MEMORY_DIR = original_memory_dir
                 config.MCP_BRIDGE_ENABLED = original_mcp_bridge
+                config.SKILLS_ENABLED = original_skills
                 if _memory_tmpdir:
                     shutil.rmtree(_memory_tmpdir, ignore_errors=True)
 
@@ -282,6 +288,7 @@ class EvaluationRunner:
                 "dag_serial_execution": getattr(config, 'DAG_SERIAL_EXECUTION', None),
                 "subagent_enabled": getattr(config, 'SUBAGENT_ENABLED', None),
                 "enable_goal_driven_planner": getattr(config, 'ENABLE_GOAL_DRIVEN_PLANNER', None),
+                "skills_enabled": getattr(config, 'SKILLS_ENABLED', None),
             }
 
             result = probe.build_result(

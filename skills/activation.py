@@ -1,0 +1,228 @@
+"""
+Skill Activation Tool (v20.1) - Lets the LLM activate a skill at runtime.
+技能激活工具（v20.1）—— 让 LLM 在运行时激活技能。
+
+When the LLM calls this tool, the full SKILL.md body is returned,
+providing the LLM with detailed instructions, constraints, and tool
+guidance from the activated skill (progressive disclosure tier 2).
+
+LLM 调用此工具时，返回完整 SKILL.md 内容，提供激活技能的详细指令、
+约束和工具引导（渐进式披露第二层）。
+
+v20.2 extends this: after activation, the skill's allowed_tools list is
+applied as a tool filter on the current ReAct loop, and max activations
+per task are enforced.
+
+v20.2 扩展：激活后，技能的 allowed_tools 列表作为工具过滤应用于当前
+ReAct 循环，并强制执行每任务最大激活次数。
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable
+
+import config
+from skills.registry import SkillRegistry
+from tools.base import BaseTool
+
+logger = logging.getLogger(__name__)
+
+
+class SkillActivationTool(BaseTool):
+    """
+    Tool that activates a skill and returns its full content.
+    激活技能并返回其完整内容的工具。
+
+    v20.1: Returns SKILL.md full body.
+    v20.2: Also applies allowed-tools filter and enforces activation limits.
+    """
+
+    def __init__(
+        self,
+        registry: SkillRegistry,
+        on_event: Callable[[str, Any], None] | None = None,
+        tool_filter_callback: Callable[[list[str]], None] | None = None,
+        max_activations: int | None = None,
+        max_content_tokens: int | None = None,
+    ):
+        """
+        Args:
+            registry: SkillRegistry to look up skills from.
+            on_event: Event callback for emitting skill events.
+            tool_filter_callback: v20.2 callback to apply allowed-tools filter.
+                Called with the skill's allowed_tools list after activation.
+            max_activations: Per-task activation limit. Defaults to config value.
+            max_content_tokens: Max content tokens per activation. Defaults to config.
+        """
+        self._registry = registry
+        self._on_event = on_event or (lambda *_: None)
+        self._tool_filter_callback = tool_filter_callback  # v20.2, set by OrchestratorAgent
+        self._max_activations = max_activations if max_activations is not None else config.SKILLS_MAX_ACTIVATIONS_PER_TASK
+        self._max_content_tokens = max_content_tokens if max_content_tokens is not None else config.SKILLS_MAX_CONTENT_TOKENS
+        self._activation_count: int = 0
+        self._active_skills: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "activate_skill"
+
+    @property
+    def description(self) -> str:
+        # Dynamically list available skills in the description so the LLM
+        # can see what's available without reading the system prompt section.
+        # 动态列出可用技能，LLM 可直接在工具描述中看到。
+        skill_names = [s.meta.name for s in self._registry.list_all()]
+        available = ", ".join(skill_names) if skill_names else "(none)"
+        return (
+            "Activate a skill by name to get its detailed instructions and guidance. "
+            "Use this when the available skills list suggests a skill relevant to the "
+            "current task. After activation, the skill's instructions are loaded into "
+            "your context and any tool pre-authorizations are applied. "
+            f"Available skills: [{available}]. "
+            "激活指定名称的技能，获取其详细指令和引导。当可用技能列表中某个技能"
+            "与当前任务相关时调用此工具。激活后，技能指令加载到上下文中，"
+            "相关工具预授权自动生效。"
+        )
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name of the skill to activate / 要激活的技能名称",
+                },
+            },
+            "required": ["skill_name"],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        """Activate a skill: return full content, apply tool filter (v20.2).
+        激活技能：返回完整内容，应用工具过滤（v20.2）。
+        """
+        skill_name = kwargs.get("skill_name", "").strip()
+
+        if not skill_name:
+            return "Error: skill_name parameter is required"
+
+        # Check activation limit / 检查激活次数上限
+        if self._activation_count >= self._max_activations:
+            self._on_event("skill_activation_failed", {
+                "name": skill_name,
+                "error": f"Max activations reached ({self._max_activations} per task)",
+            })
+            return (
+                f"Error: Maximum skill activations reached ({self._max_activations} per task). "
+                f"Cannot activate '{skill_name}'."
+            )
+
+        # Check if skill is already active — return cached result without wasting slot
+        # 检查技能是否已激活——返回缓存结果，不浪费激活槽位
+        if skill_name in self._active_skills:
+            content = self._registry.load_full_content(skill_name)
+            if content is None:
+                return f"Error: Failed to load content for skill '{skill_name}'"
+            logger.debug(
+                "[SkillActivationTool] Skill '%s' already active, returning cached content",
+                skill_name,
+            )
+            return f"[Skill Already Active: {skill_name}]\n\n{content}"
+
+        # Look up skill in registry / 在注册表中查找技能
+        skill = self._registry.get(skill_name)
+        if skill is None:
+            available = [s.meta.name for s in self._registry.list_all()]
+            self._on_event("skill_activation_failed", {
+                "name": skill_name,
+                "error": f"Skill not found. Available: {available}",
+            })
+            return (
+                f"Error: Skill '{skill_name}' not found. "
+                f"Available skills: {', '.join(available) if available else 'none'}"
+            )
+
+        # Increment activation count (before any await — budget reservation pattern)
+        # 递增激活计数（在任何 await 之前——预算预留模式）
+        self._activation_count += 1
+
+        # Load full content with truncation / 加载完整内容（含截断）
+        content = self._registry.load_full_content(skill_name)
+        if content is None:
+            # Should not happen since we just checked get(), but be defensive
+            # 不应发生（刚检查过 get()），但保持防御性
+            return f"Error: Failed to load content for skill '{skill_name}'"
+
+        # Track active skills / 跟踪已激活技能
+        self._active_skills.append(skill_name)
+
+        # Emit activation event / 发出激活事件
+        self._on_event("skill_activated", {
+            "name": skill_name,
+            "activation_count": self._activation_count,
+            "content_length": len(content),
+            "allowed_tools": skill.meta.allowed_tools,
+            "trust_level": skill.meta.license,
+        })
+
+        # v20.3: Apply skill content guardrail based on trust level
+        # v20.3：根据信任等级应用技能内容护栏
+        if config.GUARDRAILS_ENABLED:
+            try:
+                from guardrails.engine import current_guardrail
+                guardrail = current_guardrail()
+                if guardrail is not None:
+                    decision = guardrail._input.scan_skill_content(content, skill.meta.license)
+                    if decision.transformed_text is not None:
+                        content = decision.transformed_text
+                        self._on_event("skill_content_guarded", {
+                            "name": skill_name,
+                            "trust_level": skill.meta.license,
+                            "action": decision.action.value,
+                            "reason": decision.reason,
+                        })
+            except Exception:
+                pass  # Fail-open: guardrail errors never block skill activation
+
+        # v20.2: Apply tool filter if skill has allowed_tools / 应用工具过滤
+        if self._tool_filter_callback is not None and skill.meta.allowed_tools:
+            self._tool_filter_callback(skill.meta.allowed_tools)
+
+        logger.info(
+            "[SkillActivationTool] Activated skill '%s' (%d/%d activations, %d chars)",
+            skill_name, self._activation_count, self._max_activations, len(content),
+        )
+
+        # Return the skill content with a header / 返回带标题的技能内容
+        header = f"[Skill Activated: {skill_name}]"
+        if skill.meta.allowed_tools:
+            header += f" [Pre-authorized tools: {', '.join(skill.meta.allowed_tools)}]"
+        return f"{header}\n\n{content}"
+
+    def reset_task_state(self) -> None:
+        """Reset per-task activation state (called by OrchestratorAgent.run()).
+        重置每任务激活状态（由 OrchestratorAgent.run() 调用）。
+        """
+        self._activation_count = 0
+        self._active_skills = []
+
+    def set_tool_filter_callback(self, callback: Callable[[list[str]], None]) -> None:
+        """v20.2: Set the callback that filters available tools after skill activation.
+        v20.2：设置技能激活后过滤可用工具的回调。
+        """
+        self._tool_filter_callback = callback
+
+    @property
+    def active_skills(self) -> list[str]:
+        """Return list of skill names activated in the current task.
+        返回当前任务中已激活的技能名称列表。
+        """
+        return list(self._active_skills)
+
+    @property
+    def activation_count(self) -> int:
+        """Return the number of activations in the current task.
+        返回当前任务的激活次数。
+        """
+        return self._activation_count

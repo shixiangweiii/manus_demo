@@ -182,6 +182,15 @@ EVALUATION_VARIANTS: dict[str, EvaluationVariant] = {
         modes=[PlanMode.SIMPLE],
         expected_focus="MCP tool discovery and execution",
     ),
+    "skills_on": EvaluationVariant(
+        id="skills_on",
+        description="v20.4 Skills enabled for activation/execution evaluation.",
+        env_overrides={
+            "SKILLS_ENABLED": True,
+        },
+        modes=[PlanMode.SIMPLE, PlanMode.EMERGENT],
+        expected_focus="skill activation ROI vs baseline",
+    ),
 }
 
 

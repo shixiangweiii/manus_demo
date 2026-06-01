@@ -556,6 +556,28 @@ def on_event(event: str, data: Any) -> None:
         reason = data.get("reason", "") if isinstance(data, dict) else ""
         console.print(f"[dim]🛡️  Guardrail (observe): {reason[:100]}[/dim]")
 
+    # --- v20 Agent Skills Events ---
+    # --- v20 智能体技能事件 ---
+    elif event == "skills_discovered":
+        count = data.get("count", 0) if isinstance(data, dict) else 0
+        names = data.get("names", []) if isinstance(data, dict) else []
+        console.print(f"[cyan]📋 Skills discovered: {count} ({', '.join(names) if names else 'none'})[/cyan]")
+    elif event == "skill_activated":
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        console.print(f"[green]📋 Skill activated: {name}[/green]")
+    elif event == "skill_activation_failed":
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        error = data.get("error", "") if isinstance(data, dict) else ""
+        console.print(f"[red]📋 Skill activation failed: {name} — {error[:100]}[/red]")
+    elif event == "skill_content_guarded":
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        trust = data.get("trust_level", "") if isinstance(data, dict) else ""
+        action = data.get("action", "") if isinstance(data, dict) else ""
+        console.print(f"[yellow]🛡️  Skill content guarded ({trust}): {name} → {action}[/yellow]")
+    elif event == "skill_allowed_tools_blocked":
+        tools = data.get("blocked_tools", []) if isinstance(data, dict) else []
+        console.print(f"[bold red]🛡️  Skill allowed_tools blocked by guardrail: {', '.join(tools)}[/bold red]")
+
     elif event == "token_usage_summary":
         # Token 消耗追踪汇总：显示明细表 + 引擎汇总 + 总计
         summary: TokenUsageSummary = data

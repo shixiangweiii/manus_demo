@@ -104,3 +104,55 @@ class ToolGuardrail:
                     return _block(f"sensitive path/credential reference '{hit}'", risk="ASI05")
 
         return _allow()
+
+    def check_skill_allowed_tools(self, skill_name: str, tool_name: str) -> GuardrailDecision:
+        """Verify that a skill's pre-authorized tool does not conflict with ToolGuardrail rules (v20.3).
+        验证技能预授权工具不与 ToolGuardrail 规则冲突（v20.3 新增）。
+
+        This is a "shadow check" — it runs the same per-tool rules as `check()`
+        but with dummy params, to see if the tool would be blocked. This enforces
+        the priority chain: ToolGuardrail > allowed-tools > default tool set.
+
+        Even if a skill pre-authorizes a tool via allowed_tools, if ToolGuardrail
+        would block it (e.g., execute_shell with dangerous commands, file_ops with
+        sandbox escape), the guardrail wins and the tool is removed from the
+        effective tool set.
+
+        这是"影子检查"——使用与 check() 相同的按工具规则但用空参数，
+        检查工具是否会被阻止。强制优先级链：
+        ToolGuardrail > allowed-tools > default tool set。
+        """
+        # Tools with no guardrail rules are always safe to pre-authorize
+        # 没有护栏规则的工具总是可以安全预授权
+        if tool_name not in {"execute_shell", "execute_python", "agentbay_code",
+                             "agentbay_browser", "file_ops"}:
+            return _allow()
+
+        # Shell and Python tools: always blocked for skill pre-authorization
+        # because they can execute arbitrary code which is dangerous
+        # Shell 和 Python 工具：技能预授权始终阻止，
+        # 因为它们可以执行任意代码，这是危险的
+        if tool_name in {"execute_shell", "execute_python", "agentbay_code"}:
+            return _block(
+                f"skill '{skill_name}' pre-authorizes '{tool_name}' which is blocked by ToolGuardrail "
+                f"(dangerous code execution)", risk="ASI02",
+            )
+
+        # file_ops: sandbox-gated, write ops require confirmation — too risky for
+        # automatic pre-authorization by a skill
+        # file_ops: 沙箱门控、写操作需确认——技能自动预授权风险过高
+        if tool_name == "file_ops":
+            return _block(
+                f"skill '{skill_name}' pre-authorizes 'file_ops' which is blocked by ToolGuardrail "
+                f"(sandbox/write restrictions)", risk="ASI03",
+            )
+
+        # agentbay_browser: URL restrictions apply — block for skills
+        # agentbay_browser: URL 限制适用——对技能阻止
+        if tool_name == "agentbay_browser":
+            return _block(
+                f"skill '{skill_name}' pre-authorizes 'agentbay_browser' which is blocked by ToolGuardrail "
+                f"(URL restrictions)", risk="ASI03",
+            )
+
+        return _allow()

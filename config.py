@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # 自动读取项目根目录的 .env 文件（若存在），优先级低于系统环境变量
 
-VERSION = "v19.0-dev"  # 当前版本号，main.py 和 tracing 引用此值
+VERSION = "v20.0-dev"  # 当前版本号，main.py 和 tracing 引用此值
 
 # --- LLM API Configuration ---
 # --- LLM API 配置 ---
@@ -246,6 +246,15 @@ GUARDRAIL_TOOL_MODE = os.getenv("GUARDRAIL_TOOL_MODE", "block").lower()         
 GUARDRAIL_INPUT_MODE = os.getenv("GUARDRAIL_INPUT_MODE", "neutralize").lower()             # neutralize | annotate | observe
 GUARDRAIL_OUTPUT_MODE = os.getenv("GUARDRAIL_OUTPUT_MODE", "redact").lower()               # redact | observe
 GUARDRAIL_WRITE_CONFIRM = os.getenv("GUARDRAIL_WRITE_CONFIRM", "block").lower()            # block | confirm | allow
+
+# --- v20 Agent Skills ---
+# --- 智能体技能（v20 新增）---
+SKILLS_ENABLED = os.getenv("SKILLS_ENABLED", "false").lower() == "true"                     # v20 主开关（默认关闭，向后兼容）
+SKILLS_PROJECT_DIR = os.path.join(os.path.dirname(__file__), ".agents", "skills")            # 项目级技能目录（可信，随代码版本管理）
+SKILLS_USER_DIR = os.path.expanduser(os.getenv("SKILLS_USER_DIR", "~/.manus_demo/skills"))   # 用户级技能目录（半可信）
+SKILLS_DIRS = os.getenv("SKILLS_DIRS", "")                                                  # 额外技能目录（逗号分隔，优先级最低）
+SKILLS_MAX_ACTIVATIONS_PER_TASK = int(os.getenv("SKILLS_MAX_ACTIVATIONS_PER_TASK", "3"))     # 单任务最大技能激活次数
+SKILLS_MAX_CONTENT_TOKENS = int(os.getenv("SKILLS_MAX_CONTENT_TOKENS", "5000"))              # 单技能内容最大 token 数（4 chars/token 估算）
 
 # --- v14 Phase 3: Harness Configuration ---
 # --- Harness 配置层（v14 Phase 3 新增）---
