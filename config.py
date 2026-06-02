@@ -193,6 +193,12 @@ SELF_EVOLUTION_MAX_HINTS = int(os.getenv("SELF_EVOLUTION_MAX_HINTS", "3"))  # �
 SELF_EVOLUTION_CONFIDENCE_CAP = float(os.getenv("SELF_EVOLUTION_CONFIDENCE_CAP", "0.6"))  # 自动学习记忆 confidence 上限（防 memory poisoning）
 SELF_EVOLUTION_PREFERENCE_ENABLED = os.getenv("SELF_EVOLUTION_PREFERENCE_ENABLED", "true").lower() == "true"  # v17.4：从 HITL 交互学习用户偏好（仅在 SELF_EVOLUTION_ENABLED + HITL 激活时生效）
 
+# --- v20.5 Skill Auto-Distillation ---
+# --- 技能自动蒸馏（v20.5：从高频成功模式蒸馏 SKILL.md，需 SELF_EVOLUTION + SKILLS 同时启用）
+SKILL_AUTO_DISTILL_ENABLED = os.getenv("SKILL_AUTO_DISTILL_ENABLED", "false").lower() == "true"  # v20.5 蒸馏主开关
+SKILL_AUTO_DISTILL_MIN_SUCCESSES = int(os.getenv("SKILL_AUTO_DISTILL_MIN_SUCCESSES", "3"))  # 同类任务成功 N 次后触发蒸馏
+SKILL_AUTO_DISTILL_CONFIDENCE_CAP = float(os.getenv("SKILL_AUTO_DISTILL_CONFIDENCE_CAP", "0.55"))  # 蒸馏记忆 confidence 上限
+
 # --- v17.3 Classifier Calibration ---
 # --- 分类器校准（v17.3：外置决策阈值，离线网格搜索建议，禁止静默自改）---
 CLASSIFIER_SIMPLE_THRESHOLD = int(os.getenv("CLASSIFIER_SIMPLE_THRESHOLD", "-1"))   # 规则评分 <= 此值 → simple（默认 -1，等于原硬编码）
@@ -255,6 +261,12 @@ SKILLS_USER_DIR = os.path.expanduser(os.getenv("SKILLS_USER_DIR", "~/.manus_demo
 SKILLS_DIRS = os.getenv("SKILLS_DIRS", "")                                                  # 额外技能目录（逗号分隔，优先级最低）
 SKILLS_MAX_ACTIVATIONS_PER_TASK = int(os.getenv("SKILLS_MAX_ACTIVATIONS_PER_TASK", "3"))     # 单任务最大技能激活次数
 SKILLS_MAX_CONTENT_TOKENS = int(os.getenv("SKILLS_MAX_CONTENT_TOKENS", "5000"))              # 单技能内容最大 token 数（4 chars/token 估算）
+
+# --- v20.6 Skill Optimization Loop ---
+# --- 技能优化闭环（v20.6：评估→诊断→修订→验证→部署；默认只生成 diff，不自动写入）---
+SKILL_OPTIMIZE_LLM_ENABLED = os.getenv("SKILL_OPTIMIZE_LLM_ENABLED", "false").lower() == "true"  # 使用 LLM 辅助修订 SKILL.md
+SKILL_OPTIMIZE_VALIDATION_RATIO = float(os.getenv("SKILL_OPTIMIZE_VALIDATION_RATIO", "0.2"))     # train/validation split 验证集比例
+SKILL_OPTIMIZE_MAX_TOKENS = int(os.getenv("SKILL_OPTIMIZE_MAX_TOKENS", "1200"))                  # LLM 修订最大输出 token
 
 # --- v14 Phase 3: Harness Configuration ---
 # --- Harness 配置层（v14 Phase 3 新增）---

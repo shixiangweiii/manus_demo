@@ -20,9 +20,14 @@ Progressive disclosure:
   3. 执行层 — 按需加载 scripts/references/assets（未来实现）
 """
 
-from skills.models import SkillMeta, SkillDef
+from skills.models import SkillMeta, SkillDef, SkillTrustLevel
 from skills.loader import SkillLoader
 from skills.registry import SkillRegistry
 from skills.activation import SkillActivationTool
+from skills.optimizer import SkillOptimizer, SkillEvalCase, SkillOptimizationReport
 
-__all__ = ["SkillMeta", "SkillDef", "SkillLoader", "SkillRegistry", "SkillActivationTool"]
+__all__ = [
+    "SkillMeta", "SkillDef", "SkillTrustLevel",
+    "SkillLoader", "SkillRegistry", "SkillActivationTool",
+    "SkillOptimizer", "SkillEvalCase", "SkillOptimizationReport",
+]

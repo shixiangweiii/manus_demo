@@ -334,6 +334,7 @@ class OrchestratorAgent:
         # v17 Self-Evolution (feature-flagged, default off; requires agentic memory)
         # v17 自演化（特性开关控制，默认关闭；硬依赖 agentic memory）
         self._experience_learner = None
+        self._skill_distiller = None
         if config.SELF_EVOLUTION_ENABLED and self._agentic_memory_service is not None:
             from evolution.learner import ExperienceLearner
             self._experience_learner = ExperienceLearner(
@@ -342,10 +343,24 @@ class OrchestratorAgent:
                 on_event=self._emit,
             )
             logger.info("[Orchestrator] Self-Evolution (v17) enabled")
+            # v20.5: optional auto-distillation of repeated success patterns into SKILL.md
+            if config.SKILL_AUTO_DISTILL_ENABLED and config.SKILLS_ENABLED:
+                from evolution.skill_distiller import SkillAutoDistiller
+                self._skill_distiller = SkillAutoDistiller(
+                    llm_client=self.llm_client,
+                    memory_service=self._agentic_memory_service,
+                    on_event=self._emit,
+                )
+                logger.info("[Orchestrator] Skill auto-distillation (v20.5) enabled")
         elif config.SELF_EVOLUTION_ENABLED and self._agentic_memory_service is None:
             logger.warning(
                 "[Orchestrator] SELF_EVOLUTION_ENABLED but AGENTIC_MEMORY_ENABLED is off "
                 "— self-evolution disabled"
+            )
+        if config.SKILL_AUTO_DISTILL_ENABLED and self._skill_distiller is None:
+            logger.warning(
+                "[Orchestrator] SKILL_AUTO_DISTILL_ENABLED requires SELF_EVOLUTION_ENABLED, "
+                "AGENTIC_MEMORY_ENABLED, and SKILLS_ENABLED — skill distillation disabled"
             )
 
         # v18.1: capture the final tool set for the deterministic Workflow engine.
@@ -1285,6 +1300,15 @@ class OrchestratorAgent:
             await self._experience_learner.learn_from_task(outcome)
         except Exception:
             logger.debug("[Orchestrator] Self-evolution learn failed", exc_info=True)
+
+        # v20.5: distill repeated success patterns into SKILL.md (opt-in)
+        # v20.5：从高频成功模式蒸馏 SKILL.md（显式开启）
+        if outcome.success and self._skill_distiller is not None:
+            try:
+                if self._skill_distiller.should_distill(outcome.task):
+                    await self._skill_distiller.distill(outcome)
+            except Exception:
+                logger.debug("[Orchestrator] Skill auto-distillation failed", exc_info=True)
 
         # v17.4: learn user preferences from captured HITL pairs
         # v17.4：从捕获的 HITL 问答对学习用户偏好

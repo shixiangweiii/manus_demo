@@ -26,8 +26,11 @@ FAILURE_LESSON_TAG = "failure_lesson"
 # 用户偏好记忆 tag（v17.4，写入 FACTUAL）
 USER_PREFERENCE_TAG = "user_preference"
 
+# v20.5 Skill 自动蒸馏标记 tag（写入 PROCEDURAL，防重复蒸馏）
+SKILL_DISTILL_TAG = "skill_distill"
+
 # 版本标记，写入 metadata.evolution_version
-EVOLUTION_VERSION = "v17.1"
+EVOLUTION_VERSION = "v20.5"
 
 
 # ======================================================================

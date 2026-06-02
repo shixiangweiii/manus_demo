@@ -577,6 +577,10 @@ def on_event(event: str, data: Any) -> None:
     elif event == "skill_allowed_tools_blocked":
         tools = data.get("blocked_tools", []) if isinstance(data, dict) else []
         console.print(f"[bold red]🛡️  Skill allowed_tools blocked by guardrail: {', '.join(tools)}[/bold red]")
+    elif event == "skill_auto_created":
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        path = data.get("path", "") if isinstance(data, dict) else ""
+        console.print(f"[green]✨ Skill auto-created: {name}[/green] [dim]{path}[/dim]")
 
     elif event == "token_usage_summary":
         # Token 消耗追踪汇总：显示明细表 + 引擎汇总 + 总计
