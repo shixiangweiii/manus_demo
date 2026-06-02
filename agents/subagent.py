@@ -207,6 +207,28 @@ class SubAgent:
             return list(live)
         return list(self._accumulated_tool_calls)
 
+    def _own_tokens_used(self) -> int:
+        """Sum tokens of THIS SubAgent's own LLM calls only.
+
+        Under EMERGENT_PARALLEL_TODOS multiple SubAgents share one LLMClient and
+        append to a single global _call_records list, so a bare positional slice
+        records[self._records_before:] would also include sibling SubAgents'
+        calls — inflating tokens_used AND mis-firing the per-call budget check
+        (a SubAgent could be killed by tokens a sibling consumed). Filtering by
+        caller_tag == self.name makes the count exact: both the internal
+        ReActEngine calls (agent_name=self.name → caller_tag) and the summarize
+        call are tagged with this SubAgent's name. _records_before is kept as a
+        cheap start-offset optimization (excludes prior-task records).
+        并发下多 SubAgent 共享一个全局记录列表，位置切片会算进兄弟的调用（token 虚高 +
+        预算误杀）；按 caller_tag==self.name 过滤后精确，_records_before 仅作起点优化。
+        """
+        records = self.llm_client.get_call_records()
+        return sum(
+            r.total_tokens
+            for r in records[self._records_before:]
+            if r.caller_tag == self.name
+        )
+
     def _on_react_iteration(self, iteration: int, tool_calls: list[ToolCallRecord]) -> None:
         """ReAct iteration callback — snapshot tool calls and check token budget.
 
@@ -227,9 +249,8 @@ class SubAgent:
             "tool_calls_count": len(tool_calls),
         })
 
-        # Anti-pattern #8: per-call token budget check (index range method)
-        records = self.llm_client.get_call_records()
-        current_tokens = sum(r.total_tokens for r in records[self._records_before:])
+        # Anti-pattern #8: per-call token budget check (own-tokens, caller-tag filtered)
+        current_tokens = self._own_tokens_used()
         logger.debug("[SubAgent] Iteration %d: tokens=%d/%d, tool_calls=%d",
                      iteration, current_tokens, self.max_tokens, len(self._accumulated_tool_calls))
         if current_tokens >= self.max_tokens:
@@ -284,9 +305,8 @@ class SubAgent:
             )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            # Token calculation via record index range (safe under shared LLMClient)
-            records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
+            # Own-tokens only (caller-tag filtered → correct under parallel SubAgents)
+            tokens_used = self._own_tokens_used()
             iterations_used = step_result.iterations_completed
 
             logger.info("[SubAgent] %s ReAct loop done: success=%s, iterations=%d, tokens=%d, duration=%.0fms",
@@ -354,8 +374,7 @@ class SubAgent:
 
         except SubAgentTokenExhausted:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
+            tokens_used = self._own_tokens_used()
 
             logger.warning("[SubAgent] %s token budget exceeded: %d >= %d (iterations=%d, duration=%.0fms)",
                            self.name, tokens_used, self.max_tokens, self._iterations_so_far, elapsed_ms)
@@ -398,8 +417,7 @@ class SubAgent:
 
         except asyncio.TimeoutError:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
+            tokens_used = self._own_tokens_used()
 
             logger.warning("[SubAgent] %s timed out after %ds (iterations=%d, tokens=%d)",
                            self.name, self.timeout, self._iterations_so_far, tokens_used)
@@ -441,8 +459,7 @@ class SubAgent:
 
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            records = self.llm_client.get_call_records()
-            tokens_used = sum(r.total_tokens for r in records[self._records_before:])
+            tokens_used = self._own_tokens_used()
             error_msg = str(exc)[:500]
 
             logger.error("[SubAgent] %s unexpected error: %s (iterations=%d, duration=%.0fms)",

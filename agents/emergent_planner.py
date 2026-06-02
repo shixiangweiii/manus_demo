@@ -53,7 +53,7 @@ from agents.prompt_utils import (
     get_emergent_parallel_guidance,
 )
 from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
-from react.tool_call_helpers import classify_result
+from react.tool_call_helpers import attribute_caller, classify_result
 
 logger = logging.getLogger(__name__)
 
@@ -876,9 +876,18 @@ class EmergentPlannerAgent(BaseAgent):
             "[EmergentPlanner] -> SubAgent dispatch START for TODO %d: %s",
             todo.id, todo.description[:100],
         )
+        # This direct dispatch bypasses execute_tool_calls(), so set the caller
+        # attribution ourselves (no await between this and traced_execute) — keeps
+        # the SubAgent's parent_agent = this planner for tracing/eval, consistent
+        # with the serial path (execute_tool_calls(agent_name=self.name)) instead
+        # of the SubAgentTool constructor default "OrchestratorAgent".
+        # 直接派发绕过了 execute_tool_calls，需自行设置归因（与 traced_execute 间无 await），
+        # 让 SubAgent.parent_agent 落到本规划器，和串行路径一致。
+        subagent_tool = self.tools["subagent"]
+        attribute_caller(subagent_tool, self.name)
         try:
             summary = await asyncio.wait_for(
-                self.tools["subagent"].traced_execute(task_description=task_description),
+                subagent_tool.traced_execute(task_description=task_description),
                 timeout=config_module.NODE_EXECUTION_TIMEOUT,
             )
         except asyncio.TimeoutError:
