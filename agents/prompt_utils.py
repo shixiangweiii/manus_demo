@@ -35,6 +35,39 @@ def get_subagent_guidance() -> str:
     return ""
 
 
+# Emergent parallel dispatch guidance (emergent path only; appended to its base
+# prompt when EMERGENT_PARALLEL_TODOS=true AND SUBAGENT_ENABLED=true). Unlike the
+# generic _SUBAGENT_GUIDANCE (which ends with "when in doubt, use basic tools"),
+# this actively encourages keeping independent subjects as separate dependency-free
+# TODOs so the scheduler can fan them out to isolated sub-agents in parallel.
+# 隐式规划并行派发引导（仅 emergent 路径，EMERGENT_PARALLEL_TODOS + SUBAGENT_ENABLED 时注入）。
+_EMERGENT_PARALLEL_GUIDANCE = """
+
+## Parallel Execution of Independent TODOs
+
+This task may contain multiple INDEPENDENT subjects/subtasks. The scheduler can
+execute mutually independent TODOs IN PARALLEL by dispatching each to an isolated
+sub-agent. To enable this:
+- Keep genuinely independent subjects as SEPARATE TODOs with EMPTY `dependencies`.
+- Do NOT merge unrelated research subjects into one TODO.
+- Do NOT add artificial dependencies between subjects that don't actually depend
+  on each other.
+- Only declare a dependency when a TODO truly needs another TODO's output.
+
+Each independent TODO will be run by its own focused sub-agent and only its
+summary is returned — so write each TODO description as a self-contained,
+fully-specified unit of work.
+"""
+
+
+def get_emergent_parallel_guidance() -> str:
+    """Return emergent parallel-dispatch guidance, or empty string when disabled.
+    EMERGENT_PARALLEL_TODOS 且 SUBAGENT_ENABLED 同时为 true 时返回引导，否则空串。"""
+    if config.EMERGENT_PARALLEL_TODOS and config.SUBAGENT_ENABLED:
+        return _EMERGENT_PARALLEL_GUIDANCE
+    return ""
+
+
 # Location tool usage guidance (always injected when location tool is registered)
 # 用户位置工具使用引导（始终注入，引导 LLM 在需要位置时主动调用工具而非臆造默认值）
 _LOCATION_GUIDANCE = """

@@ -202,9 +202,16 @@ class SubAgentTool(BaseTool):
                      tool_whitelist if tool_whitelist else "(empty→default)",
                      validated_whitelist)
 
-        # Generate unique SubAgent name
+        # Generate unique SubAgent name. Capture the id into a LOCAL immediately:
+        # under parallel dispatch multiple execute() coroutines share this tool
+        # instance, so reading self._subagent_counter again AFTER an await (e.g.
+        # in the completion log below) would print whatever value the counter has
+        # advanced to — making all concurrent completions log the same id.
+        # 并发派发下多个 execute() 共享本实例，await 后再读 self._subagent_counter 会串号，
+        # 故此处立即拷贝到局部 local_counter，后续日志一律用它。
         self._subagent_counter += 1
-        subagent_name = f"SubAgent-{self._subagent_counter}"
+        local_counter = self._subagent_counter
+        subagent_name = f"SubAgent-{local_counter}"
 
         # Create isolated sandbox directory (anti-pattern #4)
         # Wave-4 M4: makedirs runs in a thread to avoid blocking the asyncio
@@ -215,7 +222,7 @@ class SubAgentTool(BaseTool):
         sandbox_subdir = ""
         try:
             sandbox_base = config.SANDBOX_DIR
-            sandbox_subdir = os.path.join(sandbox_base, f"subagent_{self._subagent_counter}")
+            sandbox_subdir = os.path.join(sandbox_base, f"subagent_{local_counter}")
             await asyncio.to_thread(os.makedirs, sandbox_subdir, exist_ok=True)
             logger.debug("[SubAgentTool] Sandbox created: %s", sandbox_subdir)
         except OSError:
@@ -246,14 +253,21 @@ class SubAgentTool(BaseTool):
                 result: SubAgentResult = await subagent.run(context="")
 
             logger.info("[SubAgentTool] SubAgent-%d completed: status=%s, iterations=%d, tokens=%d, duration=%.0fms, artifacts=%s",
-                        self._subagent_counter, result.status.value, result.iterations_used,
+                        local_counter, result.status.value, result.iterations_used,
                         result.tokens_used, result.duration_ms, result.summary.artifacts)
             logger.debug("[SubAgentTool] SubAgent-%d summary: accomplished='%s', issues='%s'",
-                        self._subagent_counter,
+                        local_counter,
                         result.summary.accomplished[:200],
                         result.summary.issues[:200])
 
-            # Return structured summary as JSON string (anti-pattern #6)
+            # Return structured summary as JSON string (anti-pattern #6).
+            # A non-COMPLETED status (FAILED / TIMED_OUT) must surface as an
+            # `Error:`-prefixed string so callers detect it via classify_result
+            # (both the normal ReAct path and the emergent parallel dispatch).
+            # The full summary is preserved after the marker so no info is lost.
+            # 非 COMPLETED 状态加 `Error:` 前缀，让 classify_result 能识别失败；摘要保留不丢。
+            if result.status != SubAgentStatus.COMPLETED:
+                return f"Error: SubAgent {result.status.value} - {result.summary_text}"
             return result.summary_text
 
         # Wave-4 M5: removed dead `except asyncio.TimeoutError` branch — there
@@ -264,7 +278,7 @@ class SubAgentTool(BaseTool):
         # 删掉死的 TimeoutError except;CancelledError 保留 re-raise 不吞。
         except asyncio.CancelledError:
             logger.warning("[SubAgentTool] SubAgent-%d cancelled by parent task",
-                           self._subagent_counter)
+                           local_counter)
             raise
 
         except Exception as exc:
@@ -277,7 +291,8 @@ class SubAgentTool(BaseTool):
                 "artifacts": [],
                 "tool_calls_summary": "",
             }
-            return json.dumps(error_summary, ensure_ascii=False)
+            # `Error:` prefix so callers detect the hard failure (see above).
+            return "Error: " + json.dumps(error_summary, ensure_ascii=False)
 
     def reset_task_state(self) -> None:
         """Reset per-task state for a new task (called by OrchestratorAgent.run()).

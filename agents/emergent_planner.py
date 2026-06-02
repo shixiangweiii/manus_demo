@@ -47,8 +47,13 @@ from schema import ReasoningEffort, StepResult, TodoItem, TodoList, TodoStatus, 
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
-from agents.prompt_utils import build_system_prompt, build_convergence_hint
+from agents.prompt_utils import (
+    build_system_prompt,
+    build_convergence_hint,
+    get_emergent_parallel_guidance,
+)
 from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
+from react.tool_call_helpers import classify_result
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +108,15 @@ class EmergentPlannerAgent(BaseAgent):
         use_react_engine: bool | None = None,
         on_event: Callable[[str, Any], None] | None = None,
     ):
-        # Wave-2: build prompt per-instance, fresh date + HITL gating respected
+        # Wave-2: build prompt per-instance, fresh date + HITL gating respected.
+        # Append emergent parallel-dispatch guidance to the base prompt (no-op
+        # unless EMERGENT_PARALLEL_TODOS + SUBAGENT_ENABLED) so independent
+        # subjects stay as dependency-free TODOs the scheduler can fan out.
         super().__init__(
             name="EmergentPlanner",
-            system_prompt=build_system_prompt(_EMERGENT_BASE_PROMPT),
+            system_prompt=build_system_prompt(
+                _EMERGENT_BASE_PROMPT + get_emergent_parallel_guidance()
+            ),
             llm_client=llm_client,
             context_manager=context_manager,
         )
@@ -264,68 +274,80 @@ class EmergentPlannerAgent(BaseAgent):
                 else:
                     break
 
-            # 选择第一个就绪 TODO
-            current_todo = ready_todos[0]
-            self._emit("todo_start", {"todo": current_todo})
+            # 决定本轮执行：并行波次（多个独立 ready TODO 并发委派给隔离 SubAgent）
+            # 还是串行单 TODO（默认/回退）。
+            # Decide this round: a PARALLEL WAVE (fan out independent ready TODOs to
+            # isolated sub-agents) vs a single serial TODO (default / fallback).
+            parallel_eligible = (
+                config_module.EMERGENT_PARALLEL_TODOS
+                and "subagent" in self.tools
+                and len(ready_todos) >= 2
+            )
+            logger.info(
+                "[EmergentPlanner] iteration %d: %d ready TODO(s) %s | mode=%s",
+                iteration, len(ready_todos), [t.id for t in ready_todos],
+                "PARALLEL" if parallel_eligible else "serial",
+            )
 
-            # 为该 TODO 执行 ReAct 循环（含超时和异常保护）
-            try:
-                result = await asyncio.wait_for(
-                    self._execute_todo(current_todo),
-                    timeout=config_module.NODE_EXECUTION_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[EmergentPlanner] TODO %d timed out after %ds",
-                    current_todo.id, config_module.NODE_EXECUTION_TIMEOUT,
-                )
-                result = StepResult(
-                    step_id=current_todo.id, success=False,
-                    output=f"TODO timed out after {config_module.NODE_EXECUTION_TIMEOUT}s",
-                    tool_calls_log=[],
-                )
-            except Exception as exc:
-                logger.error(
-                    "[EmergentPlanner] TODO %d crashed: %s",
-                    current_todo.id, exc, exc_info=True,
-                )
-                result = StepResult(
-                    step_id=current_todo.id, success=False,
-                    output=f"Unhandled exception: {exc}",
-                    tool_calls_log=[],
-                )
-            all_results.append(result)
-
-            # 更新 TODO 状态
-            if result.success:
-                self._todo_list.mark_completed(current_todo.id, result.output)
-                self._emit("todo_complete", {"todo": current_todo, "result": result})
+            if parallel_eligible:
+                wave_results = await self._execute_todos_parallel(ready_todos)
             else:
-                current_todo.retry_count += 1
-                max_retries = config_module.MAX_TODO_RETRIES
-                if current_todo.retry_count >= max_retries:
-                    logger.warning(
-                        "[EmergentPlanner] TODO %d failed %d times, marking as BLOCKED: %s",
-                        current_todo.id, current_todo.retry_count, result.output[:200]
-                    )
-                    self._todo_list.mark_blocked(current_todo.id)
-                    self._emit("todo_blocked", {"todo": current_todo, "result": result})
+                # 串行单 TODO 路径（逻辑保持不变，带超时/异常保护）
+                current_todo = ready_todos[0]
+                self._emit("todo_start", {"todo": current_todo})
+                result = await self._execute_todo_guarded(current_todo)
+                wave_results = [(current_todo, result)]
+
+            # 处理本轮（一个或多个 TODO）的结果与状态转移
+            # Apply results + status transitions for every TODO executed this round.
+            for todo, result in wave_results:
+                all_results.append(result)
+                if result.success:
+                    self._todo_list.mark_completed(todo.id, result.output)
+                    self._emit("todo_complete", {"todo": todo, "result": result})
                 else:
-                    logger.warning(
-                        "[EmergentPlanner] TODO %d failed (retry %d/%d): %s",
-                        current_todo.id, current_todo.retry_count, max_retries, result.output[:200]
-                    )
-                    self._todo_list.mark_pending(current_todo.id)
-                    self._emit("todo_failed", {"todo": current_todo, "result": result})
+                    todo.retry_count += 1
+                    max_retries = config_module.MAX_TODO_RETRIES
+                    if todo.retry_count >= max_retries:
+                        logger.warning(
+                            "[EmergentPlanner] TODO %d failed %d times, marking as BLOCKED: %s",
+                            todo.id, todo.retry_count, result.output[:200]
+                        )
+                        self._todo_list.mark_blocked(todo.id)
+                        self._emit("todo_blocked", {"todo": todo, "result": result})
+                    else:
+                        logger.warning(
+                            "[EmergentPlanner] TODO %d failed (retry %d/%d): %s",
+                            todo.id, todo.retry_count, max_retries, result.output[:200]
+                        )
+                        self._todo_list.mark_pending(todo.id)
+                        self._emit("todo_failed", {"todo": todo, "result": result})
+
+            # 聚合本轮结果，供涌现 review（_update_todo_list 仅取单个 result.output）
+            # Aggregate the wave's results for emergent review.
+            wave_any_failed = any(not r.success for _, r in wave_results)
+            if len(wave_results) == 1:
+                agg_result = wave_results[0][1]
+            else:
+                agg_output = "\n\n".join(
+                    f"[TODO {todo.id}] {'OK' if r.success else 'FAILED'}: {r.output[:500]}"
+                    for todo, r in wave_results
+                )
+                agg_result = StepResult(
+                    step_id=wave_results[-1][0].id,
+                    success=not wave_any_failed,
+                    output=agg_output,
+                    tool_calls_log=[],
+                )
 
             # 检查是否需要添加新 TODO（失败时必触发，每 3 步周期性 review 以保留涌现能力）
             should_update = (
-                not result.success
+                wave_any_failed
                 or not self._todo_list.get_ready_todos()
                 or iteration % 3 == 0
             )
             if should_update:
-                await self._update_todo_list(result)
+                await self._update_todo_list(agg_result)
 
             self._emit_checkpoint(
                 on_checkpoint,
@@ -391,6 +413,20 @@ class EmergentPlannerAgent(BaseAgent):
         """
         self.reset()
 
+        # When parallel dispatch is active, steer decomposition toward independent,
+        # dependency-free TODOs so the scheduler can fan them out to sub-agents.
+        # 并行派发开启时，引导把独立主题拆成无依赖 TODO，供调度层并发委派。
+        parallel_rule = ""
+        if config_module.EMERGENT_PARALLEL_TODOS and config_module.SUBAGENT_ENABLED:
+            parallel_rule = (
+                "5. PARALLELISM: If the task contains MULTIPLE INDEPENDENT "
+                "subjects/subtasks (e.g. researching several distinct topics), "
+                "create them as SEPARATE TODO items each with EMPTY dependencies "
+                "so they can run in parallel. Do NOT merge independent subjects "
+                "into a single TODO, and do NOT invent dependencies between "
+                "subjects that don't actually depend on each other.\n\n"
+            )
+
         prompt = (
             f"Initialize a TODO list for this task. Create 1-3 high-level TODO items "
             f"to get started. We will add more during execution if needed.\n\n"
@@ -412,6 +448,7 @@ class EmergentPlannerAgent(BaseAgent):
             f"4. Write TODO descriptions in the SAME language as the user's "
             f"task (Chinese task → Chinese descriptions; English task → "
             f"English descriptions).\n\n"
+            f"{parallel_rule}"
             f"Respond with JSON:\n"
             f"{{\n"
             f'  "todos": [\n'
@@ -712,6 +749,166 @@ class EmergentPlannerAgent(BaseAgent):
             success=False,
             output=f"TODO did not complete within {self.max_iterations} iterations.",
             tool_calls_log=tool_calls_log,
+        )
+
+    async def _execute_todo_guarded(self, todo: TodoItem) -> StepResult:
+        """Run a single TODO via the in-process ReAct loop with timeout/exception guard.
+        带超时与异常保护地执行单个 TODO（进程内 ReAct 循环，串行路径与预算耗尽回退共用）。"""
+        try:
+            return await asyncio.wait_for(
+                self._execute_todo(todo),
+                timeout=config_module.NODE_EXECUTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[EmergentPlanner] TODO %d timed out after %ds",
+                todo.id, config_module.NODE_EXECUTION_TIMEOUT,
+            )
+            return StepResult(
+                step_id=todo.id, success=False,
+                output=f"TODO timed out after {config_module.NODE_EXECUTION_TIMEOUT}s",
+                tool_calls_log=[],
+            )
+        except Exception as exc:
+            logger.error(
+                "[EmergentPlanner] TODO %d crashed: %s",
+                todo.id, exc, exc_info=True,
+            )
+            return StepResult(
+                step_id=todo.id, success=False,
+                output=f"Unhandled exception: {exc}",
+                tool_calls_log=[],
+            )
+
+    # ------------------------------------------------------------------
+    # Parallel multi-agent dispatch (EMERGENT_PARALLEL_TODOS)
+    # 并行多智能体派发（EMERGENT_PARALLEL_TODOS）
+    # ------------------------------------------------------------------
+
+    async def _execute_todos_parallel(
+        self, ready_todos: list[TodoItem]
+    ) -> list[tuple[TodoItem, StepResult]]:
+        """Fan out independent ready TODOs concurrently to isolated sub-agents.
+
+        Each TODO is delegated to the `subagent` tool (its own context,
+        summary-only return), so they run in parallel WITHOUT sharing this
+        agent's flat message history (which `_execute_todo` mutates in place).
+        The wave size is capped by the remaining per-task SubAgent budget; any
+        overflow is deferred to the next loop iteration.
+
+        把相互独立的 ready TODO 一次性并发委派给隔离 SubAgent（各自上下文、摘要返回），
+        从而避免共享本智能体的扁平消息历史。波次大小受 SubAgent 单任务预算裁剪，溢出顺延下轮。
+        """
+        subagent_tool = self.tools["subagent"]
+        # 估算剩余 SubAgent 预算（属性缺失时回退为全量并发）
+        max_calls = getattr(subagent_tool, "_max_calls", len(ready_todos))
+        used_calls = getattr(subagent_tool, "_call_count", 0)
+        budget = max(0, max_calls - used_calls)
+
+        if budget <= 0:
+            # 预算耗尽：回退单个串行执行，避免本轮空转或触发 cap Error
+            logger.warning(
+                "[EmergentPlanner] SubAgent budget exhausted (%d/%d used); "
+                "falling back to serial execution for TODO %d",
+                used_calls, max_calls, ready_todos[0].id,
+            )
+            self._emit("todo_start", {"todo": ready_todos[0]})
+            result = await self._execute_todo_guarded(ready_todos[0])
+            return [(ready_todos[0], result)]
+
+        wave = ready_todos[:budget]
+        deferred = ready_todos[budget:]
+        logger.info(
+            "[EmergentPlanner] PARALLEL WAVE: dispatching %d/%d ready TODO(s) to sub-agents "
+            "(SubAgent budget %d/%d used; %d deferred) -> TODO ids %s",
+            len(wave), len(ready_todos), used_calls, max_calls, len(deferred),
+            [t.id for t in wave],
+        )
+        self._emit(
+            "phase",
+            f"Parallel wave: dispatching {len(wave)} independent TODO(s) to sub-agents...",
+        )
+
+        results = await asyncio.gather(
+            *(self._dispatch_one_subagent(todo) for todo in wave),
+            return_exceptions=True,
+        )
+
+        wave_results: list[tuple[TodoItem, StepResult]] = []
+        for todo, res in zip(wave, results):
+            if isinstance(res, BaseException):
+                logger.error(
+                    "[EmergentPlanner] PARALLEL TODO %d dispatch crashed: %s",
+                    todo.id, res, exc_info=res,
+                )
+                res = StepResult(
+                    step_id=todo.id, success=False,
+                    output=f"Parallel sub-agent dispatch failed: {res}",
+                    tool_calls_log=[],
+                )
+            wave_results.append((todo, res))
+
+        succeeded = sum(1 for _, r in wave_results if r.success)
+        logger.info(
+            "[EmergentPlanner] PARALLEL WAVE done: %d/%d sub-agent TODO(s) succeeded",
+            succeeded, len(wave_results),
+        )
+        return wave_results
+
+    async def _dispatch_one_subagent(self, todo: TodoItem) -> StepResult:
+        """Execute one TODO via the isolated `subagent` tool (with dependency context).
+        通过隔离的 subagent 工具执行单个 TODO（注入已完成依赖的结果上下文）。"""
+        self._todo_list.mark_in_progress(todo.id)
+        self._emit("todo_start", {"todo": todo})
+
+        # 复用 _execute_todo 的依赖上下文拼装方式
+        task_description = f"TODO {todo.id}: {todo.description}"
+        if todo.dependencies:
+            dep_results = []
+            for dep_id in todo.dependencies:
+                dep_todo = self._todo_list.todos.get(dep_id)
+                if dep_todo and dep_todo.result:
+                    dep_results.append(f"[TODO {dep_id} result]:\n{dep_todo.result}")
+            if dep_results:
+                task_description += "\n\nResults from dependencies:\n" + "\n".join(dep_results)
+
+        logger.info(
+            "[EmergentPlanner] -> SubAgent dispatch START for TODO %d: %s",
+            todo.id, todo.description[:100],
+        )
+        try:
+            summary = await asyncio.wait_for(
+                self.tools["subagent"].traced_execute(task_description=task_description),
+                timeout=config_module.NODE_EXECUTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[EmergentPlanner] SubAgent for TODO %d timed out after %ds",
+                todo.id, config_module.NODE_EXECUTION_TIMEOUT,
+            )
+            return StepResult(
+                step_id=todo.id, success=False,
+                output=f"Sub-agent timed out after {config_module.NODE_EXECUTION_TIMEOUT}s",
+                tool_calls_log=[],
+            )
+
+        summary_text = str(summary)
+        is_error, _ = classify_result(summary_text)
+        if is_error:
+            logger.warning(
+                "[EmergentPlanner] <- SubAgent dispatch FAILED for TODO %d: %s",
+                todo.id, summary_text[:200],
+            )
+        else:
+            logger.info(
+                "[EmergentPlanner] <- SubAgent dispatch DONE for TODO %d (summary %d chars)",
+                todo.id, len(summary_text),
+            )
+        return StepResult(
+            step_id=todo.id,
+            success=not is_error,
+            output=summary_text,
+            tool_calls_log=[],
         )
 
     # ------------------------------------------------------------------

@@ -17,6 +17,7 @@ User Task → Orchestrator → [classify_task] → simple / complex / emergent
   complex:   Planner.create_dag()      → DAGExecutor (super-steps)   → Reflector
   emergent:  ENABLE_GOAL_DRIVEN_PLANNER=false → EmergentPlanner (TODO + per-TODO ReAct)
              ENABLE_GOAL_DRIVEN_PLANNER=true  → GoalDrivenPlanner (goal anchoring + dynamic TODO)
+             EMERGENT_PARALLEL_TODOS=true (+ SUBAGENT_ENABLED) → independent ready TODOs in a round are fanned out concurrently to isolated SubAgents (asyncio.gather, bounded by SUBAGENT_MAX_CONCURRENT + per-task SubAgent budget; serial fallback otherwise)
 All paths → Token usage → Long-term memory → TracingBridge (OTel)
 All paths → Checkpoint persistence (v14.5, per-step/per-TODO/per-super-step save, resume from checkpoint)
 All paths → Agentic Memory (v15, structured records, bilingual retrieval, Memory as Tool, opt-in via AGENTIC_MEMORY_ENABLED)
@@ -128,6 +129,7 @@ All via env vars / `.env` (see `config.py`):
 | `PLAN_MODE` | `auto` | `auto` / `simple` / `complex` / `emergent` |
 | `ENABLE_GOAL_DRIVEN_PLANNER` | `false` | v8 within emergent path |
 | `SUBAGENT_ENABLED` | `false` | v9 master switch |
+| `EMERGENT_PARALLEL_TODOS` | `false` | Emergent path: fan out independent ready TODOs concurrently to isolated SubAgents (requires `SUBAGENT_ENABLED`) |
 | `HITL_ENABLED` | `false` | v13 master switch (auto-suppressed in single-task) |
 | `HITL_MAX_PROMPTS_PER_TASK` | `5` | Per-task ask_user cap |
 | `HITL_USER_INPUT_TIMEOUT` | `120` | Seconds to wait for user input |

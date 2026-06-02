@@ -108,7 +108,14 @@ WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "15"))         # 单次
 # --- 百炼 MCP（阿里云搜索 & 网页解析，v11 新增）---
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")  # 阿里云 DashScope API Key（为空时回退到 DDGS）
 BAILIAN_WEBSEARCH_MCP_URL = os.getenv("BAILIAN_WEBSEARCH_MCP_URL", "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp")  # 搜索 MCP 服务端点
-BAILIAN_WEBPARSER_MCP_URL = os.getenv("BAILIAN_WEBPARSER_MCP_URL", "https://dashscope.aliyuncs.com/api/v1/mcps/WebParser/mcp")  # 网页解析 MCP 服务端点
+# 注意：WebParser MCP 仅支持 SSE 传输（streamable HTTP 会返回 405 "current mcp not support streamableHttp"），
+# 因此默认端点用 /sse；若用 env 覆盖此 URL，必须同样指向 /sse 端点。传输选择见 tools/mcp_client.py 的 _SERVER_TRANSPORT。
+BAILIAN_WEBPARSER_MCP_URL = os.getenv("BAILIAN_WEBPARSER_MCP_URL", "https://dashscope.aliyuncs.com/api/v1/mcps/WebParser/sse")  # 网页解析 MCP 服务端点（SSE 传输）
+# 429 限流 / 瞬时传输错误（SSE BrokenResourceError）的指数退避重试。退避总时长受调用方
+# asyncio.wait_for 限制（web_search=WEB_SEARCH_TIMEOUT，fetch_url=2×），超出部分会被外层超时切断
+# （WebSearch 仍有 DDGS 兜底；WebParser 无兜底，故重试对 fetch_url 价值最大）。
+BAILIAN_MCP_MAX_RETRIES = int(os.getenv("BAILIAN_MCP_MAX_RETRIES", "3"))         # 429/瞬时错误最大重试次数（0=不重试）
+BAILIAN_MCP_RETRY_BASE_DELAY = float(os.getenv("BAILIAN_MCP_RETRY_BASE_DELAY", "2.0"))  # 指数退避基础延迟（秒）：delay = base × 2**attempt
 
 # --- Convergence Guidance ---
 # --- 收敛指引（防止搜索循环）---
@@ -141,10 +148,10 @@ GOAL_DRIVEN_STAGNATION_WINDOW = int(os.getenv("GOAL_DRIVEN_STAGNATION_WINDOW", "
 SUBAGENT_ENABLED = os.getenv("SUBAGENT_ENABLED", "false").lower() == "true"  # 是否启用 SubAgent 模式
 SUBAGENT_MAX_ITERATIONS = int(os.getenv("SUBAGENT_MAX_ITERATIONS", str(MAX_REACT_ITERATIONS)))  # SubAgent 内部 ReAct 最大迭代次数
 SUBAGENT_TIMEOUT = int(os.getenv("SUBAGENT_TIMEOUT", str(NODE_EXECUTION_TIMEOUT)))  # SubAgent 执行超时时间（秒）
-SUBAGENT_MAX_CONCURRENT = int(os.getenv("SUBAGENT_MAX_CONCURRENT", "3"))  # 最大并发 SubAgent 数量
+SUBAGENT_MAX_CONCURRENT = int(os.getenv("SUBAGENT_MAX_CONCURRENT", "2"))  # 最大并发 SubAgent 数量（降到 2 削峰，缓解并行 wave 对外部 API 的瞬时 QPS 限流）
 SUBAGENT_SUMMARY_MAX_LENGTH = int(os.getenv("SUBAGENT_SUMMARY_MAX_LENGTH", "2000"))  # SubAgent 返回摘要最大字符数
 SUBAGENT_MAX_CALLS_PER_TASK = int(os.getenv("SUBAGENT_MAX_CALLS_PER_TASK", "3"))  # 反模式 #3/8：单任务 SubAgent 调用次数上限
-SUBAGENT_MAX_TOKENS_PER_CALL = int(os.getenv("SUBAGENT_MAX_TOKENS_PER_CALL", "50000"))  # 反模式 #8：单次 SubAgent 调用 Token 预算上限
+SUBAGENT_MAX_TOKENS_PER_CALL = int(os.getenv("SUBAGENT_MAX_TOKENS_PER_CALL", "120000"))  # 反模式 #8：单次 SubAgent 调用 Token 预算上限（深度联网调研子任务 50000 偏小易触顶失败，上调至 120000；仍为安全上限非目标值）
 SUBAGENT_DEFAULT_TOOL_WHITELIST = os.getenv("SUBAGENT_DEFAULT_TOOL_WHITELIST", "")  # 默认工具白名单（逗号分隔，空=全量授权）
 
 # --- Wave-3/4 SubAgent UX & resource limits ---
@@ -152,6 +159,12 @@ SUBAGENT_DEFAULT_TOOL_WHITELIST = os.getenv("SUBAGENT_DEFAULT_TOOL_WHITELIST", "
 SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH = int(os.getenv("SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH", "2000"))  # L2：SubAgent task_description 最大字符数,超出则截断 + warning
 SUBAGENT_ITERATION_EVENT_VERBOSITY = os.getenv("SUBAGENT_ITERATION_EVENT_VERBOSITY", "summary").lower()  # L5: subagent_iteration 事件 UI 粒度: summary（仅每 N 轮）/ full（全部）/ silent（关闭渲染）
 SUBAGENT_ITERATION_EVENT_EVERY_N = int(os.getenv("SUBAGENT_ITERATION_EVENT_EVERY_N", "2"))  # L5 summary 模式下每 N 轮渲染一次
+
+# --- Emergent parallel multi-agent dispatch (default off) ---
+# --- 隐式规划并行多智能体派发（默认关闭）---
+# emergent 路径：把无依赖的 ready TODO 集一次性并发委派给隔离 SubAgent。
+# 仅在 SUBAGENT_ENABLED=true 且 emergent 拿到了 subagent 工具时生效；遵循"新特性默认关"约定。
+EMERGENT_PARALLEL_TODOS = os.getenv("EMERGENT_PARALLEL_TODOS", "false").lower() == "true"
 
 # --- v13.0 Human-in-the-Loop Feature Flags ---
 # --- 人机交互（v13 新增）---
