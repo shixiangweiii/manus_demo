@@ -684,9 +684,41 @@ class OrchestratorAgent:
         if not allowed_tools:
             return  # empty list = all tools allowed, no filtering needed
 
+        # v20 Fix 2: union allowed_tools across ALL currently-active skills, not
+        # just the one just activated. set_allowed_tools() rebuilds from the full
+        # tool set each call, so using only the newest skill's list would silently
+        # drop earlier active skills' pre-authorized tools (last-activation-wins bug).
+        # A skill that declares no allowed_tools contributes nothing to the union
+        # (it makes no tool claim and works within whatever is already available).
+        # v20 修复 2：对所有当前活跃 skill 的 allowed_tools 取并集，而非仅用刚激活的那一个。
+        # set_allowed_tools() 每次都从完整工具集重建，若只用最新 skill 的列表，会静默移除
+        # 先激活 skill 的工具授权（后激活覆盖前者的 bug）。未声明 allowed_tools 的 skill
+        # 不贡献并集（它不提出工具诉求，在已有可用集内工作）。
+        union: list[str] = []
+        seen: set[str] = set()
+        active = self._skill_activation_tool.active_skills if self._skill_activation_tool else []
+        for sk_name in active:
+            sk = self._skill_registry.get(sk_name) if self._skill_registry else None
+            if sk is None:
+                continue
+            for tool_name in sk.meta.allowed_tools:
+                if tool_name not in seen:
+                    seen.add(tool_name)
+                    union.append(tool_name)
+        # Defensive: include the just-activated skill's tools even if active_skills
+        # has not yet been updated (should already be present per activation order).
+        # 防御：即使 active_skills 尚未更新也纳入刚激活 skill 的工具（按激活顺序通常已在内）。
+        for tool_name in allowed_tools:
+            if tool_name not in seen:
+                seen.add(tool_name)
+                union.append(tool_name)
+
+        if not union:
+            return  # no active skill declared any tools → no filtering needed
+
         # Always preserve meta-tools: activate_skill itself + handoff/subagent/ask_user
         # 始终保留元工具：activate_skill 自身 + handoff/subagent/ask_user
-        effective = list(allowed_tools)
+        effective = list(union)
         if "activate_skill" not in effective:
             effective.append("activate_skill")
         for meta_tool in ("handoff", "subagent", "ask_user", "remote_subagent"):
@@ -727,16 +759,26 @@ class OrchestratorAgent:
             except Exception:
                 pass  # Fail-open on guardrail errors
 
+        # v20 Fix 5: in parallel DAG mode (DAG_SERIAL_EXECUTION=false) the executor's
+        # _react_engine is SHARED across concurrently-running nodes; mutating its tool
+        # set mid-run would corrupt other nodes. Tool filtering is an optimization, not
+        # a security boundary (guardrails enforce security independently at execute time),
+        # so skip the shared-engine mutation when parallel. _active_skill_tools is still
+        # recorded above for checkpoint/observability.
+        # v20 修复 5：并行 DAG（DAG_SERIAL_EXECUTION=false）下 executor 的 _react_engine
+        # 被并发节点共享，运行时改其工具集会损坏其他节点。工具过滤是优化而非安全边界
+        # （guardrails 在执行时独立强制安全），故并行时跳过共享引擎变更。上方
+        # _active_skill_tools 仍记录以供 checkpoint/可观测。
+        if not config.DAG_SERIAL_EXECUTION:
+            _emit_fn = self._on_event or (lambda *_: None)
+            _emit_fn("skill_tool_filter_skipped", {
+                "reason": "DAG_SERIAL_EXECUTION=false; shared ReAct engine not mutated to avoid corrupting concurrent nodes",
+                "would_have_applied": effective,
+            })
+            logger.info("[Orchestrator] Skill tool filter skipped (parallel DAG): %s", effective)
+            return
+
         # Propagate filter to all ReAct engines / 传播过滤到所有 ReAct 引擎
-        # NOTE: In parallel DAG execution (DAG_SERIAL_EXECUTION=false), the executor's
-        # _react_engine is shared across concurrent nodes. Mutating its tool set mid-run
-        # could corrupt another node's execution. We apply the filter anyway — the
-        # alternative (no filtering) is worse. In practice, DAG_SERIAL_EXECUTION=true
-        # (the default) means nodes execute sequentially, so this is safe.
-        # 注意：在并行 DAG 执行中（DAG_SERIAL_EXECUTION=false），executor 的
-        # _react_engine 被并发节点共享。运行时修改其工具集可能损坏其他节点的执行。
-        # 我们仍然应用过滤——不过滤更危险。默认 DAG_SERIAL_EXECUTION=true 意味着
-        # 节点顺序执行，因此默认情况下是安全的。
         if hasattr(self.executor_agent, '_react_engine') and self.executor_agent._react_engine:
             self.executor_agent._react_engine.set_allowed_tools(effective)
         if hasattr(self.emergent_planner, '_react_engine') and self.emergent_planner._react_engine:

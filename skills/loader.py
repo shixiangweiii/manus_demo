@@ -108,21 +108,22 @@ class SkillLoader:
         """Parse YAML frontmatter from SKILL.md content.
         从 SKILL.md 内容中解析 YAML frontmatter。
 
-        Uses a lightweight key: value parser (no PyYAML dependency).
-        The frontmatter schema is small (6 fields), so a regex-based
-        parser is sufficient and avoids adding a new dependency.
+        Primary path uses ``yaml.safe_load`` so the full YAML grammar is
+        supported — folded/literal scalars (``description: >`` / ``|``),
+        nested block mappings (``metadata:``), quoted strings, etc. This is
+        what the agentskills.io spec and the wider skill ecosystem use.
 
-        使用轻量级 key: value 解析器（无 PyYAML 依赖）。
-        frontmatter 模式很小（6 个字段），基于正则的解析器即可。
+        If PyYAML is unavailable or the frontmatter is not valid YAML, fall
+        back to the lightweight line-based parser (``_line_parse``) so any
+        SKILL.md that parses today keeps parsing — zero regression — while
+        spec-compliant YAML constructs newly parse correctly.
 
-        Supports:
-        - Simple key: value pairs (string values)
-        - key: [JSON array] for list values (e.g., allowed_tools: ["t1", "t2"])
-        - key: space/comma separated values for list fields (e.g., allowed_tools: t1, t2)
-        - # comment lines (ignored)
-
-        Args:
-            content: Full SKILL.md file content.
+        主路径使用 ``yaml.safe_load``，支持完整 YAML 语法——折叠/字面量标量
+        （``description: >`` / ``|``）、嵌套块映射（``metadata:``）、带引号字符串等，
+        这正是 agentskills.io 规范与生态广泛采用的写法。
+        若 PyYAML 不可用或 frontmatter 非合法 YAML，则回退到轻量逐行解析器
+        （``_line_parse``）——今天能解析的 SKILL.md 继续能解析（零回归），
+        同时规范的 YAML 构造现在能被正确解析。
 
         Returns:
             Tuple of (parsed key-value dict, body start position).
@@ -134,6 +135,87 @@ class SkillLoader:
             return {}, 0
 
         raw = match.group(1)
+
+        # Prefer real YAML; fall back to the line parser on error / 优先真 YAML，出错回退行解析
+        parsed = SkillLoader._yaml_parse(raw)
+        if parsed is None:
+            parsed = SkillLoader._line_parse(raw)
+        return parsed, match.end()
+
+    @staticmethod
+    def _yaml_parse(raw: str) -> dict[str, Any] | None:
+        """Parse frontmatter via PyYAML. Returns None to signal fallback.
+        通过 PyYAML 解析 frontmatter。返回 None 表示需回退到行解析器。
+
+        Returns None when: PyYAML is not importable, the YAML is invalid, or
+        the document is not a mapping (e.g. a bare scalar). The caller then
+        uses the line-based parser.
+        以下情况返回 None：PyYAML 不可导入、YAML 非法、或文档不是映射
+        （例如裸标量）。此时调用方回退到逐行解析器。
+        """
+        try:
+            import yaml
+        except Exception:
+            return None
+        try:
+            data = yaml.safe_load(raw)
+        except yaml.YAMLError as e:
+            logger.warning(
+                "[SkillLoader] YAML frontmatter parse failed, falling back to line parser: %s", e
+            )
+            return None
+        except Exception as e:  # defensive: never crash the host / 防御：绝不崩溃宿主
+            logger.warning("[SkillLoader] Unexpected YAML error, falling back: %s", e)
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        return SkillLoader._normalize_keys(data)
+
+    @staticmethod
+    def _normalize_keys(data: dict[str, Any]) -> dict[str, Any]:
+        """Normalize spec keys and coerce list-type fields after YAML parsing.
+        YAML 解析后归一化规范键并强制列表类字段。
+
+        - ``allowed-tools`` (the only hyphenated spec key) → ``allowed_tools``
+        - ``allowed_tools`` / ``tags`` given as a string → split into a list,
+          matching the spec's space-separated form ("Bash(git:*) Read") and the
+          convenience comma-separated form. Inner ``metadata`` keys are left
+          untouched (they are not normalized).
+        - ``allowed-tools``（唯一带连字符的规范键）→ ``allowed_tools``
+        - ``allowed_tools`` / ``tags`` 为字符串时拆分为列表，兼容规范的空格分隔
+          （"Bash(git:*) Read"）与便利的逗号分隔。``metadata`` 内部键不做归一化。
+        """
+        result = dict(data)
+        if "allowed-tools" in result and "allowed_tools" not in result:
+            result["allowed_tools"] = result.pop("allowed-tools")
+        for key in ("allowed_tools", "tags"):
+            val = result.get(key)
+            if isinstance(val, str):
+                if "," in val:
+                    result[key] = [v.strip() for v in val.split(",") if v.strip()]
+                else:
+                    result[key] = val.split()
+        return result
+
+    @staticmethod
+    def _line_parse(raw: str) -> dict[str, Any]:
+        """Lightweight line-based frontmatter fallback (no PyYAML required).
+        轻量逐行 frontmatter 回退解析器（无需 PyYAML）。
+
+        Supports:
+        - Simple key: value pairs (string values)
+        - key: [JSON array] for list values (e.g., allowed_tools: ["t1", "t2"])
+        - key: space/comma separated values for list fields (e.g., allowed_tools: t1, t2)
+        - # comment lines (ignored)
+
+        Note: this fallback does NOT support YAML folded/literal scalars or
+        nested block mappings — use the YAML path for those. It exists only to
+        preserve behavior when PyYAML is absent or the YAML is malformed.
+        注意：此回退不支持 YAML 折叠/字面量标量或嵌套块映射——这些走 YAML 路径。
+        它仅用于 PyYAML 缺失或 YAML 非法时保持原有行为。
+        """
         result: dict[str, Any] = {}
 
         for line in raw.split("\n"):
@@ -192,7 +274,7 @@ class SkillLoader:
                 value_str = value_str[1:-1]
             result[key] = value_str
 
-        return result, match.end()
+        return result
 
     @staticmethod
     def _validate_name(name: str, dir_name: str) -> str | None:

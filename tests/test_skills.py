@@ -682,3 +682,250 @@ class TestReActEngineToolFilter:
         engine.set_allowed_tools([])
         assert len(engine.tools) == 2
         assert len(engine.tool_schemas) == 2
+
+
+# ======================================================================
+# v20 Fix 1: YAML frontmatter features (folded/literal scalars, nested maps)
+# v20 修复 1：YAML frontmatter 特性（折叠/字面量标量、嵌套映射）
+# ======================================================================
+
+class TestFrontmatterYAMLFeatures:
+    """Real-YAML parsing of constructs the old line parser could not handle."""
+
+    def test_folded_scalar_description(self):
+        """`description: >` folded scalar yields the full joined text, not '>'."""
+        content = (
+            "---\n"
+            "name: demo\n"
+            "description: >\n"
+            "  Review Python code for bugs and security issues.\n"
+            "  Use when asked to review or audit Python code.\n"
+            "---\n\nBody"
+        )
+        result, _ = SkillLoader._parse_frontmatter(content)
+        assert result["description"].startswith("Review Python code for bugs")
+        assert "audit Python code" in result["description"]
+        assert result["description"] != ">"
+
+    def test_literal_scalar_description(self):
+        """`description: |` literal block scalar is parsed as multi-line text."""
+        content = (
+            "---\n"
+            "name: demo\n"
+            "description: |\n"
+            "  Line one.\n"
+            "  Line two.\n"
+            "---\n\nBody"
+        )
+        result, _ = SkillLoader._parse_frontmatter(content)
+        assert "Line one." in result["description"]
+        assert "Line two." in result["description"]
+
+    def test_nested_metadata_block(self):
+        """Nested `metadata:` block mapping is parsed into a dict, not dropped."""
+        content = (
+            "---\n"
+            "name: demo\n"
+            "description: A demo skill\n"
+            "metadata:\n"
+            "  author: manus-demo\n"
+            "  version: \"1.0\"\n"
+            "allowed-tools: web_search fetch_url\n"
+            "---\n\nBody"
+        )
+        result, _ = SkillLoader._parse_frontmatter(content)
+        assert isinstance(result["metadata"], dict)
+        assert result["metadata"]["author"] == "manus-demo"
+        assert result["metadata"]["version"] == "1.0"
+        # hyphenated spec key normalized + space-separated split
+        assert result["allowed_tools"] == ["web_search", "fetch_url"]
+        # nested keys must NOT leak to top level
+        assert "author" not in result
+        assert "version" not in result
+
+    def test_description_with_colon_not_polluted(self):
+        """A description containing a colon stays one value (no stray keys)."""
+        content = (
+            "---\n"
+            "name: demo\n"
+            "description: \"Use when: researching a topic online\"\n"
+            "---\n\nBody"
+        )
+        result, _ = SkillLoader._parse_frontmatter(content)
+        assert result["description"] == "Use when: researching a topic online"
+        assert "Use when" not in result  # not turned into a key
+
+    def test_malformed_yaml_falls_back_to_line_parser(self):
+        """Invalid YAML degrades to the line parser instead of crashing."""
+        content = (
+            "---\n"
+            "name: demo\n"
+            "description: [unclosed\n"
+            "foo: bar\n"
+            "---\n\nBody"
+        )
+        # Must not raise; line parser still extracts simple key:value pairs.
+        result, body_start = SkillLoader._parse_frontmatter(content)
+        assert result.get("name") == "demo"
+        assert result.get("foo") == "bar"
+        assert body_start > 0
+
+    def test_full_scan_with_folded_description(self, tmp_path):
+        """End-to-end: a skill authored with a folded description is discoverable."""
+        skill_dir = tmp_path / "folded-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: folded-skill\n"
+            "description: >\n"
+            "  Does something useful across multiple lines.\n"
+            "  Activate for the useful thing.\n"
+            "metadata:\n"
+            "  author: tester\n"
+            "---\n\n# Body\n",
+            encoding="utf-8",
+        )
+        skill = SkillLoader._scan_skill_dir(str(skill_dir))
+        assert skill is not None
+        assert skill.meta.name == "folded-skill"
+        assert "Does something useful" in skill.meta.description
+        assert skill.meta.metadata.get("author") == "tester"
+
+
+# ======================================================================
+# v20 Fix 2 + Fix 5: skill tool-filter union + parallel-DAG guard
+# v20 修复 2 + 修复 5：技能工具过滤并集 + 并行 DAG 防护
+# ======================================================================
+
+class TestSkillToolFilterUnionAndParallelGuard:
+    """Exercise OrchestratorAgent._apply_skill_tool_filter in isolation.
+
+    The method only touches a handful of attributes on ``self``, so we bind it
+    to a lightweight SimpleNamespace stand-in (avoids constructing a full
+    OrchestratorAgent + LLMClient).
+    """
+
+    def _build_fixture(self):
+        import types
+        from react.engine import ReActEngine
+        from tools.web_search import WebSearchTool
+        from tools.fetch_url import FetchUrlTool
+        from tools.code_executor import CodeExecutorTool
+        from tools.file_ops import FileOpsTool
+
+        # Two skills with disjoint allowed_tools
+        skill_a = SkillDef(
+            meta=SkillMeta(name="skill-a", description="A", allowed_tools=["web_search", "fetch_url"]),
+            skill_dir="/tmp/skill-a", full_content="A",
+        )
+        skill_b = SkillDef(
+            meta=SkillMeta(name="skill-b", description="B", allowed_tools=["execute_python"]),
+            skill_dir="/tmp/skill-b", full_content="B",
+        )
+        registry = SkillRegistry()
+        registry.register(skill_a)
+        registry.register(skill_b)
+
+        activation_tool = SkillActivationTool(registry=registry)
+
+        tools = [
+            WebSearchTool(), FetchUrlTool(), CodeExecutorTool(), FileOpsTool(),
+            activation_tool,
+        ]
+        engine = ReActEngine(llm_client=None, tools=tools, agent_name="exec")
+
+        fake_self = types.SimpleNamespace(
+            _skill_activation_tool=activation_tool,
+            _skill_registry=registry,
+            executor_agent=types.SimpleNamespace(
+                tools={t.name: t for t in tools},
+                _react_engine=engine,
+            ),
+            emergent_planner=types.SimpleNamespace(_react_engine=None),
+            goal_driven_planner=None,
+            _on_event=lambda *a: None,
+            _active_skill_tools=None,
+        )
+        return fake_self, activation_tool, engine
+
+    def test_union_across_active_skills(self):
+        """Activating skill-b after skill-a keeps skill-a's tools (no last-wins drop)."""
+        from agents.orchestrator import OrchestratorAgent
+
+        fake_self, activation_tool, engine = self._build_fixture()
+        # Both skills are active (skill-a then skill-b) — activation order already applied.
+        activation_tool._active_skills = ["skill-a", "skill-b"]
+
+        # Simulate skill-b's activation triggering the filter callback.
+        OrchestratorAgent._apply_skill_tool_filter(fake_self, ["execute_python"])
+
+        names = set(engine.tools.keys())
+        # skill-a's tools must survive the union
+        assert "web_search" in names
+        assert "fetch_url" in names
+        # skill-b's tool present
+        assert "execute_python" in names
+        # activate_skill meta-tool always preserved
+        assert "activate_skill" in names
+        # tool NOT in any active skill's allowed_tools is filtered out
+        assert "file_ops" not in names
+
+    def test_single_skill_filter(self):
+        """One active skill restricts to its allowed_tools + activate_skill."""
+        from agents.orchestrator import OrchestratorAgent
+
+        fake_self, activation_tool, engine = self._build_fixture()
+        activation_tool._active_skills = ["skill-a"]
+        OrchestratorAgent._apply_skill_tool_filter(fake_self, ["web_search", "fetch_url"])
+
+        names = set(engine.tools.keys())
+        assert names == {"web_search", "fetch_url", "activate_skill"}
+
+    def test_parallel_dag_skips_engine_mutation(self, monkeypatch):
+        """With DAG_SERIAL_EXECUTION=false the shared engine tool set is untouched."""
+        from agents.orchestrator import OrchestratorAgent
+
+        monkeypatch.setattr(config, "DAG_SERIAL_EXECUTION", False)
+        fake_self, activation_tool, engine = self._build_fixture()
+        events = []
+        fake_self._on_event = lambda ev, data=None: events.append((ev, data))
+        activation_tool._active_skills = ["skill-a"]
+
+        full_before = set(engine.tools.keys())
+        OrchestratorAgent._apply_skill_tool_filter(fake_self, ["web_search", "fetch_url"])
+
+        # Engine NOT narrowed (all tools still present)
+        assert set(engine.tools.keys()) == full_before
+        # A skip event was emitted
+        assert any(ev == "skill_tool_filter_skipped" for ev, _ in events)
+
+
+# ======================================================================
+# v20 Fix 3: distiller writes YAML-safe frontmatter that round-trips
+# v20 修复 3：蒸馏器写出可往返的 YAML 安全 frontmatter
+# ======================================================================
+
+class TestDistillerFrontmatterRoundtrip:
+    def test_render_frontmatter_roundtrips_adversarial_text(self):
+        from evolution.skill_distiller import SkillAutoDistiller
+
+        fm = {
+            "name": "auto-research-ai",
+            "description": 'Research: AI trends, with "quotes" and: colons\nand a newline',
+            "metadata": {
+                "author": "auto-distilled",
+                "version": "1.0",
+                "source": "self-evolution",
+                "distilled_from": 'Find: X: Y "z"',
+            },
+        }
+        rendered = SkillAutoDistiller._render_frontmatter(fm)
+        full = "---\n" + rendered + "---\n\n# Body\n"
+        parsed, body_start = SkillLoader._parse_frontmatter(full)
+
+        assert parsed["name"] == "auto-research-ai"
+        assert parsed["description"].startswith("Research: AI trends")
+        assert isinstance(parsed["metadata"], dict)
+        assert parsed["metadata"]["source"] == "self-evolution"
+        assert parsed["metadata"]["distilled_from"] == 'Find: X: Y "z"'
+        assert body_start > 0

@@ -41,18 +41,14 @@ _SUMMARY_TRUNCATE = 300
 _TRAJECTORY_ITEMS = 8
 _TRAJECTORY_ITEM_CHARS = 120
 
-# SKILL.md 模板 / SKILL.md template
-_SKILL_MD_TEMPLATE = """\
----
-name: {name}
-description: {description}
-metadata:
-  author: auto-distilled
-  version: "1.0"
-  source: self-evolution
-  distilled_from: {task_pattern}
----
-
+# SKILL.md body template (frontmatter rendered separately as safe YAML).
+# SKILL.md 正文模板（frontmatter 单独渲染为安全 YAML）。
+# NOTE: frontmatter is NOT f-string-formatted here — distilled descriptions and
+# task patterns come from raw task text that can contain colons, quotes, and
+# newlines, which would produce invalid YAML. See _render_frontmatter().
+# 注意：frontmatter 不在此处用 f-string 拼接——蒸馏的 description / task_pattern
+# 来自含冒号、引号、换行的原始任务文本，直接拼接会产生非法 YAML。见 _render_frontmatter()。
+_SKILL_MD_BODY_TEMPLATE = """\
 # {title}
 
 ## Workflow
@@ -335,6 +331,33 @@ class SkillAutoDistiller:
     # Write SKILL.md to disk / 写入 SKILL.md 文件
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _render_frontmatter(fm: dict[str, Any]) -> str:
+        """Render a frontmatter dict as valid YAML (text after opening ``---``).
+        将 frontmatter 字典渲染为合法 YAML（开头 ``---`` 之后的文本）。
+
+        Uses ``yaml.safe_dump`` when PyYAML is available. Falls back to
+        JSON-quoted scalars (which are valid YAML flow scalars) so the file is
+        always parseable even without PyYAML — guaranteeing the distilled skill
+        can be read back by SkillLoader.
+        优先用 ``yaml.safe_dump``；PyYAML 不可用时回退到 JSON 引号标量
+        （是合法的 YAML flow 标量），保证无 PyYAML 也能生成可解析文件。
+        """
+        try:
+            import yaml
+            return yaml.safe_dump(fm, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        except Exception:
+            import json as _json
+            lines: list[str] = []
+            for k, v in fm.items():
+                if isinstance(v, dict):
+                    lines.append(f"{k}:")
+                    for kk, vv in v.items():
+                        lines.append(f"  {kk}: {_json.dumps(vv, ensure_ascii=False)}")
+                else:
+                    lines.append(f"{k}: {_json.dumps(v, ensure_ascii=False)}")
+            return "\n".join(lines) + "\n"
+
     def _write_skill_file(self, skill_data: dict[str, Any], task: str) -> SkillDef | None:
         """
         将蒸馏结果写入 .agents/skills/auto-{name}/SKILL.md。
@@ -352,14 +375,26 @@ class SkillAutoDistiller:
             return None
 
         skill_md_path = os.path.join(skill_dir, "SKILL.md")
-        content = _SKILL_MD_TEMPLATE.format(
-            name=name,
-            description=skill_data["description"],
-            task_pattern=skill_data.get("task_pattern", task[:_TASK_TRUNCATE]),
+        # Render frontmatter as safe YAML so colons/quotes/newlines in the
+        # distilled description or task pattern cannot produce invalid YAML
+        # (which the v20 YAML reader would reject). / 以安全 YAML 渲染 frontmatter，
+        # 使蒸馏 description / task_pattern 中的冒号、引号、换行不会产生非法 YAML。
+        frontmatter = {
+            "name": name,
+            "description": skill_data["description"],
+            "metadata": {
+                "author": "auto-distilled",
+                "version": "1.0",
+                "source": "self-evolution",
+                "distilled_from": skill_data.get("task_pattern", task[:_TASK_TRUNCATE]),
+            },
+        }
+        body = _SKILL_MD_BODY_TEMPLATE.format(
             title=skill_data.get("title", name.replace("-", " ").title()),
             workflow=skill_data.get("workflow", "1. Follow the standard approach"),
             gotchas=skill_data.get("gotchas", "None identified"),
         )
+        content = f"---\n{self._render_frontmatter(frontmatter)}---\n\n{body}"
 
         try:
             with open(skill_md_path, "w", encoding="utf-8") as f:

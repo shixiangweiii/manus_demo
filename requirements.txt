@@ -2,6 +2,7 @@ openai
 pydantic
 rich
 python-dotenv
+pyyaml>=6.0          # v20: SKILL.md frontmatter parsing / 技能 frontmatter 解析
 
 # Tracing (v7)
 opentelemetry-api>=1.27.0

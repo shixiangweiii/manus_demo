@@ -827,9 +827,16 @@ def aggregate_results(results: list[TaskEvaluationResult]) -> AggregatedMetrics:
     if should_not_activate:
         falsely_activated = sum(1 for r in should_not_activate if r.execution.skill_activations > 0)
         skill_false_act_rate = falsely_activated / len(should_not_activate)
-    # Token overhead: skill tasks vs non-skill tasks avg token comparison
-    skill_task_tokens = [r.efficiency.total_tokens for r in results if r.skill_metrics and r.efficiency.total_tokens > 0]
-    non_skill_task_tokens = [r.efficiency.total_tokens for r in results if not r.skill_metrics and r.efficiency.total_tokens > 0]
+    # Token overhead: actually-activated tasks vs not-activated tasks.
+    # Select by real activation (skill_activations > 0), NOT by skill_metrics truthiness
+    # — skill_metrics is populated for every task carrying skill ground-truth (including
+    # should-not-activate and false-negative tasks that never ran a skill), which would
+    # otherwise compare "suite membership" instead of "activation overhead".
+    # 按真实激活（skill_activations > 0）选择，而非 skill_metrics 真值——后者对所有带 skill
+    # ground-truth 的任务都非空（含"不应激活"和"应激活却没激活"的任务），会把度量变成
+    # "评测集成员 vs 其他"而非"激活开销"。
+    skill_task_tokens = [r.efficiency.total_tokens for r in results if r.execution.skill_activations > 0 and r.efficiency.total_tokens > 0]
+    non_skill_task_tokens = [r.efficiency.total_tokens for r in results if r.execution.skill_activations == 0 and r.efficiency.total_tokens > 0]
     if non_skill_task_tokens:
         skill_avg = sum(skill_task_tokens) / len(skill_task_tokens) if skill_task_tokens else 0
         non_skill_avg = sum(non_skill_task_tokens) / len(non_skill_task_tokens)

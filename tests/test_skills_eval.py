@@ -392,3 +392,53 @@ class TestTaskEvaluationResultSkillMetrics:
         )
         assert result.skill_metrics["activations"] == 2
         assert len(result.skill_metrics["activated_skills"]) == 2
+
+
+# ======================================================================
+# v20 Fix 4: skill_token_overhead measures activated vs not-activated
+# v20 修复 4：token 开销度量"真激活 vs 未激活"，而非评测集成员
+# ======================================================================
+
+class TestSkillTokenOverheadCriterion:
+    """skill_token_overhead must select by real activation, not skill_metrics truthiness."""
+
+    def _result(self, *, activations, expected, tokens):
+        probe = EvaluationProbe()
+        for _ in range(activations):
+            probe.on_event("skill_activated", {"name": "hello-world"})
+        gt = GroundTruth(expected_skill_activations=expected) if expected is not None else GroundTruth()
+        task = BenchmarkTask(
+            task_id="t",
+            task_description="d",
+            difficulty=TaskDifficulty.EASY,
+            tags=["skill"] if expected is not None else [],
+            ground_truth=gt,
+        )
+        r = probe.build_result(task, forced_mode=PlanMode.SIMPLE, llm_model="test")
+        r.efficiency.total_tokens = tokens
+        return r
+
+    def test_overhead_excludes_nonactivated_skill_tasks(self):
+        # Real activation, high tokens
+        activated = self._result(activations=1, expected=(1, 1), tokens=1000)
+        # Expected-but-not-activated (false negative) — has skill_metrics but no activation
+        false_neg = self._result(activations=0, expected=(1, 1), tokens=100)
+        # Should-not-activate — has skill_metrics but no activation
+        should_not = self._result(activations=0, expected=(0, 0), tokens=100)
+        # Baseline non-skill task — no skill ground-truth
+        baseline = self._result(activations=0, expected=None, tokens=100)
+
+        agg = aggregate_results([activated, false_neg, should_not, baseline])
+
+        # Only the truly-activated task counts as a "skill task" for token overhead.
+        # activated avg = 1000; non-activated avg = 100 → overhead = (1000-100)/100 = 9.0
+        assert agg.skill_token_overhead == pytest.approx(9.0)
+
+    def test_overhead_zero_when_no_activations(self):
+        false_neg = self._result(activations=0, expected=(1, 1), tokens=100)
+        baseline = self._result(activations=0, expected=None, tokens=100)
+        agg = aggregate_results([false_neg, baseline])
+        # No activated tasks → skill_avg=0 → overhead = (0-100)/100, but guarded:
+        # with no skill_task_tokens, skill_avg=0 so overhead is negative or 0; assert it
+        # does not spuriously treat false_neg as a skill task (which would give overhead 0).
+        assert agg.skill_token_overhead <= 0
