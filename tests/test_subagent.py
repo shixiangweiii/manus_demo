@@ -577,6 +577,39 @@ class TestSubAgentTool:
             tool_names = [t.name for t in tools_arg]
             assert "subagent" not in tool_names
 
+            data = json.loads(result)
+            assert data["requested_tool_whitelist"] == ["search", "subagent", "nonexistent"]
+            assert data["tool_whitelist"] == ["search"]
+
+    @pytest.mark.asyncio
+    async def test_ask_user_filtered_from_parent_visible_whitelist(self):
+        """Parent-visible SubAgent JSON reports the resolved whitelist."""
+        tool = self._make_subagent_tool(
+            available_tools={
+                "ask_user": _make_tool("ask_user"),
+                "execute_python": _make_tool("execute_python"),
+            },
+        )
+
+        with patch("agents.subagent.SubAgent") as MockSubAgent:
+            mock_result = _make_subagent_result(summary=SubAgentSummary(findings="ASK_USER_BLOCKED"))
+            mock_instance = MagicMock()
+            mock_instance.run = AsyncMock(return_value=mock_result)
+            MockSubAgent.return_value = mock_instance
+
+            result = await tool.execute(
+                task_description="test",
+                tool_whitelist=["ask_user", "execute_python"],
+            )
+
+            tools_arg = MockSubAgent.call_args.kwargs.get("tools", [])
+            assert [t.name for t in tools_arg] == ["execute_python"]
+
+            data = json.loads(result)
+            assert data["requested_tool_whitelist"] == ["ask_user", "execute_python"]
+            assert data["tool_whitelist"] == ["execute_python"]
+            assert "ask_user" not in data["tool_whitelist"]
+
     @pytest.mark.asyncio
     async def test_sandbox_dir_creation(self):
         """Anti-pattern #4: SubAgentTool creates isolated sandbox dir."""
@@ -602,8 +635,16 @@ class TestSubAgentTool:
             MockSubAgent.return_value = mock_instance
 
             result = await tool.execute(task_description="test")
-            data = json.loads(result)
+            from react.tool_call_helpers import classify_result
+
+            is_error, is_rate_limited = classify_result(result)
+            assert is_error is True
+            assert is_rate_limited is False
+            assert result.startswith("Error:")
+
+            data = json.loads(result.removeprefix("Error: ").strip())
             assert "issues" in data
+            assert "SubAgent error: crash" in data["issues"]
 
 
 # ======================================================================
@@ -1084,10 +1125,12 @@ class TestP0TokenBudgetCircuitBreaker:
             on_event=lambda e, d: events.append((e, d)),
         )
 
-        # Token records that exceed budget
+        # Own-token accounting is scoped by caller_tag. Untagged legacy records
+        # and sibling SubAgent records must not trip SA-1's budget.
         high_token_records = [
-            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=10),
-            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=60),
+            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=999),
+            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=999, caller_tag="SubAgent-2"),
+            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=60, caller_tag="SA-1"),
         ]
         client.get_call_records.return_value = high_token_records
 
@@ -1103,7 +1146,8 @@ class TestP0TokenBudgetCircuitBreaker:
             # But since we're mocking execute, we need to simulate differently
             pass
 
-        # Direct test: _on_react_iteration raises when budget exceeded (index range method)
+        # Direct test: _on_react_iteration raises when this SubAgent's own
+        # caller_tag-scoped records exceed the budget.
         agent._records_before = 0
         with pytest.raises(SubAgentTokenExhausted):
             agent._on_react_iteration(1, [])
@@ -1451,17 +1495,20 @@ class TestP2SuppressionRules:
 class TestP2TokenIndexRange:
 
     @pytest.mark.asyncio
-    async def test_tokens_used_from_record_index_range(self):
-        """P2-12: tokens_used computed via record index range, not delta."""
+    async def test_tokens_used_from_caller_tag_scoped_records(self):
+        """P2-12: tokens_used uses record index range + caller_tag scope."""
         from agents.subagent import SubAgent
         client = _make_llm_client()
-        # Simulate pre-existing records + new ones during run
+        # Simulate pre-existing records + current/sibling records during run.
+        # _records_before excludes old records; caller_tag excludes sibling work.
         pre_records = [
-            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=100),
+            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=100, caller_tag="SA-1"),
         ]
         all_records = pre_records + [
-            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=50),
-            LLMCallRecord(call_type="chat_json", prompt_summary="", total_tokens=30),
+            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=50, caller_tag="SA-1"),
+            LLMCallRecord(call_type="chat_json", prompt_summary="", total_tokens=30, caller_tag="SA-1"),
+            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=999, caller_tag="SubAgent-2"),
+            LLMCallRecord(call_type="chat", prompt_summary="", total_tokens=999),
         ]
 
         call_count = [0]
@@ -1485,7 +1532,8 @@ class TestP2TokenIndexRange:
             mock_exec.return_value = _make_step_result(success=True, output="done", iterations_completed=1)
             result = await agent.run()
 
-        # Should only count new records (50 + 30 = 80), not pre-existing ones
+        # Should only count this SubAgent's new records (50 + 30 = 80), not
+        # pre-existing, sibling, or untagged records.
         assert result.tokens_used == 80
 
 

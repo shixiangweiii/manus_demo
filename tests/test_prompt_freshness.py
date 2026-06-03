@@ -157,6 +157,21 @@ class TestHitlDoubleGating:
         finally:
             set_hitl_runtime_enabled(None)
 
+    def test_planner_warns_when_hitl_configured_but_runtime_disabled(self):
+        """Non-interactive runs should not plan ask_user steps."""
+        from agents.planner import PlannerAgent
+        from agents.prompt_utils import set_hitl_runtime_enabled
+
+        set_hitl_runtime_enabled(False)
+        try:
+            with patch.object(config, "HITL_ENABLED", True):
+                agent = PlannerAgent(llm_client=_make_llm_client())
+                assert "ask_user" in agent.system_prompt
+                assert "NOT available in this run" in agent.system_prompt
+                assert "Do not create plan steps that call ask_user" in agent.system_prompt
+        finally:
+            set_hitl_runtime_enabled(None)
+
     def test_hitl_falls_back_to_config_when_override_unset(self):
         from agents.executor import ExecutorAgent
         from agents.prompt_utils import set_hitl_runtime_enabled

@@ -355,6 +355,28 @@ class TestSearch:
         results = populated_store.search(MemorySearchQuery(query="量子计算xyz"))
         assert len(results) == 0
 
+    def test_cjk_stopword_bigrams_no_false_positive(self, store):
+        """P3: unrelated Chinese tasks must not recall each other on
+        connective bigrams alone (e.g. '基本'/'用法')."""
+        store.add(AgenticMemoryRecord(
+            content="Python的GIL是什么？简要解释",
+            summary="GIL 全局解释器锁",
+            confidence=0.9,
+        ))
+        # Different topic, overlaps only on stopword bigrams like 用法/基本
+        results = store.search(MemorySearchQuery(query="Java的基本用法是什么"))
+        assert len(results) == 0
+
+    def test_meaningful_cjk_overlap_still_recalls(self, store):
+        """Genuine topical overlap (装饰器) must still be recalled."""
+        store.add(AgenticMemoryRecord(
+            content="Python装饰器的实现原理",
+            summary="装饰器语法糖",
+            confidence=0.9,
+        ))
+        results = store.search(MemorySearchQuery(query="Python装饰器怎么用"))
+        assert len(results) > 0
+
 
 # ======================================================================
 # Scoring detail tests
@@ -511,3 +533,15 @@ class TestExtractTagsChinese:
         # "web" must NOT match inside "webhook" (word-boundary preserved for ASCII).
         tags = AgenticMemoryService._extract_tags("configure a webhook endpoint")
         assert "web" not in tags
+
+    def test_ascii_keyword_adjacent_to_cjk(self):
+        """P3: ASCII keyword immediately followed by a CJK char must still match.
+        re.ASCII makes the CJK char a non-word boundary so \\bpython\\b hits."""
+        from memory.service import AgenticMemoryService
+        tags = AgenticMemoryService._extract_tags("Python的GIL是什么？简要解释")
+        assert "python" in tags
+
+    def test_ascii_keyword_cjk_on_both_sides(self):
+        from memory.service import AgenticMemoryService
+        tags = AgenticMemoryService._extract_tags("用python写一个脚本")
+        assert "python" in tags

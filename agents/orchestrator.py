@@ -236,7 +236,11 @@ class OrchestratorAgent:
                 from memory.agentic_store import AgenticMemoryStore
                 from memory.service import AgenticMemoryService
                 store = AgenticMemoryStore()
-                self._agentic_memory_service = AgenticMemoryService(store)
+                # Pass the shared LLMClient so LLM-assisted consolidation works
+                # even when main.py didn't build the service. / 注入共享 LLMClient。
+                self._agentic_memory_service = AgenticMemoryService(
+                    store, llm_client=self.llm_client
+                )
             self._agentic_memory_service._store.migrate_from_legacy()
             logger.info("[Orchestrator] Agentic Memory (v15) enabled")
 
@@ -904,7 +908,17 @@ class OrchestratorAgent:
                     if not any(d in failed_ids for d in s.dependencies)
                 ]
                 if not independent_remaining:
-                    logger.info("[Orchestrator] No independent steps remaining after failure, breaking early")
+                    # 区分提前终止的真实原因，避免成功任务也打印 "after failure" 的误导日志
+                    # Distinguish the real reason for breaking so successful runs don't log "after failure".
+                    if failed_ids and remaining:
+                        # 仍有 PENDING 步骤，但全部依赖已失败步骤 → 真正的失败提前终止
+                        logger.info("[Orchestrator] No independent steps remaining after failure, breaking early")
+                    elif failed_ids:
+                        # 计划已走完，但过程中有步骤失败/跳过
+                        logger.info("[Orchestrator] All steps processed (some failed)")
+                    else:
+                        # 全部步骤成功完成
+                        logger.info("[Orchestrator] All steps completed successfully")
                     break
 
             self._emit("phase", "Reflecting on results...")
@@ -1177,7 +1191,7 @@ class OrchestratorAgent:
 
             if reflection.passed:
                 self._record_outcome(True, reflection, results)
-                return final_output  # 反思通过，直接返回结果
+                return await self._compile_dag_answer(dag.state.task, results)
 
             # 找出问题节点（FAILED 或 SKIPPED），准备局部重规划
             # SKIPPED 节点代表因条件不满足而跳过的子任务，同样需要重规划
@@ -1206,7 +1220,7 @@ class OrchestratorAgent:
                 logger.warning("No replan triggered (attempt %d/%d, %d problematic nodes). Returning best effort.",
                     attempt+1, self.max_replan+1, len(problematic_nodes))
                 self._record_outcome(False, reflection, results)
-                return final_output  # 达到最大重规划次数，返回当前最佳结果
+                return await self._compile_dag_answer(dag.state.task, results)
 
         self._record_outcome(False, self._last_reflection, [])
         return "Task could not be completed after maximum attempts."
@@ -1215,6 +1229,18 @@ class OrchestratorAgent:
     # Helpers
     # 辅助方法
     # ------------------------------------------------------------------
+
+    async def _compile_dag_answer(self, task: str, results: list[StepResult]) -> str:
+        """
+        Compile DAG action results into the final user-facing answer.
+        将 DAG ACTION 节点结果合成为最终用户答案。
+
+        DAGExecutor._compile_output intentionally keeps the node-by-node
+        execution transcript for reflection/debugging. The Orchestrator should
+        not expose that transcript directly as the final answer because it can
+        violate the user's requested output format.
+        """
+        return await self._compile_answer(task, results)
 
     @staticmethod
     def _node_to_result(node_id: str, dag: TaskDAG):

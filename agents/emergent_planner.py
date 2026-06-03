@@ -449,12 +449,21 @@ class EmergentPlannerAgent(BaseAgent):
             f"task (Chinese task → Chinese descriptions; English task → "
             f"English descriptions).\n\n"
             f"{parallel_rule}"
+            f"TODO IDs: items are numbered by their position in the "
+            f"\"todos\" array starting at 1 (first item = 1, second = 2, ...). "
+            f'"dependencies" MUST be a list of these integer IDs ([] = no '
+            f"prerequisites). Reference ONLY earlier items by their integer "
+            f"number; never invent string IDs like \"todo_0\".\n"
             f"Respond with JSON:\n"
             f"{{\n"
             f'  "todos": [\n'
             f"    {{\n"
             f'      "description": "First TODO item",\n'
-            f'      "dependencies": []  // list of prerequisite TODO IDs (empty for initial items)\n'
+            f'      "dependencies": []\n'
+            f"    }},\n"
+            f"    {{\n"
+            f'      "description": "Second TODO item that needs the first one done",\n'
+            f'      "dependencies": [1]  // integer IDs of prerequisite TODOs\n'
             f"    }}\n"
             f"  ]\n"
             f"}}"
@@ -484,8 +493,19 @@ class EmergentPlannerAgent(BaseAgent):
                 logger.warning("[EmergentPlanner] Failed to parse initial TODOs: %s", exc)
             for td in todo_dicts:
                 desc = (td.get("description") or "").strip()
-                if desc:
-                    self._todo_list.add_todo(description=desc, dependencies=td.get("dependencies", []))
+                if not desc:
+                    continue
+                # 与 _update_todos / goal-driven 一致：先把依赖规范化为整数并过滤无效 ID，
+                # 再 try/except 包住 add_todo（环检测会抛 ValueError），避免单条坏数据让整个进程崩溃。
+                # mirror _update_todos: coerce deps to int + filter invalid before add_todo,
+                # so a malformed dependency degrades gracefully instead of crashing init.
+                deps = self._coerce_dep_ids(td.get("dependencies", []))
+                valid_deps = [d for d in deps if d in self._todo_list.todos]
+                try:
+                    self._todo_list.add_todo(description=desc, dependencies=valid_deps)
+                except ValueError as e:
+                    logger.warning("[EmergentPlanner] Skipping initial TODO: %s", e)
+                    continue
             if self._todo_list.todos:
                 break  # got at least one actionable TODO
 
@@ -496,6 +516,30 @@ class EmergentPlannerAgent(BaseAgent):
 
         logger.info("[EmergentPlanner] Initialized TODO list with %d items", len(self._todo_list.todos))
         self._emit("todo_list_initialized", self._get_todo_summary())
+
+    @staticmethod
+    def _coerce_dep_ids(raw_deps: Any) -> list[int]:
+        """Coerce an LLM-provided dependency list into integer TODO IDs.
+        把 LLM 返回的依赖列表规范化为整数 ID：
+
+        - int → 保留
+        - 纯数字字符串（如 "2"）→ int()
+        - 其它（如 "todo_0"）→ 丢弃并 debug 记录（不猜测 0/1-based 偏移，
+          正确性由 _init_todo_list 的 prompt 约定保证）。
+        """
+        if not isinstance(raw_deps, list):
+            return []
+        result: list[int] = []
+        for dep in raw_deps:
+            if isinstance(dep, bool):  # bool 是 int 子类，显式排除
+                continue
+            if isinstance(dep, int):
+                result.append(dep)
+            elif isinstance(dep, str) and dep.strip().lstrip("-").isdigit():
+                result.append(int(dep.strip()))
+            else:
+                logger.debug("[EmergentPlanner] Dropping unparseable dependency id: %r", dep)
+        return result
 
     @staticmethod
     def _extract_todo_dicts(data: Any) -> list[dict]:

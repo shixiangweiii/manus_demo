@@ -137,7 +137,7 @@ def get_search_guidance() -> str:
 _HITL_RUNTIME_OVERRIDE: bool | None = None
 
 
-def set_hitl_runtime_enabled(enabled: bool) -> None:
+def set_hitl_runtime_enabled(enabled: bool | None) -> None:
     """Runtime override for HITL guidance injection.
 
     Set by OrchestratorAgent.__init__ based on interactive mode + config.
@@ -190,6 +190,25 @@ def get_hitl_guidance() -> str:
     return _HITL_GUIDANCE_TEMPLATE.format(
         max_prompts=config.HITL_MAX_PROMPTS_PER_TASK
     )
+
+
+_HITL_UNAVAILABLE_GUIDANCE = """
+
+## Runtime Constraint: ask_user Is Unavailable
+
+HITL is configured globally, but this run is non-interactive. The "ask_user"
+tool is NOT available in this run. Do not create plan steps that call ask_user,
+do not simulate asking the user, and do not wait for user input. If the user's
+task explicitly asks for ask_user, plan a best-effort response explaining that
+ask_user is unavailable in non-interactive mode.
+"""
+
+
+def get_hitl_unavailable_guidance() -> str:
+    """Return planning guidance when HITL is configured but runtime-disabled."""
+    if config.HITL_ENABLED and _HITL_RUNTIME_OVERRIDE is False:
+        return _HITL_UNAVAILABLE_GUIDANCE
+    return ""
 
 
 # v20 Skill activation guidance (injected when SKILLS_ENABLED=true AND skills exist)
@@ -292,6 +311,7 @@ def build_system_prompt(
     inject_location_guidance: bool = True,
     inject_search_guidance: bool = True,
     inject_hitl_guidance: bool = True,
+    inject_hitl_unavailable_guidance: bool = False,
     inject_skill_guidance: bool = True,
 ) -> str:
     """Compose a system prompt with optional context / location / search / subagent / HITL / skill guidance.
@@ -313,6 +333,8 @@ def build_system_prompt(
         inject_hitl_guidance: When True (default), append HITL (ask_user) tool
             usage guidance (only emitted if HITL_ENABLED=true). Set False for
             agents that do not call tools (e.g., Planner, Reflector).
+        inject_hitl_unavailable_guidance: When True, append a planning constraint
+            when HITL is configured but disabled by runtime mode.
         inject_skill_guidance: When True (default), append Skill activation
             tool usage guidance (only emitted if SKILLS_ENABLED=true and skills
             were discovered). Set False for agents that do not call tools.
@@ -332,6 +354,10 @@ def build_system_prompt(
         hitl_guidance = get_hitl_guidance()
         if hitl_guidance:
             parts.append(hitl_guidance)
+    if inject_hitl_unavailable_guidance:
+        unavailable_guidance = get_hitl_unavailable_guidance()
+        if unavailable_guidance:
+            parts.append(unavailable_guidance)
     if inject_skill_guidance:
         skill_guidance = get_skill_guidance()
         if skill_guidance:

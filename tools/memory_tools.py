@@ -225,7 +225,7 @@ class MemoryConsolidateTool(BaseTool):
         task_id = kwargs.get("task_id", "")
         notes = kwargs.get("notes", "")
 
-        records = self._service.consolidate_task(task_id=task_id, notes=notes)
+        records = await self._service.consolidate_task(task_id=task_id, notes=notes)
 
         if self._on_event:
             self._on_event("memory_consolidate", {

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import select
 import sys
 from typing import Any
 
@@ -70,6 +71,32 @@ console = Console()
 # (Python docs: "save a reference to the result of this function").
 # 维持 asyncio.create_task 创建的输入收集任务的强引用，防止被 GC 中断。
 _pending_input_tasks: set[asyncio.Task] = set()
+
+
+def _read_console_line_with_timeout(prompt: str, timeout: int | float | None) -> str | None:
+    """Read one console line, returning None when no input arrives before timeout.
+
+    Rich's console.input() cannot be cancelled once it is running in a worker
+    thread. HITL timeouts therefore need a timeout-aware stdin read so a stale
+    background reader does not consume the next interactive task.
+    """
+    if timeout is None:
+        return console.input(prompt)
+
+    try:
+        sys.stdin.fileno()
+    except (AttributeError, OSError):
+        return console.input(prompt)
+
+    console.print(prompt, end="")
+    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    if not ready:
+        return None
+
+    line = sys.stdin.readline()
+    if line == "":
+        return "(user cancelled)"
+    return line
 
 # Status -> Rich style mapping
 # 节点状态 -> Rich 样式映射（用于 DAG 树形可视化中的颜色标注）
@@ -666,12 +693,17 @@ def on_event(event: str, data: Any) -> None:
         async def _collect_and_resolve():
             try:
                 user_response = await asyncio.to_thread(
-                    console.input, "[bold magenta]You > [/bold magenta]"
+                    _read_console_line_with_timeout,
+                    "[bold magenta]You > [/bold magenta]",
+                    config.HITL_USER_INPUT_TIMEOUT,
                 )
+                if user_response is None or response_future.done():
+                    return
                 user_response = user_response.strip()
                 if not user_response:
                     user_response = "(no response)"
-                response_future.set_result(user_response)
+                if not response_future.done():
+                    response_future.set_result(user_response)
                 console.print("  [dim]Response sent to agent.[/dim]")
             except (EOFError, KeyboardInterrupt):
                 if not response_future.done():
@@ -786,7 +818,7 @@ async def run_interactive() -> None:
     llm_client = LLMClient()
     # 注册五个工具：网络搜索、URL页面抓取、Python 代码执行、文件读写、Shell 命令执行
     tools = await _build_tools()
-    agentic_service = _build_agentic_service()
+    agentic_service = _build_agentic_service(llm_client)
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
@@ -854,7 +886,7 @@ async def run_single(task: str) -> None:
     """
     llm_client = LLMClient()
     tools = await _build_tools()
-    agentic_service = _build_agentic_service()
+    agentic_service = _build_agentic_service(llm_client)
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
@@ -881,7 +913,7 @@ async def run_workflow_file(path: str) -> None:
 
     llm_client = LLMClient()
     tools = await _build_tools()
-    agentic_service = _build_agentic_service()
+    agentic_service = _build_agentic_service(llm_client)
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,
@@ -967,14 +999,15 @@ def _start_mcp_server_background(tools: list, agentic_service, llm_client=None) 
         return None
 
 
-def _build_agentic_service():
+def _build_agentic_service(llm_client=None):
     """Build AgenticMemoryService if memory tools are enabled (v15).
     Returns the service instance or None. The same instance is passed to
-    OrchestratorAgent so tools and orchestrator share one Store."""
+    OrchestratorAgent so tools and orchestrator share one Store.
+    llm_client is forwarded so LLM-assisted consolidation (v15.x) can run."""
     if config.MEMORY_TOOLS_ENABLED and config.AGENTIC_MEMORY_ENABLED:
         from memory.agentic_store import AgenticMemoryStore
         from memory.service import AgenticMemoryService
-        return AgenticMemoryService(AgenticMemoryStore())
+        return AgenticMemoryService(AgenticMemoryStore(), llm_client=llm_client)
     return None
 
 
@@ -1007,7 +1040,7 @@ async def run_resume(task_id: str) -> None:
     """Resume a checkpointed task. / 恢复一个 checkpointed 任务。"""
     llm_client = LLMClient()
     tools = await _build_tools()
-    agentic_service = _build_agentic_service()
+    agentic_service = _build_agentic_service(llm_client)
     orchestrator = OrchestratorAgent(
         llm_client=llm_client,
         tools=tools,

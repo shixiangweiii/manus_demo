@@ -18,6 +18,8 @@ from typing import Any
 import config
 from schema import MemoryEntry
 
+from memory.text_utils import bilingual_tokenize
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,14 +87,17 @@ class LongTermMemory:
         使用关键词重叠度评分检索最相关的记忆条目。
         简单但有效的 demo 实现：统计查询词出现在每条记忆
         （task + summary + learnings）中的次数作为相关性分数。
+
+        使用双语分词（英文 word + 中文 bigram），与 AgenticMemoryStore 一致，
+        修复中文无空格整句变单 token 导致召回恒为空的问题。
         """
-        query_words = set(query.lower().split())  # 将查询词拆分为词集合
+        query_words = bilingual_tokenize(query)  # 双语分词后的查询词集合
         scored: list[tuple[float, MemoryEntry]] = []
 
         for entry in self._entries:
             # 将记忆条目的所有文本字段合并后与查询词做交集
-            text = f"{entry.task} {entry.summary} {' '.join(entry.learnings)}".lower()
-            entry_words = set(text.split())
+            text = f"{entry.task} {entry.summary} {' '.join(entry.learnings)}"
+            entry_words = bilingual_tokenize(text)
             overlap = len(query_words & entry_words)  # 词汇重叠数量作为相关性分数
             if overlap > 0:
                 scored.append((overlap, entry))

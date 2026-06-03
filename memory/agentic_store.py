@@ -9,7 +9,6 @@ import json
 import logging
 import math
 import os
-import re
 import time
 from typing import Any
 
@@ -23,6 +22,10 @@ from memory.models import (
     MemorySearchResult,
     MemoryStatus,
 )
+# Shared bilingual tokenizer (reused by LongTermMemory too) / 共享双语分词器
+# Kept exported as `_tokenize` for backward-compatible imports & tests.
+# 保留 `_tokenize` 名以兼容既有 import 与单测。
+from memory.text_utils import bilingual_tokenize as _tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -37,23 +40,15 @@ W_LINK = 0.05
 # Recency decay lambda (per day) / 时间衰减系数（每天）
 RECENCY_LAMBDA = 0.1
 
-
-def _tokenize(text: str) -> set[str]:
-    """
-    Bilingual tokenizer: English word tokens + Chinese character bigrams.
-    双语分词：英文按空格分词，中文按字符 bigram 分词。
-    """
-    tokens: set[str] = set()
-    # English tokens / 英文分词
-    en_words = re.findall(r"[a-zA-Z0-9]+", text.lower())
-    tokens.update(en_words)
-
-    # Chinese bigrams / 中文 bigram
-    cn_chars = re.findall(r"[一-鿿]", text)
-    for i in range(len(cn_chars) - 1):
-        tokens.add(f"{cn_chars[i]}{cn_chars[i + 1]}")
-
-    return tokens
+# Common CJK connective/function bigrams that carry little semantic weight.
+# Subtracting these before keyword scoring reduces false-positive recall
+# (e.g. unrelated tasks overlapping only on "基本"/"用法").
+# 常见无实义的中文连接/功能 bigram，匹配前减去以降低假阳性召回。
+_CJK_STOPWORD_BIGRAMS = frozenset({
+    "什么", "简要", "用法", "基本", "进行", "方法", "如何", "怎么",
+    "是什", "于多", "有什", "影响", "区别", "说明", "解释", "实现",
+    "使用", "可以", "需要", "一个", "这个", "那个", "的基", "的语",
+})
 
 
 class AgenticMemoryStore:
@@ -180,7 +175,9 @@ class AgenticMemoryStore:
         Weights: keyword=0.50, tag=0.15, confidence=0.15, recency=0.10, importance=0.05, link=0.05
         """
         now = time.time()
-        query_tokens = _tokenize(query.query)
+        # Drop low-signal CJK function bigrams so unrelated tasks don't recall
+        # each other on connective words alone. / 去掉无实义中文连接 bigram，避免靠连接词互相召回。
+        query_tokens = _tokenize(query.query) - _CJK_STOPWORD_BIGRAMS
         query_tags = {t.lower() for t in query.tags}
 
         candidates: list[MemorySearchResult] = []
@@ -203,7 +200,7 @@ class AgenticMemoryStore:
             # --- Scoring / 评分 ---
             # Keyword match / 关键词匹配
             record_text = f"{record.content} {record.summary} {' '.join(record.tags)}"
-            record_tokens = _tokenize(record_text)
+            record_tokens = _tokenize(record_text) - _CJK_STOPWORD_BIGRAMS
             matched = query_tokens & record_tokens
             keyword_score = len(matched) / max(len(query_tokens), 1)
 

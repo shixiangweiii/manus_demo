@@ -210,3 +210,79 @@ class TestMemoryConsolidateTool:
         data = json.loads(result)
         assert data["status"] == "consolidated"
         assert data["records_created"] == 0
+
+
+# ======================================================================
+# LLM-assisted consolidation (MEMORY_LLM_CONSOLIDATION_ENABLED)
+# ======================================================================
+
+class _FakeLLM:
+    """Minimal LLMClient stub exposing chat_json."""
+
+    def __init__(self, payload=None, raise_exc=False):
+        self._payload = payload
+        self._raise = raise_exc
+        self.called = False
+
+    async def chat_json(self, *args, **kwargs):
+        self.called = True
+        if self._raise:
+            raise RuntimeError("boom")
+        return self._payload
+
+
+class TestLLMConsolidation:
+    @pytest.mark.asyncio
+    async def test_llm_branch_used_when_enabled(self, tmp_path, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "MEMORY_LLM_CONSOLIDATION_ENABLED", True)
+        store = AgenticMemoryStore(memory_dir=str(tmp_path))
+        llm = _FakeLLM(payload={"summary": "LLM 合并摘要", "tags": ["python", "gil"]})
+        svc = AgenticMemoryService(store, llm_client=llm)
+        store.add(AgenticMemoryRecord(
+            content="Python GIL", summary="GIL 原始摘要",
+            task_id="t1", kind=MemoryKind.EXPERIENTIAL,
+        ))
+
+        records = await svc.consolidate_task(task_id="t1")
+        assert llm.called is True
+        proc = [r for r in records if r.kind == MemoryKind.PROCEDURAL]
+        assert proc and proc[0].summary == "LLM 合并摘要"
+        assert proc[0].metadata.get("llm_consolidated") is True
+        assert "python" in proc[0].tags
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_llm_error(self, tmp_path, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "MEMORY_LLM_CONSOLIDATION_ENABLED", True)
+        store = AgenticMemoryStore(memory_dir=str(tmp_path))
+        llm = _FakeLLM(raise_exc=True)
+        svc = AgenticMemoryService(store, llm_client=llm)
+        store.add(AgenticMemoryRecord(
+            content="Python GIL", summary="确定性摘要",
+            task_id="t1", kind=MemoryKind.EXPERIENTIAL,
+        ))
+
+        records = await svc.consolidate_task(task_id="t1")
+        assert llm.called is True
+        proc = [r for r in records if r.kind == MemoryKind.PROCEDURAL]
+        # Deterministic fallback: summary derived from source record, flag False
+        assert proc and proc[0].metadata.get("llm_consolidated") is False
+        assert "确定性摘要" in proc[0].summary
+
+    @pytest.mark.asyncio
+    async def test_no_llm_when_disabled(self, tmp_path, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "MEMORY_LLM_CONSOLIDATION_ENABLED", False)
+        store = AgenticMemoryStore(memory_dir=str(tmp_path))
+        llm = _FakeLLM(payload={"summary": "X", "tags": []})
+        svc = AgenticMemoryService(store, llm_client=llm)
+        store.add(AgenticMemoryRecord(
+            content="Python GIL", summary="det", task_id="t1",
+            kind=MemoryKind.EXPERIENTIAL,
+        ))
+
+        records = await svc.consolidate_task(task_id="t1")
+        assert llm.called is False
+        proc = [r for r in records if r.kind == MemoryKind.PROCEDURAL]
+        assert proc and proc[0].metadata.get("llm_consolidated") is False

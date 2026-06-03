@@ -253,6 +253,70 @@ class TestEmergentPlannerAgent:
             assert len(todo.description) > 0
 
 
+class TestInitTodoDependencyRobustness:
+    """Tests that _init_todo_list tolerates malformed LLM dependency IDs.
+    回归：LLM 返回字符串依赖 ID（如 "todo_0"）不应让初始化崩溃。"""
+
+    def _make_planner(self):
+        from agents.emergent_planner import EmergentPlannerAgent
+        from llm.client import LLMClient
+        from tools.web_search import WebSearchTool
+
+        planner = EmergentPlannerAgent(
+            llm_client=LLMClient(),
+            tools=[WebSearchTool()],
+            max_iterations=3,
+        )
+        planner._todo_list = TodoList(task="t")
+        return planner
+
+    def test_coerce_dep_ids(self):
+        """_coerce_dep_ids: ints kept, digit-strings parsed, rest dropped."""
+        from agents.emergent_planner import EmergentPlannerAgent
+
+        assert EmergentPlannerAgent._coerce_dep_ids([1, "2", "x", "todo_3"]) == [1, 2]
+        assert EmergentPlannerAgent._coerce_dep_ids([]) == []
+        assert EmergentPlannerAgent._coerce_dep_ids("nope") == []
+        assert EmergentPlannerAgent._coerce_dep_ids([True, False, 5]) == [5]
+
+    @pytest.mark.asyncio
+    async def test_init_with_string_dep_does_not_crash(self):
+        """Reproduces the original bug: dependencies=["todo_0"] must not raise."""
+        from unittest.mock import AsyncMock
+
+        planner = self._make_planner()
+        planner.think_json = AsyncMock(return_value={
+            "todos": [
+                {"description": "激活 web-research 技能", "dependencies": []},
+                {"description": "使用技能查询股价", "dependencies": ["todo_0"]},
+            ]
+        })
+
+        await planner._init_todo_list("查股价", "")  # must not raise
+
+        assert len(planner._todo_list.todos) == 2
+        # "todo_0" unparseable → dropped → second TODO has no dependencies
+        assert planner._todo_list.todos[2].dependencies == []
+
+    @pytest.mark.asyncio
+    async def test_init_with_numeric_string_dep_is_normalized(self):
+        """dependencies=["1"] should be coerced to integer [1]."""
+        from unittest.mock import AsyncMock
+
+        planner = self._make_planner()
+        planner.think_json = AsyncMock(return_value={
+            "todos": [
+                {"description": "first", "dependencies": []},
+                {"description": "second", "dependencies": ["1"]},
+            ]
+        })
+
+        await planner._init_todo_list("task", "")
+
+        assert len(planner._todo_list.todos) == 2
+        assert planner._todo_list.todos[2].dependencies == [1]
+
+
 class TestOrchestratorEmergentRouting:
     """Tests for Orchestrator's emergent planning routing."""
 

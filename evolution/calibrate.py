@@ -5,7 +5,9 @@ Classifier calibration CLI (v17.3).
 Usage / 用法:
   python -m evolution.calibrate
   python -m evolution.calibrate --show-per-task
-  python -m evolution.calibrate --simple-range -4:1 --complex-range 1:6 -o /tmp/sug.json
+  python -m evolution.calibrate --simple-range=-4:1 --complex-range=1:6 -o /tmp/sug.json
+  # 注意：负数范围必须用 = 形式（--simple-range=-4:1），否则 argparse 会把 -4:1 误判为另一个选项。
+  # Note: negative ranges must use the = form; otherwise argparse treats -4:1 as another flag.
 
 离线运行，无需 API key；只产出建议 JSON 并打印应用方式，绝不改 live config。
 """

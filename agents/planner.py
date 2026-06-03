@@ -119,6 +119,7 @@ def _build_simple_planner_prompt() -> str:
         inject_location_guidance=False,
         inject_search_guidance=False,
         inject_hitl_guidance=False,
+        inject_hitl_unavailable_guidance=True,
     )
 
 _PLANNER_BASE_PROMPT = """\
@@ -261,6 +262,7 @@ def _build_planner_prompt() -> str:
         inject_location_guidance=False,
         inject_search_guidance=False,
         inject_hitl_guidance=False,
+        inject_hitl_unavailable_guidance=True,
     )
 
 

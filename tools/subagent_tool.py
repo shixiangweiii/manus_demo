@@ -164,6 +164,7 @@ class SubAgentTool(BaseTool):
                     self._call_count, self._max_calls, task_description[:100])
 
         tool_whitelist = kwargs.get("tool_whitelist", [])
+        requested_whitelist = list(tool_whitelist) if isinstance(tool_whitelist, list) else []
 
         # Validate and filter tool whitelist — always exclude blocked tools
         # v15: also block memory_store/memory_revoke to prevent SubAgent from polluting global memory
@@ -266,9 +267,14 @@ class SubAgentTool(BaseTool):
             # (both the normal ReAct path and the emergent parallel dispatch).
             # The full summary is preserved after the marker so no info is lost.
             # 非 COMPLETED 状态加 `Error:` 前缀，让 classify_result 能识别失败；摘要保留不丢。
+            summary_text = self._add_tool_metadata(
+                result.summary_text,
+                requested_whitelist=requested_whitelist,
+                resolved_whitelist=validated_whitelist,
+            )
             if result.status != SubAgentStatus.COMPLETED:
-                return f"Error: SubAgent {result.status.value} - {result.summary_text}"
-            return result.summary_text
+                return f"Error: SubAgent {result.status.value} - {summary_text}"
+            return summary_text
 
         # Wave-4 M5: removed dead `except asyncio.TimeoutError` branch — there
         # is no `wait_for` at this layer (SubAgent.run() owns the timeout) so
@@ -293,6 +299,25 @@ class SubAgentTool(BaseTool):
             }
             # `Error:` prefix so callers detect the hard failure (see above).
             return "Error: " + json.dumps(error_summary, ensure_ascii=False)
+
+    @staticmethod
+    def _add_tool_metadata(
+        summary_text: str,
+        *,
+        requested_whitelist: list[str],
+        resolved_whitelist: list[str],
+    ) -> str:
+        """Attach requested vs actual SubAgent tool metadata to parent-visible JSON."""
+        try:
+            data = json.loads(summary_text) if summary_text else {}
+        except json.JSONDecodeError:
+            data = {"findings": summary_text}
+        if not isinstance(data, dict):
+            data = {"findings": str(data)}
+
+        data["requested_tool_whitelist"] = requested_whitelist
+        data["tool_whitelist"] = resolved_whitelist
+        return json.dumps(data, ensure_ascii=False)
 
     def reset_task_state(self) -> None:
         """Reset per-task state for a new task (called by OrchestratorAgent.run()).

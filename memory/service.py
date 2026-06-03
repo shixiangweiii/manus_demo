@@ -30,8 +30,11 @@ class AgenticMemoryService:
     结构化记忆服务，封装检索、存储、巩固等操作。
     """
 
-    def __init__(self, store: AgenticMemoryStore | None = None):
+    def __init__(self, store: AgenticMemoryStore | None = None, llm_client: Any = None):
         self._store = store or AgenticMemoryStore()
+        # Optional LLMClient for LLM-assisted consolidation (v15.x).
+        # None → deterministic consolidation only. / 无 client 时仅走确定性巩固。
+        self._llm = llm_client
 
     def search(self, query: MemorySearchQuery) -> list[MemorySearchResult]:
         """Public search API for Memory Tools / 供记忆工具调用的公共搜索接口。"""
@@ -117,15 +120,20 @@ class AgenticMemoryService:
         logger.info("Stored task result memory: %s", task[:60])
         return record
 
-    def consolidate_task(
+    async def consolidate_task(
         self,
         task_id: str,
         notes: str = "",
     ) -> list[AgenticMemoryRecord]:
-        # TODO: v16 启用 LLM 辅助巩固时使用 config.MEMORY_LLM_CONSOLIDATION_ENABLED
         """
-        Deterministic consolidation: create procedural/experiential records from task.
-        确定性巩固：从任务信息创建过程性/经验性记录。
+        Consolidate a task's memories into a higher-level record.
+        将某任务的记忆巩固为更高层的记录。
+
+        When ``config.MEMORY_LLM_CONSOLIDATION_ENABLED`` is on AND an LLMClient was
+        injected, the procedural summary/tags are distilled by the LLM; otherwise
+        (or on any LLM failure) it falls back to deterministic concatenation.
+        当 MEMORY_LLM_CONSOLIDATION_ENABLED 开启且注入了 LLMClient 时，
+        由 LLM 提炼过程性摘要/标签；否则（或 LLM 失败时）降级为确定性拼接。
         """
         now = time.time()
         records: list[AgenticMemoryRecord] = []
@@ -155,12 +163,26 @@ class AgenticMemoryService:
         ]
 
         if task_records:
-            # Create a consolidated procedural record
-            # 创建合并后的过程性记录
+            # Default deterministic consolidation / 默认确定性巩固
             combined_summary = " | ".join(
                 r.summary[:100] for r in task_records[:3]
             )
             tags = list({t for r in task_records for t in r.tags[:5]})[:8]
+            llm_used = False
+
+            # LLM-assisted distillation (opt-in) / LLM 辅助提炼（按需开启）
+            if config.MEMORY_LLM_CONSOLIDATION_ENABLED and self._llm is not None:
+                distilled = await self._llm_consolidate(task_records)
+                if distilled is not None:
+                    combined_summary = distilled.get("summary") or combined_summary
+                    llm_tags = distilled.get("tags")
+                    if isinstance(llm_tags, list) and llm_tags:
+                        tags = [str(t) for t in llm_tags][:8]
+                    llm_used = True
+                    logger.info(
+                        "LLM-assisted consolidation for task %s (%d source records)",
+                        task_id[:8], len(task_records),
+                    )
 
             record = AgenticMemoryRecord(
                 kind=MemoryKind.PROCEDURAL,
@@ -173,7 +195,10 @@ class AgenticMemoryService:
                 tags=tags,
                 created_at=now,
                 updated_at=now,
-                metadata={"consolidated_from": [r.id for r in task_records]},
+                metadata={
+                    "consolidated_from": [r.id for r in task_records],
+                    "llm_consolidated": llm_used,
+                },
             )
             self._store.add(record)
             records.append(record)
@@ -195,6 +220,38 @@ class AgenticMemoryService:
 
         logger.info("Consolidated %d records for task %s", len(records), task_id[:8])
         return records
+
+    async def _llm_consolidate(
+        self,
+        task_records: list[AgenticMemoryRecord],
+    ) -> dict[str, Any] | None:
+        """
+        Use the LLM to distill a consolidated summary + tags from task records.
+        用 LLM 从任务记录中提炼合并摘要与标签。
+        Returns ``{"summary": str, "tags": list[str]}`` or None on failure.
+        失败时返回 None，调用方降级为确定性巩固。
+        """
+        source = "\n".join(
+            f"- [{r.kind.value}] {r.summary[:200]}" for r in task_records[:6]
+        )
+        prompt = (
+            "你是记忆巩固助手。下面是同一任务产生的若干条记忆，请将它们合并为一条"
+            "简洁、可复用的过程性知识。\n\n"
+            f"记忆条目：\n{source}\n\n"
+            "请只返回 JSON：{\"summary\": \"<不超过150字的合并摘要>\", "
+            "\"tags\": [\"<最多5个关键词，中英文皆可>\"]}"
+        )
+        try:
+            data = await self._llm.chat_json(
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=400,
+                caller_tag="MemoryConsolidation",
+            )
+            return data if isinstance(data, dict) else None
+        except Exception:
+            logger.debug("[AgenticMemory] LLM consolidation failed", exc_info=True)
+            return None
 
     def revoke(self, memory_id: str, reason: str = "") -> bool:
         """Revoke a memory record / 撤销一条记忆记录"""
@@ -225,7 +282,10 @@ class AgenticMemoryService:
                 break
             if kw.isascii():
                 # Word boundary for ASCII to avoid false positives (e.g. "web" in "webhook").
-                matched = _re.search(rf'\b{_re.escape(kw)}\b', text_lower) is not None
+                # re.ASCII makes \w/\b consider ASCII only, so an adjacent CJK char
+                # (e.g. "python的") counts as a non-word boundary and DOES match.
+                # 加 re.ASCII 让 \b 只认 ASCII，紧邻的中文字符视为非词字符 → "python的" 可命中。
+                matched = _re.search(rf'\b{_re.escape(kw)}\b', text_lower, _re.ASCII) is not None
             else:
                 # CJK keywords have no \b word boundary in continuous Chinese text
                 # (CJK chars are \w under Unicode), so use plain substring matching.
