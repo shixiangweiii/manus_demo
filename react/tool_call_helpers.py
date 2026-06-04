@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 # alternative).
 # 业务限流标记 —— 用于区分"工具坏了"和"工具被限流",后者不应进入 failure 桶。
 RATE_LIMITED_MARKER = "SubAgent call limit reached"
+RATE_LIMITED_RESULT_MARKERS = (
+    RATE_LIMITED_MARKER,
+    "429",
+    "Too Many Requests",
+    "rate-limited",
+    "rate limited",
+)
 
 
 def attribute_caller(tool: Any, agent_name: str) -> None:
@@ -80,7 +87,7 @@ def classify_result(
     if exc is not None:
         return True, False
     if isinstance(result, str) and result.startswith("Error:"):
-        return True, RATE_LIMITED_MARKER in result
+        return True, any(marker.lower() in result.lower() for marker in RATE_LIMITED_RESULT_MARKERS)
     return False, False
 
 

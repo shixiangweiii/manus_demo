@@ -76,7 +76,9 @@ class ShellTool(BaseTool):
             "Execute a shell command and return the output. "
             "The command runs in a subprocess with a timeout. "
             "Supports standard bash syntax. "
-            "Working directory is the sandbox folder."
+            "Working directory is the sandbox folder. "
+            f"When invoking Python or pytest, use `{config.PYTHON_COMMAND}` "
+            "instead of bare `python` in this environment."
         )
 
     @property
@@ -142,6 +144,11 @@ class ShellTool(BaseTool):
             output_parts.append(f"Errors:\n{result.stderr.strip()}")
         if result.returncode != 0:
             output_parts.append(f"Exit code: {result.returncode}")
+            combined = f"{result.stdout}\n{result.stderr}".lower()
+            if "python: command not found" in combined:
+                output_parts.append(
+                    f"Hint: use `{config.PYTHON_COMMAND}` instead of bare `python` in this environment."
+                )
 
         if not output_parts:
             output_parts.append("Command executed successfully (no output).")

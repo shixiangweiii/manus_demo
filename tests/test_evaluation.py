@@ -376,6 +376,20 @@ class TestBenchmark:
         assert "easy_001" in ids
         assert "medium_001" in ids
 
+    def test_resume_001_contract_allows_synthetic_data_and_checks_artifacts(self):
+        task = get_benchmark_tasks(task_ids=["resume_001"])[0]
+
+        assert "自造" in task.task_description
+        assert "不需要联网查询官方" in task.task_description
+        assert "cities.json" in task.task_description
+        assert "city_density.csv" in task.task_description
+
+        verifier_text = str(task.verifiers)
+        assert "cities.json" in verifier_text
+        assert "city_density.csv" in verifier_text
+        assert "density" in verifier_text
+        assert "密度" in verifier_text
+
     def test_ground_truth_structure(self):
         tasks = get_benchmark_tasks()
         for t in tasks:
@@ -463,6 +477,56 @@ class TestReflectionAccuracy:
 # ======================================================================
 
 class TestProbeEventHandling:
+    def test_step_failed_accepts_step_object_and_preserves_tool_metrics(self):
+        """step_failed should accept schema Step/StepResult objects, not only dicts."""
+        from schema import Step, StepResult, ToolCallRecord
+
+        probe = EvaluationProbe()
+        step = Step(id=7, description="run failing step")
+        result = StepResult(
+            step_id=7,
+            success=False,
+            output="Hit max iterations while running tests",
+            iterations_completed=5,
+            tool_calls_log=[
+                ToolCallRecord(tool_name="execute_shell", parameters={}, result="Output:\ncreated file"),
+                ToolCallRecord(tool_name="execute_shell", parameters={}, result="Error: python: command not found"),
+            ],
+        )
+
+        probe.on_event("step_failed", {"step": step, "result": result})
+
+        assert probe.steps_failed == 1
+        assert probe.total_tool_calls == 2
+        assert probe.successful_tool_calls == 1
+        assert probe.failed_tool_calls == 1
+        assert probe.total_react_iterations == 5
+        assert probe.failures[0].step_id == 7
+        assert probe.failures[0].category == FailureCategory.MAX_ITERATION_EXCEEDED
+        assert "tool_errors=1" in probe.failures[0].detail
+
+    def test_step_failed_accepts_dict_payloads(self):
+        """Dict-shaped events remain supported for tests and future emitters."""
+        probe = EvaluationProbe()
+        data = {
+            "step": {"id": "s1"},
+            "result": {
+                "success": False,
+                "output": "Error: fetch_url failed: 429 Too Many Requests",
+                "tool_calls_log": [
+                    {"tool_name": "fetch_url", "result": "Error: fetch_url failed: 429 Too Many Requests"}
+                ],
+                "iterations_completed": 2,
+            },
+        }
+
+        probe.on_event("step_failed", data)
+
+        assert probe.steps_failed == 1
+        assert probe.failures[0].step_id == "s1"
+        assert probe.failed_tool_calls == 1
+        assert probe.total_react_iterations == 2
+
     def test_replan_detection_partial_replan(self):
         """B3 fix: should detect 'Partial replan' in phase event."""
         probe = EvaluationProbe()

@@ -1,10 +1,10 @@
 """
-Fetch URL Tool — retrieve full page content from a URL via Bailian WebParser MCP.
-URL 页面抓取工具 —— 通过百炼 WebParser MCP 获取完整网页内容。
+Fetch URL Tool — retrieve full page content from a URL via local WebParser.
+URL 页面抓取工具 —— 通过本地 WebParser 获取完整网页内容。
 
 v11: 新增工具，直接解决 web_search 循环重试的核心根因（缺少 URL 页面内容抓取能力）。
+v13: 默认改为本地 httpx + trafilatura 解析，百炼 WebParser 仅作为可选 fallback。
 - LLM 在搜索结果中看到 URL 后，可调用 fetch_url 获取完整页面内容
-- 需要配置 DASHSCOPE_API_KEY（百炼 MCP 认证）
 - 返回内容超过 FETCH_URL_MAX_CONTENT_LENGTH 时截断，防止上下文膨胀
 - 错误透传：失败时返回以 "Error:" 开头的字符串
 """
@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 class FetchUrlTool(BaseTool):
     """
-    Fetch full page content from a URL using Bailian WebParser MCP.
-    URL 页面内容抓取工具（基于百炼 MCP WebParser）。
+    Fetch full page content from a URL using the local WebParser.
+    URL 页面内容抓取工具（本地解析优先，百炼 WebParser 可选兜底）。
 
     Use after web_search to access specific pages found in search results.
     """
@@ -70,31 +70,73 @@ class FetchUrlTool(BaseTool):
 
         format_type = kwargs.get("format", "markdown")
 
+        if config.LOCAL_WEBPARSER_ENABLED:
+            local_result = await self._execute_local(url, format_type)
+            if not local_result.startswith("Error:"):
+                return local_result
+            if not config.LOCAL_WEBPARSER_FALLBACK_TO_BAILIAN:
+                return local_result
+
+            bailian_result = await self._execute_bailian(url, format_type)
+            if not bailian_result.startswith("Error:"):
+                return bailian_result
+            return (
+                f"Error: local parser failed; Bailian fallback failed: "
+                f"{local_result.removeprefix('Error: ').strip()} | "
+                f"{bailian_result.removeprefix('Error: ').strip()}"
+            )
+
+        return await self._execute_bailian(url, format_type)
+
+    async def _execute_local(self, url: str, format_type: str) -> str:
+        try:
+            from tools.local_web_parser import LocalWebParser
+
+            parser = LocalWebParser()
+            result = await parser.fetch(url, format_type=format_type)
+            content = parser.format_result(result)
+            content = parser.add_short_content_warning(content, measured_content=result.content)
+            content = self._truncate(content)
+            logger.info(
+                "[FetchUrlTool] Locally fetched '%s': %d chars (format=%s, backend=%s)",
+                url,
+                len(content),
+                format_type,
+                result.backend,
+            )
+            return content
+        except asyncio.TimeoutError:
+            return f"Error: fetch_url failed locally: timed out after {config.LOCAL_WEBPARSER_TIMEOUT}s for URL='{url}'."
+        except ValueError as exc:
+            return f"Error: {exc}"
+        except Exception as exc:
+            exc_name = type(exc).__name__
+            if exc_name.endswith("Timeout") or exc_name.endswith("timeout"):
+                return f"Error: fetch_url failed locally: timed out for URL='{url}': {exc_name}: {exc}"
+            return f"Error: fetch_url failed locally: {exc_name}: {exc}"
+
+    async def _execute_bailian(self, url: str, format_type: str) -> str:
         if not config.DASHSCOPE_API_KEY:
-            return "Error: fetch_url requires DASHSCOPE_API_KEY to be configured. Use web_search for snippet-level results."
+            return "Error: fetch_url requires DASHSCOPE_API_KEY to use Bailian WebParser fallback. Use local WebParser or web_search for snippet-level results."
 
         try:
             from tools.mcp_client import BailianMCPClient
 
             client = BailianMCPClient()
-            # Double timeout for page fetch (pages can be larger than search results)
             fetch_timeout = config.WEB_SEARCH_TIMEOUT * 2
-
             result = await asyncio.wait_for(
                 client.call_tool(
                     server_name="WebParser",
                     tool_name="bailian_web_parser",
                     arguments={"url": url, "format": format_type},
+                    timeout=fetch_timeout,
                 ),
                 timeout=fetch_timeout,
             )
 
-            # Truncate very long pages to prevent context explosion
-            max_len = config.FETCH_URL_MAX_CONTENT_LENGTH
-            if len(result) > max_len:
-                result = result[:max_len] + f"\n\n[Content truncated at {max_len} characters]"
-
-            logger.info("[FetchUrlTool] Fetched '%s': %d chars (format=%s)", url, len(result), format_type)
+            result = self._add_mcp_short_content_warning(result)
+            result = self._truncate(result)
+            logger.info("[FetchUrlTool] Fetched '%s' via Bailian: %d chars (format=%s)", url, len(result), format_type)
             return result
 
         except asyncio.TimeoutError:
@@ -102,8 +144,25 @@ class FetchUrlTool(BaseTool):
         except ValueError as exc:
             return f"Error: {exc}"
         except Exception as exc:
-            # httpx timeout exceptions should be classified as timeout errors
             exc_name = type(exc).__name__
             if exc_name.endswith("Timeout") or exc_name.endswith("timeout"):
                 return f"Error: fetch_url timed out for URL='{url}': {exc_name}: {exc}"
             return f"Error: fetch_url failed: {exc_name}: {exc}"
+
+    @staticmethod
+    def _add_mcp_short_content_warning(result: str) -> str:
+        short_len = max(0, config.FETCH_URL_SHORT_CONTENT_WARNING_LENGTH)
+        if short_len and 0 < len(result.strip()) < short_len:
+            return (
+                f"{result}\n\n"
+                f"[Warning: fetch_url returned only {len(result.strip())} characters. "
+                "The page may be blocked, rate-limited, or poorly parsed; do not treat this as complete page content.]"
+            )
+        return result
+
+    @staticmethod
+    def _truncate(result: str) -> str:
+        max_len = config.FETCH_URL_MAX_CONTENT_LENGTH
+        if len(result) > max_len:
+            return result[:max_len] + f"\n\n[Content truncated at {max_len} characters]"
+        return result

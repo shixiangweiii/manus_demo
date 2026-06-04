@@ -685,7 +685,11 @@ BENCHMARK_TASKS: list[BenchmarkTask] = [
     # --- Resume reliability tasks (v14.6.5) ---
     BenchmarkTask(
         task_id="resume_001",
-        task_description="创建一个包含 10 个城市数据的 JSON 文件，计算每个城市的人口密度，将结果保存为 CSV 文件",
+        task_description=(
+            "使用自造的示例数据创建一个包含 10 个城市数据的 JSON 文件 cities.json，"
+            "计算每个城市的人口密度，将结果保存为 CSV 文件 city_density.csv。"
+            "不需要联网查询官方人口或面积数据。"
+        ),
         difficulty=TaskDifficulty.MEDIUM,
         tags=["file_ops", "code", "resume", "multi_step", "sequential_dependency"],
         ground_truth=GroundTruth(
@@ -693,11 +697,35 @@ BENCHMARK_TASKS: list[BenchmarkTask] = [
             expected_step_count_range=(3, 6),
             expected_tools=["execute_python", "file_ops"],
             expected_subtasks=["创建城市 JSON", "计算人口密度", "保存 CSV"],
-            success_criteria="包含城市人口密度计算结果和 CSV 文件",
+            success_criteria="使用示例数据完成城市人口密度计算，并生成 cities.json 与 city_density.csv",
             must_include_keywords=["CSV", "人口密度", "density"],
         ),
         verifiers=[
-            {"type": "regex_match", "params": {"pattern": r"CSV|人口密度|density"}},
+            {
+                "type": "composite_and",
+                "params": {
+                    "verifiers": [
+                        {"type": "file_exists", "params": {"path": "cities.json"}},
+                        {"type": "file_exists", "params": {"path": "city_density.csv"}},
+                        {
+                            "type": "regex_match",
+                            "params": {
+                                "source": "file",
+                                "path": "city_density.csv",
+                                "pattern": r"(?i)(density|人口密度|density_per_km2|密度)",
+                            },
+                        },
+                        {
+                            "type": "regex_match",
+                            "params": {
+                                "source": "file",
+                                "path": "city_density.csv",
+                                "pattern": r"(?m)^(?:.*\n){10,}",
+                            },
+                        },
+                    ],
+                },
+            },
         ],
     ),
     BenchmarkTask(

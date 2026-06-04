@@ -20,6 +20,9 @@ ddgs>=8.0.0
 # Bailian MCP Client (v11)
 httpx>=0.24.0
 mcp>=1.0.0
+trafilatura
+beautifulsoup4
+markdownify
 
 # AgentBay SDK examples
 wuying-agentbay-sdk==0.21.0

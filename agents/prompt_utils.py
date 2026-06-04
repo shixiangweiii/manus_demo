@@ -298,6 +298,8 @@ def build_context_injection() -> str:
         "\n\n## Current Context (auto-injected, treat as ground truth)\n"
         f"- Today's date: {now.strftime('%Y-%m-%d')} ({weekday_en} / {weekday_zh})\n"
         f"- Current time: {now.strftime('%H:%M')} (local timezone)\n"
+        f"- Python command for shell/pytest commands: `{config.PYTHON_COMMAND}`. "
+        "Use this command instead of bare `python` when invoking Python from shell.\n"
         "Use these values directly when composing search queries or reasoning "
         "about \"today\" / \"tomorrow\" / \"yesterday\". Do NOT ask tools for the "
         "date when it is already provided here.\n"

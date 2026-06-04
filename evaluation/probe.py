@@ -191,6 +191,77 @@ class EvaluationProbe:
         return result_str.strip().startswith(error_prefixes)
 
     @staticmethod
+    def _get_value(obj: Any, key: str, default: Any = None) -> Any:
+        """Read ``key`` from dict-like or object-like event payloads.
+
+        Orchestrator events often carry schema objects (Step, StepResult) while
+        some tests and newer probes use dict payloads. Keep this module decoupled
+        from runtime schema imports by using a tiny duck-typed accessor.
+        """
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    @classmethod
+    def _tool_calls_from_result(cls, result: Any) -> list[Any]:
+        tool_calls = cls._get_value(result, "tool_calls_log", [])
+        return list(tool_calls or []) if isinstance(tool_calls, (list, tuple)) else []
+
+    def _record_tool_calls(self, result: Any) -> int:
+        """Record tool-call metrics from a StepResult-like object.
+
+        Returns the number of tool calls that were error-prefixed. Successful
+        calls inside a failed step are still counted as successful tool calls.
+        """
+        failed = 0
+        for tc in self._tool_calls_from_result(result):
+            self.total_tool_calls += 1
+            tool_name = self._get_value(tc, "tool_name", "")
+            if tool_name:
+                self.unique_tools.add(tool_name)
+            tc_result = self._get_value(tc, "result", "")
+            if self._is_tool_error(str(tc_result)):
+                self.failed_tool_calls += 1
+                failed += 1
+            else:
+                self.successful_tool_calls += 1
+        return failed
+
+    def _record_react_iterations(self, result: Any) -> None:
+        iterations = self._get_value(result, "iterations_completed", 0) or 0
+        if isinstance(iterations, int) and iterations > 0:
+            self.total_react_iterations += iterations
+        else:
+            self.total_react_iterations += len(self._tool_calls_from_result(result)) + 1
+
+    @classmethod
+    def _classify_step_failure(cls, result: Any) -> FailureCategory:
+        output = str(cls._get_value(result, "output", "") or "")
+        tool_text = " ".join(str(cls._get_value(tc, "result", "") or "") for tc in cls._tool_calls_from_result(result))
+        text = f"{output} {tool_text}".lower()
+        if any(marker in text for marker in ("max iteration", "max iterations", "hit max iterations")):
+            return FailureCategory.MAX_ITERATION_EXCEEDED
+        if "timed out" in text or "timeout" in text:
+            return FailureCategory.NODE_TIMEOUT
+        if "parameter" in text and "tool" in text:
+            return FailureCategory.TOOL_PARAMETER_ERROR
+        return FailureCategory.TOOL_EXECUTION_ERROR
+
+    @classmethod
+    def _failure_detail(cls, result: Any, failed_tool_count: int) -> str:
+        success = cls._get_value(result, "success", "")
+        output = str(cls._get_value(result, "output", "") or "")
+        if not output:
+            output = str(result)
+        return (
+            f"result.success={success}; "
+            f"tool_errors={failed_tool_count}; "
+            f"output={output[:180]}"
+        )[:260]
+
+    @staticmethod
     def _usage_to_dict(usage: Any) -> dict[str, Any]:
         """Convert TokenUsage-like objects into plain JSON-friendly dicts."""
         if hasattr(usage, "model_dump"):
@@ -262,47 +333,33 @@ class EvaluationProbe:
 
         elif event == "step_complete":
             self.steps_completed += 1
-            result = data.get("result")
-            if result and hasattr(result, 'tool_calls_log'):
-                for tc in result.tool_calls_log:
-                    self.total_tool_calls += 1
-                    self.unique_tools.add(tc.tool_name)
-                    if self._is_tool_error(tc.result):
-                        self.failed_tool_calls += 1
-                    else:
-                        self.successful_tool_calls += 1
-                self.total_react_iterations += len(result.tool_calls_log) + 1
+            result = self._get_value(data, "result")
+            if result:
+                self._record_tool_calls(result)
+                self._record_react_iterations(result)
 
         elif event == "step_failed":
             self.steps_failed += 1
+            step = self._get_value(data, "step")
+            result = self._get_value(data, "result")
+            failed_tool_count = self._record_tool_calls(result) if result else 0
             self.failures.append(FailureRecord(
-                category=FailureCategory.TOOL_EXECUTION_ERROR,
-                step_id=data.get("step", {}).get("id", "") if hasattr(data.get("step", ""), 'id') else "",
-                detail=str(data.get("result", ""))[:200],
+                category=self._classify_step_failure(result),
+                step_id=self._get_value(step, "id", ""),
+                detail=self._failure_detail(result, failed_tool_count),
             ))
-            result = data.get("result")
-            if result and hasattr(result, 'tool_calls_log'):
-                for tc in result.tool_calls_log:
-                    self.total_tool_calls += 1
-                    self.failed_tool_calls += 1
-                self.total_react_iterations += len(result.tool_calls_log) + 1
+            if result:
+                self._record_react_iterations(result)
 
         elif event == "step_skipped":
             self.steps_skipped += 1
 
         elif event in ("node_completed",):
             self.steps_completed += 1
-            result = data.get("result")
+            result = self._get_value(data, "result")
             if result:
-                if hasattr(result, 'tool_calls_log'):
-                    for tc in result.tool_calls_log:
-                        self.total_tool_calls += 1
-                        self.unique_tools.add(tc.tool_name)
-                        if self._is_tool_error(tc.result):
-                            self.failed_tool_calls += 1
-                        else:
-                            self.successful_tool_calls += 1
-                    self.total_react_iterations += len(result.tool_calls_log) + 1
+                self._record_tool_calls(result)
+                self._record_react_iterations(result)
 
         elif event == "node_failed":
             self.steps_failed += 1

@@ -74,6 +74,7 @@ MAX_EMERGENT_OUTER_ITERATIONS = int(os.getenv("MAX_EMERGENT_OUTER_ITERATIONS", s
 SANDBOX_DIR = os.path.expanduser(os.getenv("SANDBOX_DIR", "~/.manus_demo/sandbox"))  # 沙箱目录（文件操作和 Shell 命令的工作目录，防止越权访问）
 CODE_EXEC_TIMEOUT = int(os.getenv("CODE_EXEC_TIMEOUT", "30"))                        # Python 代码执行超时时间（秒）
 SHELL_EXEC_TIMEOUT = int(os.getenv("SHELL_EXEC_TIMEOUT", "30"))                      # Shell 命令执行超时时间（秒）
+PYTHON_COMMAND = os.getenv("PYTHON_COMMAND", "python3")                              # Shell/pytest 命令中推荐使用的 Python 可执行命令
 SUBPROCESS_MAX_OUTPUT_BYTES = int(os.getenv("SUBPROCESS_MAX_OUTPUT_BYTES", str(512 * 1024)))  # 单次子进程（Shell/Python）最大输出字节数，默认 512KB
 SHELL_MAX_CONCURRENT = int(os.getenv("SHELL_MAX_CONCURRENT", "3"))                    # 最大并发 Shell 子进程数
 CODE_MAX_CONCURRENT = int(os.getenv("CODE_MAX_CONCURRENT", "3"))                      # 最大并发代码执行子进程数
@@ -116,12 +117,27 @@ BAILIAN_WEBPARSER_MCP_URL = os.getenv("BAILIAN_WEBPARSER_MCP_URL", "https://dash
 # （WebSearch 仍有 DDGS 兜底；WebParser 无兜底，故重试对 fetch_url 价值最大）。
 BAILIAN_MCP_MAX_RETRIES = int(os.getenv("BAILIAN_MCP_MAX_RETRIES", "3"))         # 429/瞬时错误最大重试次数（0=不重试）
 BAILIAN_MCP_RETRY_BASE_DELAY = float(os.getenv("BAILIAN_MCP_RETRY_BASE_DELAY", "2.0"))  # 指数退避基础延迟（秒）：delay = base × 2**attempt
+BAILIAN_WEBPARSER_MAX_CONCURRENT = int(os.getenv("BAILIAN_WEBPARSER_MAX_CONCURRENT", "1"))  # WebParser MCP 最大并发；默认 1 避免 SSE/429 噪声
+BAILIAN_WEBPARSER_MIN_INTERVAL_SECONDS = float(os.getenv("BAILIAN_WEBPARSER_MIN_INTERVAL_SECONDS", "1.0"))  # WebParser 调用最小间隔秒数
 
 # --- Convergence Guidance ---
 # --- 收敛指引（防止搜索循环）---
 SEARCH_CONVERGENCE_THRESHOLD = int(os.getenv("SEARCH_CONVERGENCE_THRESHOLD", "3"))  # 同工具调用 N 次后注入收敛提示
 FETCH_URL_MAX_CONTENT_LENGTH = int(os.getenv("FETCH_URL_MAX_CONTENT_LENGTH", "10000"))  # fetch_url 返回内容最大字符数
+FETCH_URL_SHORT_CONTENT_WARNING_LENGTH = int(os.getenv("FETCH_URL_SHORT_CONTENT_WARNING_LENGTH", "80"))  # fetch_url 极短内容告警阈值
 TOOL_RESULT_TRUNCATION_LIMIT = int(os.getenv("TOOL_RESULT_TRUNCATION_LIMIT", "2000"))  # ToolCallRecord 成功结果截断长度
+
+# --- Local WebParser (fetch_url primary path) ---
+# --- 本地网页解析（fetch_url 主路径）---
+LOCAL_WEBPARSER_ENABLED = os.getenv("LOCAL_WEBPARSER_ENABLED", "true").lower() == "true"  # 默认使用本地解析，避免 WebParser MCP 限流
+LOCAL_WEBPARSER_TIMEOUT = float(os.getenv("LOCAL_WEBPARSER_TIMEOUT", "20"))  # 本地抓取超时（秒）
+LOCAL_WEBPARSER_MAX_BYTES = int(os.getenv("LOCAL_WEBPARSER_MAX_BYTES", "2097152"))  # 本地抓取最大响应字节数（默认 2 MiB）
+LOCAL_WEBPARSER_USER_AGENT = os.getenv("LOCAL_WEBPARSER_USER_AGENT", "ManusDemoBot/1.0")  # fetch_url 本地抓取 UA
+LOCAL_WEBPARSER_RESPECT_ROBOTS = os.getenv("LOCAL_WEBPARSER_RESPECT_ROBOTS", "false").lower() == "true"  # 是否遵循 robots.txt
+LOCAL_WEBPARSER_BROWSER_FALLBACK = os.getenv("LOCAL_WEBPARSER_BROWSER_FALLBACK", "false").lower() == "true"  # 是否启用 Playwright 渲染兜底
+LOCAL_WEBPARSER_FALLBACK_TO_BAILIAN = os.getenv("LOCAL_WEBPARSER_FALLBACK_TO_BAILIAN", "false").lower() == "true"  # 本地失败时是否回退百炼 WebParser
+LOCAL_WEBPARSER_MIN_CONTENT_LENGTH = int(os.getenv("LOCAL_WEBPARSER_MIN_CONTENT_LENGTH", "120"))  # 本地解析结果低于该长度则尝试 fallback
+LOCAL_WEBPARSER_CACHE_SIZE = int(os.getenv("LOCAL_WEBPARSER_CACHE_SIZE", "64"))  # 进程内 fetch_html LRU 缓存条目数，0=关闭
 
 # --- v6.0 Feature Flags (向后兼容，默认关闭) ---
 # --- ReAct Engine ---

@@ -85,6 +85,47 @@ class TestDateFreshness:
         today = datetime.now().strftime("%Y-%m-%d")
         assert today in agent.system_prompt
 
+    def test_context_injection_contains_python_command(self, monkeypatch):
+        from agents.prompt_utils import build_context_injection
+
+        monkeypatch.setattr(config, "PYTHON_COMMAND", "python3")
+        text = build_context_injection()
+
+        assert "Python command" in text
+        assert "`python3`" in text
+        assert "bare `python`" in text
+
+    def test_reflector_prompt_allows_synthetic_example_data(self):
+        from agents.reflector import REFLECTOR_SYSTEM_PROMPT
+
+        assert "synthetic/example data" in REFLECTOR_SYSTEM_PROMPT
+        assert "sample data" in REFLECTOR_SYSTEM_PROMPT
+        assert "official/latest/real-world data" in REFLECTOR_SYSTEM_PROMPT
+        assert "FILE ARTIFACT BOUNDARY" in REFLECTOR_SYSTEM_PROMPT
+        assert "requested files were created" in REFLECTOR_SYSTEM_PROMPT
+
+    def test_reflector_synthetic_file_artifact_heuristic_passes_resume_task(self):
+        from agents.reflector import ReflectorAgent
+        from schema import StepResult
+
+        task = (
+            "使用自造的示例数据创建一个包含 10 个城市数据的 JSON 文件 cities.json，"
+            "计算每个城市的人口密度，将结果保存为 CSV 文件 city_density.csv。"
+        )
+        results = [
+            StepResult(
+                step_id=1,
+                success=True,
+                output="cities.json 已创建，包含 10 个城市。city_density.csv 已创建，包含人口密度结果。",
+            )
+        ]
+
+        reflection = ReflectorAgent._maybe_pass_synthetic_file_artifact_task(task, results)
+
+        assert reflection is not None
+        assert reflection.passed is True
+        assert reflection.score >= 0.9
+
     def test_late_instantiation_picks_up_new_date(self):
         """Two agents instantiated at different simulated dates pick up
         different dates in their system prompts."""

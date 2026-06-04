@@ -200,6 +200,27 @@ class TestToolRouterAccounting:
         assert summary["sub"]["rate_limited"] == 1
         assert summary["sub"]["failures"] == 0
 
+    @pytest.mark.asyncio
+    async def test_429_error_recorded_as_rate_limited(self):
+        tool = _make_tool("fetch_url", "Error: fetch_url failed: RuntimeError: 429 Too Many Requests")
+        tools = {"fetch_url": tool}
+        router = ToolRouter(available_tools=["fetch_url", "web_search"])
+        log: list[ToolCallRecord] = []
+
+        await execute_tool_calls(
+            [_make_tc("fetch_url")],
+            tools,
+            router,
+            node_id="n1",
+            agent_name="Test",
+            truncation_limit=2000,
+            tool_calls_log=log,
+        )
+
+        summary = router.get_node_summary("n1")
+        assert summary["fetch_url"]["rate_limited"] == 1
+        assert summary["fetch_url"]["failures"] == 0
+
 
 class TestTruncation:
     @pytest.mark.asyncio

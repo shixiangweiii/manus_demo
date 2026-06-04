@@ -10,6 +10,7 @@ import pytest
 
 import config
 from tools.shell_tool import ShellTool
+from tools.subprocess_utils import SubprocessResult
 
 
 class TestShellToolProperties:
@@ -76,6 +77,25 @@ class TestShellToolExecution:
         tool = ShellTool()
         result = await tool.execute(command="exit 42")
         assert "42" in result
+
+    @pytest.mark.asyncio
+    async def test_python_command_not_found_gets_python3_hint(self, monkeypatch):
+        import tools.shell_tool as shell_module
+
+        async def fake_run_with_limits(*args, **kwargs):
+            return SubprocessResult(
+                stdout="",
+                stderr="bash: python: command not found\n",
+                returncode=127,
+            )
+
+        monkeypatch.setattr(config, "PYTHON_COMMAND", "python3")
+        monkeypatch.setattr(shell_module, "run_with_limits", fake_run_with_limits)
+
+        result = await ShellTool().execute(command="python -m pytest")
+
+        assert "python: command not found" in result
+        assert "use `python3`" in result
 
 
 class TestShellToolBlacklist:

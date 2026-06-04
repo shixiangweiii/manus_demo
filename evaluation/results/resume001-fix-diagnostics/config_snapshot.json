@@ -1,0 +1,64 @@
+{
+  "run_id": "resume001-fix-diagnostics",
+  "suite": {
+    "id": "smoke_reasoning",
+    "description": "Low-cost verifier-heavy smoke suite for matrix plumbing.",
+    "task_ids": [
+      "resume_001"
+    ],
+    "default_modes": [
+      "simple",
+      "complex",
+      "emergent"
+    ],
+    "recommended_variants": [
+      "react_auto_baseline",
+      "reasoning_auto",
+      "reasoning_low",
+      "reasoning_high"
+    ],
+    "default_repeat": 2
+  },
+  "repeat": 1,
+  "variants": [
+    {
+      "id": "react_auto_baseline",
+      "description": "Baseline ReActEngine with automatic effort routing.",
+      "env_overrides": {
+        "ENABLE_REASONING_ENGINE": false,
+        "REASONING_EFFORT": "auto",
+        "ENABLE_GOAL_DRIVEN_PLANNER": false,
+        "SUBAGENT_ENABLED": false,
+        "DAG_SERIAL_EXECUTION": true
+      },
+      "modes": [
+        "simple",
+        "complex",
+        "emergent"
+      ],
+      "expected_focus": "baseline",
+      "baseline_variant": "react_auto_baseline"
+    },
+    {
+      "id": "reasoning_auto",
+      "description": "ReasoningEngine enabled with planner-selected effort.",
+      "env_overrides": {
+        "ENABLE_REASONING_ENGINE": true,
+        "REASONING_EFFORT": "auto",
+        "ENABLE_GOAL_DRIVEN_PLANNER": false,
+        "SUBAGENT_ENABLED": false,
+        "DAG_SERIAL_EXECUTION": true
+      },
+      "modes": [
+        "simple",
+        "complex",
+        "emergent"
+      ],
+      "expected_focus": "default reasoning candidate",
+      "baseline_variant": "react_auto_baseline"
+    }
+  ],
+  "override_modes": [
+    "simple"
+  ]
+}

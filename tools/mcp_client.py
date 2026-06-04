@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import config
@@ -84,6 +85,40 @@ class BailianMCPClient:
       5. Closes the session
     """
 
+    _webparser_sem: asyncio.Semaphore | None = None
+    _webparser_sem_loop: asyncio.AbstractEventLoop | None = None
+    _webparser_lock: asyncio.Lock | None = None
+    _webparser_lock_loop: asyncio.AbstractEventLoop | None = None
+    _webparser_last_call_at: float = 0.0
+
+    @classmethod
+    def _get_webparser_sem(cls) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        if cls._webparser_sem is None or cls._webparser_sem_loop is not loop:
+            cls._webparser_sem = asyncio.Semaphore(max(1, config.BAILIAN_WEBPARSER_MAX_CONCURRENT))
+            cls._webparser_sem_loop = loop
+        return cls._webparser_sem
+
+    @classmethod
+    def _get_webparser_lock(cls) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if cls._webparser_lock is None or cls._webparser_lock_loop is not loop:
+            cls._webparser_lock = asyncio.Lock()
+            cls._webparser_lock_loop = loop
+        return cls._webparser_lock
+
+    @classmethod
+    async def _throttle_webparser(cls) -> None:
+        min_interval = max(0.0, float(config.BAILIAN_WEBPARSER_MIN_INTERVAL_SECONDS))
+        if min_interval <= 0:
+            return
+        async with cls._get_webparser_lock():
+            now = time.monotonic()
+            wait_for = min_interval - (now - cls._webparser_last_call_at)
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+            cls._webparser_last_call_at = time.monotonic()
+
     async def call_tool(
         self,
         server_name: str,
@@ -132,29 +167,38 @@ class BailianMCPClient:
         max_retries = config.BAILIAN_MCP_MAX_RETRIES
         base_delay = config.BAILIAN_MCP_RETRY_BASE_DELAY
 
-        for attempt in range(max_retries + 1):
-            try:
-                return await self._call_once(
-                    transport=transport, url=url, headers=headers,
-                    inner_timeout=inner_timeout, server_name=server_name,
-                    tool_name=tool_name, arguments=arguments,
-                )
-            except _RateLimited as rl:
-                if attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(
-                        "[MCPClient] %s/%s rate-limited/transient (%s); retry %d/%d after %.1fs",
-                        server_name, tool_name, str(rl)[:120], attempt + 1, max_retries, delay,
+        async def _call_with_retries() -> str:
+            for attempt in range(max_retries + 1):
+                try:
+                    if server_name == "WebParser":
+                        await self._throttle_webparser()
+                    return await self._call_once(
+                        transport=transport, url=url, headers=headers,
+                        inner_timeout=inner_timeout, server_name=server_name,
+                        tool_name=tool_name, arguments=arguments,
                     )
-                    await asyncio.sleep(delay)
-                    continue
-                logger.error(
-                    "[MCPClient] %s/%s still failing after %d retries (rate-limited/transient): %s",
-                    server_name, tool_name, max_retries, str(rl)[:200],
-                )
-                raise RuntimeError(
-                    f"MCP {server_name}.{tool_name} failed after {max_retries} retries: {str(rl)[:300]}"
-                ) from rl
+                except _RateLimited as rl:
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "[MCPClient] %s/%s rate-limited/transient (%s); retry %d/%d after %.1fs",
+                            server_name, tool_name, str(rl)[:120], attempt + 1, max_retries, delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error(
+                        "[MCPClient] %s/%s still failing after %d retries (rate-limited/transient): %s",
+                        server_name, tool_name, max_retries, str(rl)[:200],
+                    )
+                    raise RuntimeError(
+                        f"MCP {server_name}.{tool_name} failed after {max_retries} retries: {str(rl)[:300]}"
+                    ) from rl
+            raise RuntimeError(f"MCP {server_name}.{tool_name} failed unexpectedly")
+
+        if server_name == "WebParser":
+            async with self._get_webparser_sem():
+                return await _call_with_retries()
+        return await _call_with_retries()
 
     async def _call_once(
         self,
@@ -243,5 +287,3 @@ class BailianMCPClient:
             if isinstance(item, TextContent):
                 parts.append(item.text)
         return "\n".join(parts)
-
-

@@ -13,7 +13,7 @@ load_dotenv()  # 自动读取项目根目录的 .env 文件（若存在），优
 # --- LLM API Configuration ---
 # --- LLM API 配置 ---
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")   # OpenAI 兼容接口地址
-LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-55470978f1044b70955df04ab6908c02")  # API Key
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")                                    # API Key
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")                        # 模型名称
 
 # --- Agent Limits ---

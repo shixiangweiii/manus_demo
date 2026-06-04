@@ -12,6 +12,7 @@ All tests are mock-based; no real MCP server calls. Covers:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -161,4 +162,40 @@ class TestCallToolExecution:
                 with pytest.raises(RuntimeError, match="MCP tool error"):
                     await client.call_tool("WebSearch", "bailian_web_search", {"query": "test"})
 
+    @pytest.mark.asyncio
+    async def test_webparser_calls_are_serialized_by_semaphore(self, monkeypatch):
+        """WebParser throttling should cap concurrent calls without affecting WebSearch."""
+        import config as cfg
+        monkeypatch.setattr(cfg, "DASHSCOPE_API_KEY", "sk-test-key")
+        monkeypatch.setattr(cfg, "BAILIAN_WEBPARSER_MAX_CONCURRENT", 1)
+        monkeypatch.setattr(cfg, "BAILIAN_WEBPARSER_MIN_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr(cfg, "BAILIAN_MCP_MAX_RETRIES", 0)
+
+        BailianMCPClient._webparser_sem = None
+        BailianMCPClient._webparser_sem_loop = None
+        BailianMCPClient._webparser_lock = None
+        BailianMCPClient._webparser_lock_loop = None
+        BailianMCPClient._webparser_last_call_at = 0.0
+
+        active = 0
+        max_active = 0
+
+        async def fake_call_once(self, **kwargs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return "ok"
+
+        monkeypatch.setattr(BailianMCPClient, "_call_once", fake_call_once)
+
+        client = BailianMCPClient()
+        results = await asyncio.gather(
+            client.call_tool("WebParser", "bailian_web_parser", {"url": "https://a.example"}),
+            client.call_tool("WebParser", "bailian_web_parser", {"url": "https://b.example"}),
+        )
+
+        assert results == ["ok", "ok"]
+        assert max_active == 1
 
