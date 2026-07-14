@@ -297,6 +297,14 @@ SKILL_OPTIMIZE_LLM_ENABLED = os.getenv("SKILL_OPTIMIZE_LLM_ENABLED", "false").lo
 SKILL_OPTIMIZE_VALIDATION_RATIO = float(os.getenv("SKILL_OPTIMIZE_VALIDATION_RATIO", "0.2"))     # train/validation split 验证集比例
 SKILL_OPTIMIZE_MAX_TOKENS = int(os.getenv("SKILL_OPTIMIZE_MAX_TOKENS", "1200"))                  # LLM 修订最大输出 token
 
+# --- v21 Evaluation Platform ---
+# --- 评测平台（v21：文档 → 评测集 → 执行 → 报告 → 聚合分析）---
+EVAL_PLATFORM_DIR = os.path.expanduser(os.getenv("EVAL_PLATFORM_DIR", "~/.manus_demo/evalplatform"))  # 平台数据目录（文档/评测集/运行/报告/分析）
+EVAL_PLATFORM_PORT = int(os.getenv("EVAL_PLATFORM_PORT", "8720"))                                     # Web 服务端口
+EVAL_PLATFORM_MAX_DOC_CHARS = int(os.getenv("EVAL_PLATFORM_MAX_DOC_CHARS", "24000"))                  # 送入 LLM 的文档字符上限（超出截断）
+EVAL_PLATFORM_DEFAULT_NUM_TASKS = int(os.getenv("EVAL_PLATFORM_DEFAULT_NUM_TASKS", "6"))              # 默认生成任务数
+EVAL_PLATFORM_GEN_MAX_TOKENS = int(os.getenv("EVAL_PLATFORM_GEN_MAX_TOKENS", "4096"))                 # 评测集生成 LLM 输出 token 上限
+
 # --- v14 Phase 3: Harness Configuration ---
 # --- Harness 配置层（v14 Phase 3 新增）---
 REACT_TEMPERATURE = float(os.getenv("REACT_TEMPERATURE", "0.5"))          # ReActEngine chat_with_tools 温度

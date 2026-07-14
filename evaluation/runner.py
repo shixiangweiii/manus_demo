@@ -423,10 +423,20 @@ class EvaluationRunner:
         mode: PlanMode,
         tasks: list[BenchmarkTask] | None = None,
         repeat: int = 1,
+        on_unit_start: Any | None = None,
+        on_unit_done: Any | None = None,
     ) -> AggregatedMetrics:
         """
         Evaluate all (or filtered) benchmark tasks with a specific planning mode.
         以指定规划模式评测全部（或筛选后的）基准任务。
+
+        v21: optional per-unit progress hooks so callers (evalplatform) can
+        track progress without re-implementing this loop —
+          on_unit_start(task, mode)          每次试验开始前
+          on_unit_done(task, mode, result)   每次试验结束后
+        Hook exceptions propagate (caller owns its callback's failure policy).
+        v21：可选的逐单元进度钩子，避免调用方（评测平台）复制本循环；
+        钩子异常向上传播，由调用方自行兜底。
         """
         if tasks is None:
             tasks = get_benchmark_tasks()
@@ -440,9 +450,13 @@ class EvaluationRunner:
         try:
             for task in tasks:
                 if repeat <= 1:
+                    if on_unit_start:
+                        on_unit_start(task, mode)
                     result = await self.evaluate_task(task, mode, _shared_memory_dir=_shared_memory_dir)
                     result.trial_count = 1
                     result.trial_results = [result.execution.task_success]
+                    if on_unit_done:
+                        on_unit_done(task, mode, result)
                     results.append(result)
                     logger.info(
                         "[EvalRunner] Task '%s' (%s): score=%.3f success=%s",
@@ -452,9 +466,13 @@ class EvaluationRunner:
                     trial_results: list[bool] = []
                     last_result: TaskEvaluationResult | None = None
                     for k_idx in range(repeat):
+                        if on_unit_start:
+                            on_unit_start(task, mode)
                         r = await self.evaluate_task(task, mode, _shared_memory_dir=_shared_memory_dir)
                         trial_results.append(r.execution.task_success)
                         last_result = r
+                        if on_unit_done:
+                            on_unit_done(task, mode, r)
                         logger.info(
                             "[EvalRunner] Task '%s' (%s) trial %d/%d: success=%s",
                             task.task_id, mode.value, k_idx + 1, repeat,

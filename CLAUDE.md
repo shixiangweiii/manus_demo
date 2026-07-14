@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-Multi-agent AI system with hybrid plan routing. Tasks classified by complexity → one of four engines: simple flat planning (v1), DAG-based parallel (v2), emergent TODO-list (v5), or goal-driven (v8). Supports SubAgent spawning (v9), OTel tracing (v7), HITL ask_user (v13), Task Resume/checkpoint persistence (v14.5), Agentic Memory (v15), MCP Bridge (v16), Self-Evolution (v17), explicit dual-engine + Handoff + Remote/A2A (v18), and security Guardrails (v19).
+Multi-agent AI system with hybrid plan routing. Tasks classified by complexity → one of four engines: simple flat planning (v1), DAG-based parallel (v2), emergent TODO-list (v5), or goal-driven (v8). Supports SubAgent spawning (v9), OTel tracing (v7), HITL ask_user (v13), Task Resume/checkpoint persistence (v14.5), Agentic Memory (v15), MCP Bridge (v16), Self-Evolution (v17), explicit dual-engine + Handoff + Remote/A2A (v18), security Guardrails (v19), Agent Skills (v20), and a document-driven Evaluation Platform (v21).
 
 - **Language**: Python 3.11+ (async/await throughout)
 - **LLM**: OpenAI-compatible API (DeepSeek default)
 - **UI**: Rich console, event-driven
-- **Version**: v19 Guardrails (tool / input-injection / output-redaction)
+- **Version**: v21 Evaluation Platform (document → eval set → run → report → aggregate analysis)
 
 ## Architecture
 
@@ -70,7 +70,9 @@ ReAct loops → ask_user tool (HITL, asyncio.Future bridge, interactive-only)
 - **`evolution/`** — v17 Self-Evolution: ExperienceLearner (post-task distill success→procedural / failure→experiential lesson + v17.4 HITL→FACTUAL preferences, with dedup; build avoidance/preference hints), models (TaskOutcome + tag/source conventions), ClassifierCalibrator + `calibrate` CLI (v17.3 offline grid-search of complexity thresholds → suggestion JSON, never auto-applies). Persists to AgenticMemory; opt-in via SELF_EVOLUTION_ENABLED
 - **`context/`** — ContextManager (token estimation + LLM-based compression with safe split)
 - **`knowledge/`** — KnowledgeRetriever (TF-IDF + cosine)
+- **`webui/`** — local debugging web UI (`python -m webui`, port 8700): FastAPI + WS event stream + no-build frontend (vendored preact/htm ES modules). `config_schema` (declarative grouped config panel schema, apply/restore via getattr/setattr), `serializer` (event payload → JSON-safe, strips Futures, truncates), `events` (EventBridge: sync on_event → asyncio.Queue → WS broadcast, seq ring-buffer replay), `session` (SessionManager: one session = one OrchestratorAgent + config snapshot; single-flight run lock; HITL Future registry; trace_id capture from `_tracing_bridge._root_span`), `ws` (protocol: hello/user_message/resume_task/hitl_response ↔ state/run_started/agent_event/run_finished). Reuses `main._build_tools()`/`_build_agentic_service()`; re-registers tracing viewer handlers at original paths. `__main__.py` sets `TRACING_ENABLED=true TRACING_BACKEND=file` env defaults BEFORE any project import (tracing import-time latch)
 - **`evaluation/`** — benchmark tasks + 4-dimension weighted scoring (Planning 30% / Execution 40% / Efficiency 20% / Reflection 10%). v18.5: delegation-aware execution score (SubAgent+Handoff+Remote), `multi_agent` suite + `handoff_on` variant, handoff/remote metrics in probe/metrics/compare_variants, `expected_handoff_calls` ground truth, runner activates HANDOFF by `handoff` tag (+ HANDOFF_ALLOW_ASK_USER when also `hitl`). v19.4 red-team: `is_attack` ground truth, `red_team` suite + `guardrails_on` variant, security metrics (attack_success_rate / blocked_benign_rate / guardrail_* counts) — guardrails on/off via variant A/B (not tag-activated)
+- **`evalplatform/`** — v21 Evaluation Platform (`python -m evalplatform serve`, port 8720): document-driven pipeline 上传文档 → LLM 生成评测集 → 执行 → Markdown 报告 → 跨运行聚合分析+优化建议. `document` (text ingest, sha256 dedup, binary rejected), `generator` (LLM chat_json → strict validate/repair into `BenchmarkTask`: verifier whitelist + relative-path guard + tool/tag whitelists + hitl-needs-simulated_responses; auto-fallback to zero-LLM heuristic keyword/section generator; tasks are SELF-CONTAINED — doc excerpts embedded in task_description since the evaluated agent never sees the doc), `executor` (wraps `EvaluationRunner.evaluate_task` per task×mode, progress via store callback), `reporting` (EvalReport + Markdown), `analyzer` (deterministic stats + rule-based suggestions mapped to real config knobs + optional LLM insight), `store` (atomic JSON files under EVAL_PLATFORM_DIR), `server` (FastAPI + vanilla-JS frontend; JSON-body upload — no python-multipart dep; runs serialized via asyncio.Lock because runner flips module-level config), `cli` (upload/generate/run/report/analyze/list/serve)
 
 ## Event Multicast
 
@@ -97,6 +99,11 @@ HITL_ENABLED=true python main.py        # Interactive only
 python main.py --list-tasks             # List checkpointed tasks
 python main.py --resume <task_id>       # Resume a checkpointed task
 python -m tracing                       # Web viewer localhost:8000
+python -m webui                         # Debugging web UI localhost:8700 (chat + config panel + live events + trace)
+python -m webui --llm-api-key sk-xxx    # Pass a (temporary) LLM key via CLI, takes precedence over .env
+
+python -m evalplatform serve            # v21 评测平台 localhost:8720（上传文档→生成评测集→执行→报告→聚合分析）
+python -m evalplatform upload doc.md    # CLI 流水线：upload → generate --doc <id> [--heuristic] → run --evalset <id> → report --run <id> → analyze [--llm]
 
 python -m pytest tests/ -v -o asyncio_mode=auto
 python -m pytest tests/ -o asyncio_mode=auto --ignore=tests/test_llm_integration.py
@@ -182,6 +189,11 @@ All via env vars / `.env` (see `config.py`):
 | `MCP_BRIDGE_SCHEMA_MODE` | `loose` | `loose` / `strict` schema conversion |
 | `MCP_SERVER_ENABLED` | `false` | v16 MCP Server master switch |
 | `MCP_SERVER_TRANSPORT` | `streamable_http` | `streamable_http` / `stdio` |
+| `EVAL_PLATFORM_DIR` | `~/.manus_demo/evalplatform` | v21 platform data dir (documents/evalsets/runs/reports/analyses) |
+| `EVAL_PLATFORM_PORT` | `8720` | v21 web server port |
+| `EVAL_PLATFORM_MAX_DOC_CHARS` | `24000` | Doc chars sent to LLM for eval-set generation (truncated) |
+| `EVAL_PLATFORM_DEFAULT_NUM_TASKS` | `6` | Default generated task count |
+| `EVAL_PLATFORM_GEN_MAX_TOKENS` | `4096` | Max output tokens for eval-set generation |
 
 ## Code Conventions
 
