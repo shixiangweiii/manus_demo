@@ -7,39 +7,39 @@ Settings are initialized from the structured settings snapshot.
 
 from __future__ import annotations
 
-from core.settings import TracingSettings, get_settings
+from core.settings import TracingSettings
 
-root_settings = get_settings()
+default_settings = TracingSettings()
 
 
 # --- Core Settings ---
 # --- 核心设置 ---
 
-ENABLED: bool = root_settings.tracing.enabled
+ENABLED: bool = default_settings.enabled
 """Master switch for tracing. When False, all tracing components are no-ops.
 总开关。关闭时所有 tracing 组件为空操作。"""
 
-BACKEND: str = root_settings.tracing.backend
+BACKEND: str = default_settings.backend
 """Export backend: 'console' | 'file' | 'rich' | 'otlp' | 'phoenix'.
 导出后端选择。"""
 
-ENDPOINT: str = root_settings.tracing.endpoint
+ENDPOINT: str = default_settings.endpoint
 """OTLP HTTP endpoint URL.
 OTLP HTTP 端点地址。"""
 
-SERVICE_NAME: str = root_settings.tracing.service_name
+SERVICE_NAME: str = default_settings.service_name
 """Service name for Resource identification.
 服务标识名称。"""
 
-SAMPLE_RATE: float = root_settings.tracing.sample_rate
+SAMPLE_RATE: float = default_settings.sample_rate
 """Sampling rate (0.0 to 1.0). 1.0 = trace everything.
 采样率。1.0 = 全量追踪。"""
 
-LOG_PROMPTS: bool = root_settings.tracing.log_prompts
+LOG_PROMPTS: bool = default_settings.log_prompts
 """Whether to record full prompt/response content in spans.
 是否在 Span 中记录完整的 prompt/response 内容。"""
 
-MAX_ATTRIBUTE_LENGTH: int = root_settings.tracing.max_attribute_length
+MAX_ATTRIBUTE_LENGTH: int = default_settings.max_attribute_length
 """Maximum character length for attribute values (truncation protection).
 属性值最大字符长度（截断保护）。"""
 
@@ -50,7 +50,7 @@ MAX_ATTRIBUTE_LENGTH: int = root_settings.tracing.max_attribute_length
 SERVICE_VERSION: str = "local"
 """Local service label embedded in Resource metadata."""
 
-TRACE_OUTPUT_DIR: str = root_settings.tracing.output_dir
+TRACE_OUTPUT_DIR: str = default_settings.output_dir
 """Expanded directory for FileSpanExporter output.
 FileSpanExporter 的已展开输出目录。"""
 
@@ -65,17 +65,6 @@ BATCH_MAX_EXPORT_SIZE: int = 256
 BATCH_SCHEDULE_DELAY_MS: int = 5000
 """Delay between exports in milliseconds.
 两次导出之间的延迟（毫秒）。"""
-
-
-# --- Sensitive Data Patterns ---
-# --- 敏感数据模式 ---
-
-SENSITIVE_KEYS: set[str] = {
-    "api_key", "api_secret", "token", "password",
-    "credential", "secret", "authorization",
-}
-"""Attribute keys that should be redacted.
-需要脱敏的属性键名。"""
 
 
 def configure(settings: TracingSettings) -> None:

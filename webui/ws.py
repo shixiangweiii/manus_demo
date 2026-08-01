@@ -65,7 +65,13 @@ async def _handle_message(websocket: WebSocket, msg: dict[str, Any]) -> None:
     if msg_type == "hello":
         # 重放增量 → state 快照（顺序保证客户端先补齐历史再对齐状态）
         # replay missed messages, THEN the state snapshot
-        last_seq = int(msg.get("last_seq") or 0)
+        try:
+            last_seq = int(msg.get("last_seq") or 0)
+            if last_seq < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            await _send_error(websocket, "bad_message", "last_seq 必须是非负整数")
+            return
         for buffered in bridge.replay(last_seq):
             await websocket.send_json(buffered)
         await websocket.send_json(mgr.state_snapshot())

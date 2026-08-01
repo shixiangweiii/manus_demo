@@ -94,9 +94,9 @@ class CaseMetrics(BaseModel):
 class CaseResult(BaseModel):
     case_id: str
     experiment: ExperimentSpec
-    actual_engine: EngineKind
-    actual_executor: ExecutorKind
-    actual_effort: Effort
+    actual_engine: EngineKind | None = None
+    actual_executor: ExecutorKind | None = None
+    actual_effort: Effort | None = None
     answer: str = ""
     metrics: CaseMetrics = Field(default_factory=CaseMetrics)
     verifier_details: list[dict[str, Any]] = Field(default_factory=list)

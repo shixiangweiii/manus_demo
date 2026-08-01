@@ -17,7 +17,7 @@ import os
 import re
 from typing import Any, Callable
 
-import config
+from core.settings import CapabilitySettings
 from llm.client import LLMClient
 from memory.models import (
     AgenticMemoryRecord,
@@ -75,10 +75,12 @@ class SkillAutoDistiller:
         self,
         llm_client: LLMClient,
         memory_service: AgenticMemoryService,
+        settings: CapabilitySettings,
         on_event: Callable[[str, Any], None] | None = None,
     ):
         self._llm = llm_client
         self._memory = memory_service
+        self._settings = settings
         self._on_event = on_event or (lambda *_: None)
 
     def _emit(self, event: str, data: Any = None) -> None:
@@ -102,7 +104,7 @@ class SkillAutoDistiller:
         if not task:
             return False
 
-        min_successes = getattr(config, "SKILL_AUTO_DISTILL_MIN_SUCCESSES", 3)
+        min_successes = self._settings.skill_auto_distill_min_successes
         query = MemorySearchQuery(
             query=task,
             tags=[EXPERIENCE_TAG],
@@ -159,7 +161,7 @@ class SkillAutoDistiller:
             # 收集同类成功经验
             experiences = self._gather_success_experiences(task)
 
-            if config.SELF_EVOLUTION_LLM_EXTRACTION:
+            if self._settings.self_evolution_llm_extraction:
                 skill_data = await self._llm_distill(task, experiences)
             else:
                 skill_data = self._deterministic_distill(task, experiences)
@@ -365,7 +367,7 @@ class SkillAutoDistiller:
         """
         name = skill_data["name"]
         # 写入用户级目录（半可信）
-        skill_base_dir = getattr(config, "SKILLS_USER_DIR", os.path.expanduser("~/.manus_demo/skills"))
+        skill_base_dir = self._settings.skills_user_dir
         skill_dir = os.path.join(skill_base_dir, name)
 
         try:
@@ -431,7 +433,7 @@ class SkillAutoDistiller:
         在 AgenticMemory 中记录蒸馏标记，防止重复蒸馏同类任务模式。
         Record a distillation marker in AgenticMemory to prevent re-distillation.
         """
-        confidence_cap = getattr(config, "SKILL_AUTO_DISTILL_CONFIDENCE_CAP", 0.55)
+        confidence_cap = self._settings.skill_auto_distill_confidence_cap
         record = AgenticMemoryRecord(
             kind=MemoryKind.PROCEDURAL,
             content=f"已蒸馏为技能: {skill_name}\n任务模式: {task[:_TASK_TRUNCATE]}",

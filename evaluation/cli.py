@@ -127,6 +127,7 @@ async def _run(args: argparse.Namespace) -> None:
         run_record.progress.total_units = total
         run_record.progress.current_task_id = case.task_id
         run_record.progress.current_experiment = experiment.id
+        store.save_run(run_record)
         print(f"[{completed}/{total}] {case.task_id} × {experiment.id}")
 
     try:
@@ -166,14 +167,18 @@ async def _generate(args: argparse.Namespace, store: EvaluationStore) -> None:
         llm = LLMClient.from_settings(settings)
     if args.num_tasks is not None and not 1 <= args.num_tasks <= 20:
         raise ValueError("num-tasks must be between 1 and 20")
-    evalset = await EvalSetGenerator(settings, llm).generate(
-        document,
-        name=args.name,
-        target_goal=args.goal,
-        num_tasks=args.num_tasks,
-    )
-    store.save_evalset(evalset)
-    print(json.dumps(evalset.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    try:
+        evalset = await EvalSetGenerator(settings, llm).generate(
+            document,
+            name=args.name,
+            target_goal=args.goal,
+            num_tasks=args.num_tasks,
+        )
+        store.save_evalset(evalset)
+        print(json.dumps(evalset.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    finally:
+        if llm is not None:
+            await llm.aclose()
 
 
 def main(argv: list[str] | None = None) -> None:

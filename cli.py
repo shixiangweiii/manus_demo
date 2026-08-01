@@ -70,8 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
 async def _runtime(interactive: bool):
     settings = get_settings()
     events = EventBus()
-    events.subscribe(ConsoleRenderer())
-    return await build_runtime(settings, events, interactive=interactive)
+    renderer = ConsoleRenderer()
+    events.subscribe(renderer)
+    runtime = await build_runtime(settings, events, interactive=interactive)
+    return runtime, renderer
 
 
 def _overrides(args: argparse.Namespace) -> dict:
@@ -117,44 +119,53 @@ async def _run_command(args: argparse.Namespace) -> None:
             ),
             expose_agent=caps.mcp_server_expose_agent,
         )
-        if caps.mcp_server_transport == "stdio":
-            await server.run_stdio()
-        else:
-            await server.run_streamable_http()
-        return
-
-    runtime = await _runtime(interactive=args.command in {"chat", "resume"})
-    if args.command == "run":
-        await runtime.run(args.task, _overrides(args))
-        return
-    if args.command == "workflow":
-        from workflow.loader import load_workflow_spec
-
-        await runtime.run_workflow(load_workflow_spec(args.path))
-        return
-    if args.command == "resume":
-        await runtime.resume(args.task_id)
-        return
-
-    console.print(
-        Panel(
-            "Available engines: sequential, dag, todo, goal\n"
-            "Type a task, or type quit to exit.",
-            title="[bold blue]Manus Demo[/bold blue]",
-        )
-    )
-    while True:
         try:
-            task = console.input("[bold blue]You > [/bold blue]").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if task.lower() in {"quit", "exit", "q"}:
-            break
-        if task:
+            if caps.mcp_server_transport == "stdio":
+                await server.run_stdio()
+            else:
+                await server.run_streamable_http()
+        finally:
+            await runtime.aclose()
+        return
+
+    runtime, renderer = await _runtime(
+        interactive=args.command in {"chat", "resume"}
+    )
+    try:
+        if args.command == "run":
+            await runtime.run(args.task, _overrides(args))
+            return
+        if args.command == "workflow":
+            from workflow.loader import load_workflow_spec
+
+            await runtime.run_workflow(load_workflow_spec(args.path))
+            return
+        if args.command == "resume":
+            await runtime.resume(args.task_id)
+            return
+
+        console.print(
+            Panel(
+                "Available engines: sequential, dag, todo, goal\n"
+                "Type a task, or type quit to exit.",
+                title="[bold blue]Manus Demo[/bold blue]",
+            )
+        )
+        while True:
             try:
-                await runtime.run(task, _overrides(args))
-            except Exception:
-                logging.exception("Task failed")
+                task = console.input("[bold blue]You > [/bold blue]").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if task.lower() in {"quit", "exit", "q"}:
+                break
+            if task:
+                try:
+                    await runtime.run(task, _overrides(args))
+                except Exception:
+                    logging.exception("Task failed")
+    finally:
+        await renderer.aclose()
+        await runtime.aclose()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -172,3 +183,7 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as exc:
         console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
         raise SystemExit(1) from exc
+    finally:
+        from tracing import shutdown_tracing
+
+        shutdown_tracing()

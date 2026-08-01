@@ -22,12 +22,13 @@ class GuardrailEngine:
         on_event: Callable[[str, Any], None] | None = None,
         confirm_callback: Callable[[str, dict], Awaitable[bool]] | None = None,
         sandbox_dir: str | None = None,
+        shell_mode: str = "restricted",
     ) -> None:
         self.settings = settings or get_settings().capabilities
         self._on_event = on_event or (lambda *_: None)
         self._confirm_callback = confirm_callback
         configured_sandbox = sandbox_dir or get_settings().paths.sandbox_dir
-        self._tool = ToolGuardrail(configured_sandbox)
+        self._tool = ToolGuardrail(configured_sandbox, shell_mode=shell_mode)
         self._input = InputGuardrail(
             mode=self.settings.guardrail_input_mode,
             mcp_prefix=self.settings.mcp_bridge_tool_prefix,
@@ -128,4 +129,8 @@ def current_guardrail() -> GuardrailEngine | None:
     settings = get_settings()
     if not settings.capabilities.guardrails:
         return None
-    return GuardrailEngine(settings.capabilities)
+    return GuardrailEngine(
+        settings.capabilities,
+        sandbox_dir=settings.paths.sandbox_dir,
+        shell_mode=settings.tools.shell_mode,
+    )

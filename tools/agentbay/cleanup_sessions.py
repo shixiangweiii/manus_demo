@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 
+from core.settings import get_settings
 from tools.agentbay.runtime import get_agentbay_sdk, get_api_key, session_labels
 
 
@@ -18,12 +19,13 @@ def main() -> int:
     parser.add_argument("--status", default="RUNNING", help="Session status to list. Defaults to RUNNING.")
     args = parser.parse_args()
 
-    api_key = get_api_key()
+    settings = get_settings().capabilities
+    api_key = get_api_key(settings)
     if not api_key:
         print("AGENTBAY_API_KEY is not configured.")
         return 1
 
-    AgentBay, _, _, _ = get_agentbay_sdk()
+    AgentBay, _, _, _ = get_agentbay_sdk(settings)
     agent_bay = AgentBay(api_key=api_key)
     labels = session_labels("")
     labels.pop("tool", None)

@@ -40,9 +40,18 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         event_bridge.start()
-        yield
-        await session_manager.shutdown()
-        await event_bridge.stop()
+        try:
+            yield
+        finally:
+            try:
+                await session_manager.shutdown()
+            finally:
+                try:
+                    await event_bridge.stop()
+                finally:
+                    from tracing import shutdown_tracing
+
+                    shutdown_tracing()
 
     app = FastAPI(
         title="Manus Demo WebUI",

@@ -12,8 +12,10 @@ from workflow.models import WorkflowResult, WorkflowSpec, WorkflowStep
 
 logger = logging.getLogger(__name__)
 
-# ${step_id} 模板占位符（step_id 为字母数字下划线连字符）
-_TEMPLATE_RE = re.compile(r"\$\{([A-Za-z0-9_\-]+)\}")
+# ${steps.<step_id>} references one completed dependency. A doubled dollar
+# sign produces the literal placeholder text instead of resolving it.
+_TEMPLATE_RE = re.compile(r"(?<!\$)\$\{steps\.([A-Za-z0-9_\-]+)\}")
+_ESCAPED_TEMPLATE_RE = re.compile(r"\$\$\{steps\.([A-Za-z0-9_\-]+)\}")
 
 
 class WorkflowEngine:
@@ -211,18 +213,29 @@ class WorkflowEngine:
             if not isinstance(value, str):
                 return value
 
+            escaped: list[str] = []
+
+            def protect(match: re.Match[str]) -> str:
+                escaped.append(f"${{steps.{match.group(1)}}}")
+                return f"\x00WORKFLOW_LITERAL_{len(escaped) - 1}\x00"
+
+            protected = _ESCAPED_TEMPLATE_RE.sub(protect, value)
+
             missing = [
                 match.group(1)
-                for match in _TEMPLATE_RE.finditer(value)
+                for match in _TEMPLATE_RE.finditer(protected)
                 if match.group(1) not in step_results
             ]
             if missing:
                 names = ", ".join(sorted(set(missing)))
                 raise ValueError(f"unresolved workflow result(s): {names}")
-            return _TEMPLATE_RE.sub(
+            resolved = _TEMPLATE_RE.sub(
                 lambda match: step_results[match.group(1)],
-                value,
+                protected,
             )
+            for index, literal in enumerate(escaped):
+                resolved = resolved.replace(f"\x00WORKFLOW_LITERAL_{index}\x00", literal)
+            return resolved
 
         return resolve(params)
 

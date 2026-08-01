@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from typing import Any
 
-import config
-from tools.agentbay.runtime import concurrency_sem, create_session, delete_session
+from core.settings import CapabilitySettings
+from tools.agentbay.runtime import create_session, delete_session
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,14 @@ logger = logging.getLogger(__name__)
 
 class AgentBayCodeTool(BaseTool):
     """Run code in an AgentBay CodeSpace session."""
+
+    def __init__(
+        self,
+        settings: CapabilitySettings,
+        semaphore: asyncio.Semaphore,
+    ) -> None:
+        self._settings = settings
+        self._semaphore = semaphore
 
     @property
     def name(self) -> str:
@@ -54,20 +63,26 @@ class AgentBayCodeTool(BaseTool):
         if language not in {"python", "javascript"}:
             return "Error: language must be one of: python, javascript."
 
-        timeout_s = kwargs.get("timeout_s", config.AGENTBAY_CODE_TIMEOUT_SECONDS)
+        timeout_s = kwargs.get(
+            "timeout_s", self._settings.agentbay_code_timeout_seconds
+        )
         try:
             timeout_s = int(timeout_s)
         except (TypeError, ValueError):
-            timeout_s = config.AGENTBAY_CODE_TIMEOUT_SECONDS
+            timeout_s = self._settings.agentbay_code_timeout_seconds
         timeout_s = max(1, min(60, timeout_s))
 
-        async with concurrency_sem():
+        async with self._semaphore:
             handle = None
             result_text = ""
             deleted = True
             delete_error = ""
             try:
-                handle = await create_session(config.AGENTBAY_CODE_IMAGE, self.name)
+                handle = await create_session(
+                    self._settings.agentbay_code_image,
+                    self.name,
+                    self._settings,
+                )
                 logger.info("[AgentBayCodeTool] Created session %s", handle.session_id)
                 result = await self._run_code(handle.session, code, language, timeout_s)
                 if not getattr(result, "success", False):
@@ -95,8 +110,6 @@ class AgentBayCodeTool(BaseTool):
 
     @staticmethod
     async def _run_code(session: Any, code: str, language: str, timeout_s: int) -> Any:
-        import asyncio
-
         return await asyncio.to_thread(
             session.code.run_code,
             code,

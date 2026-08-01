@@ -23,6 +23,7 @@ class CheckpointStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class RuntimeCheckpoint(BaseModel):

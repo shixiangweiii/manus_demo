@@ -35,6 +35,8 @@ python main.py mcp-server
 
 普通配置写入 `settings.toml`；`.env` 只保存 API Key。CLI 参数仅覆盖当前任务。
 
+默认 Shell 工具使用 `restricted` 模式：只允许在 sandbox 内以 argv 方式执行单个白名单命令，不经过 shell 展开。`trusted` 模式会执行完整 bash，拥有当前本机用户权限，必须显式开启。Python 执行器默认不注册，仅 `python_mode = "trusted"` 时可用。
+
 ## 本地服务与评测
 
 ```bash

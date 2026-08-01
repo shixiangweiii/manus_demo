@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.events import EventBus, RuntimeEvent
-from core.models import EngineKind
+from core.models import Effort, EngineKind, ExecutorKind
 from core.settings import AppSettings, RunSettings, get_settings, validate_settings
 from evaluation.metrics import aggregate_results
 from evaluation.models import (
@@ -53,6 +53,33 @@ class _Collector:
         wanted = set(names)
         return sum(event.name in wanted for event in self.events)
 
+    def selected_runtime(
+        self,
+    ) -> tuple[EngineKind | None, ExecutorKind | None, Effort | None]:
+        engine: EngineKind | None = None
+        executor: ExecutorKind | None = None
+        effort: Effort | None = None
+        for event in reversed(self.events):
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if engine is None and event.engine:
+                try:
+                    engine = EngineKind(event.engine)
+                except ValueError:
+                    pass
+            if executor is None and event.executor:
+                try:
+                    executor = ExecutorKind(event.executor)
+                except ValueError:
+                    pass
+            if effort is None and payload.get("effort"):
+                try:
+                    effort = Effort(payload["effort"])
+                except ValueError:
+                    pass
+            if engine is not None and executor is not None and effort is not None:
+                break
+        return engine, executor, effort
+
 
 class EvaluationRunner:
     def __init__(self, settings: AppSettings | None = None) -> None:
@@ -74,6 +101,7 @@ class EvaluationRunner:
         events = EventBus()
         events.subscribe(collector)
         started_at = time.perf_counter()
+        runtime = None
         try:
             runtime = await build_runtime(settings, events, interactive=False)
             run = RunSettings(
@@ -119,18 +147,23 @@ class EvaluationRunner:
             )
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - started_at) * 1000
+            actual_engine, actual_executor, actual_effort = collector.selected_runtime()
             return CaseResult(
                 case_id=case.task_id,
                 experiment=experiment,
-                actual_engine=experiment.engine,
-                actual_executor=experiment.executor,
-                actual_effort=experiment.effort,
+                actual_engine=actual_engine,
+                actual_executor=actual_executor,
+                actual_effort=actual_effort,
                 metrics=CaseMetrics(success=False, latency_ms=elapsed_ms),
                 error=f"{type(exc).__name__}: {exc}",
                 trial=trial,
             )
         finally:
-            shutil.rmtree(sandbox, ignore_errors=True)
+            try:
+                if runtime is not None:
+                    await runtime.aclose()
+            finally:
+                shutil.rmtree(sandbox, ignore_errors=True)
 
     async def evaluate_matrix(
         self,

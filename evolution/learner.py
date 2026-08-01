@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-import config
+from core.settings import CapabilitySettings
 from llm.client import LLMClient
 from memory.models import (
     AgenticMemoryRecord,
@@ -56,10 +56,12 @@ class ExperienceLearner:
         self,
         llm_client: LLMClient,
         memory_service: AgenticMemoryService,
+        settings: CapabilitySettings,
         on_event: Callable[[str, Any], None] | None = None,
     ):
         self._llm = llm_client
         self._memory = memory_service
+        self._settings = settings
         self._on_event = on_event or (lambda *_: None)
 
     def _emit(self, event: str, data: Any = None) -> None:
@@ -101,8 +103,8 @@ class ExperienceLearner:
         query = MemorySearchQuery(
             query=task,
             tags=[FAILURE_LESSON_TAG],
-            top_k=max(1, config.SELF_EVOLUTION_MAX_HINTS),
-            min_confidence=config.MEMORY_MIN_CONFIDENCE,
+            top_k=max(1, self._settings.self_evolution_max_hints),
+            min_confidence=self._settings.memory_min_confidence,
         )
         try:
             results = self._memory.search(query)
@@ -116,7 +118,7 @@ class ExperienceLearner:
             return ""
 
         lines = ["## 过往失败教训（请主动规避 / Past failures to avoid）"]
-        for r in lessons[: config.SELF_EVOLUTION_MAX_HINTS]:
+        for r in lessons[: self._settings.self_evolution_max_hints]:
             md = r.record.metadata or {}
             reason = md.get("failure_reason") or r.record.summary
             correction = md.get("correction") or ""
@@ -134,7 +136,7 @@ class ExperienceLearner:
     async def _learn_success(self, outcome: TaskOutcome) -> list[AgenticMemoryRecord]:
         summary = ""
         tags: list[str] = []
-        if config.SELF_EVOLUTION_LLM_EXTRACTION:
+        if self._settings.self_evolution_llm_extraction:
             data = await self._llm_extract_success(outcome)
             if data:
                 summary = (data.get("summary") or "").strip()
@@ -154,7 +156,7 @@ class ExperienceLearner:
             tags=list(dict.fromkeys([EXPERIENCE_TAG, task_type, *tags])),
             task_id=outcome.task_id,
             source=EVOLUTION_SOURCE,
-            confidence=min(0.6, config.SELF_EVOLUTION_CONFIDENCE_CAP),
+            confidence=min(0.6, self._settings.self_evolution_confidence_cap),
             importance=0.6,
             metadata={
                 "task_type": task_type,
@@ -190,7 +192,7 @@ class ExperienceLearner:
         failure_reason = ""
         correction = ""
 
-        if config.SELF_EVOLUTION_LLM_EXTRACTION:
+        if self._settings.self_evolution_llm_extraction:
             data = await self._llm_extract_failure(outcome)
             if data:
                 failure_reason = (data.get("failure_reason") or "").strip()
@@ -221,7 +223,7 @@ class ExperienceLearner:
             tags=[FAILURE_LESSON_TAG, task_type],
             task_id=outcome.task_id,
             source=EVOLUTION_SOURCE,
-            confidence=min(0.5, config.SELF_EVOLUTION_CONFIDENCE_CAP),
+            confidence=min(0.5, self._settings.self_evolution_confidence_cap),
             importance=0.5,
             metadata={
                 "task_type": task_type,
@@ -276,7 +278,7 @@ class ExperienceLearner:
         if not hitl_pairs:
             return []
         try:
-            if config.SELF_EVOLUTION_LLM_EXTRACTION:
+            if self._settings.self_evolution_llm_extraction:
                 prefs = await self._llm_extract_preferences(task, hitl_pairs)
                 if prefs:
                     return self._store_preferences(prefs)
@@ -309,7 +311,7 @@ class ExperienceLearner:
                 summary=summary[:200],
                 tags=[USER_PREFERENCE_TAG],
                 source=EVOLUTION_SOURCE,
-                confidence=min(0.6, config.SELF_EVOLUTION_CONFIDENCE_CAP),
+                confidence=min(0.6, self._settings.self_evolution_confidence_cap),
                 importance=0.6,
                 metadata={
                     "question": preference,
@@ -346,7 +348,7 @@ class ExperienceLearner:
             return ""
         # 按重要度 + 最近更新排序，取前 N 条
         prefs.sort(key=lambda r: (r.importance, r.updated_at), reverse=True)
-        prefs = prefs[: max(1, config.SELF_EVOLUTION_MAX_HINTS)]
+        prefs = prefs[: max(1, self._settings.self_evolution_max_hints)]
 
         lines = ["## 已知用户偏好（请遵循 / Known user preferences）"]
         for r in prefs:

@@ -7,7 +7,7 @@ from typing import Any
 
 from agents.planner import PlannerAgent
 from agents.reflector import ReflectorAgent
-from core.models import Action, EngineKind, TaskRequest
+from core.models import Action, Effort, EngineKind, TaskRequest
 from dag.executor import DAGExecutor
 from engines.base import TaskEngine
 from execution.react import to_legacy_effort
@@ -33,10 +33,13 @@ class _DagActionAdapter:
             description=node.description,
             success_criteria=node.exit_criteria.description if node.exit_criteria else "",
         )
+        selected_effort = self._engine.effort
+        if effort is not None:
+            selected_effort = Effort(getattr(effort, "value", effort))
         core_result = await self._action_executor.execute(
             action,
             context=context,
-            effort=self._engine.effort,
+            effort=selected_effort,
         )
         self._engine.executor.results.append(core_result)
         result = core_result.to_legacy()
@@ -84,10 +87,18 @@ class DagEngine(TaskEngine):
         raw = await runner.execute(dag)
         reflection = await reflector.reflect_dag(request.task, dag, adapter.results)
         answer = await self.synthesize(request.task, raw)
-        action_nodes = [node for node in dag.nodes.values() if node.node_type == NodeType.ACTION]
-        success = bool(action_nodes) and all(
-            node.status == NodeStatus.COMPLETED for node in action_nodes
-        ) and reflection.passed
+        action_nodes = [
+            node for node in dag.nodes.values() if node.node_type == NodeType.ACTION
+        ]
+        completed_actions = [
+            node for node in action_nodes if node.status == NodeStatus.COMPLETED
+        ]
+        success = (
+            dag.is_complete()
+            and bool(completed_actions)
+            and not runner.failed_action_ids
+            and reflection.passed
+        )
         result = self.result(
             request,
             answer=answer,
@@ -96,6 +107,8 @@ class DagEngine(TaskEngine):
             metadata={
                 "reflection": reflection.model_dump(),
                 "dag": dag.to_dict(),
+                "failed_action_ids": sorted(runner.failed_action_ids),
+                "condition_skipped_ids": sorted(runner.condition_skipped_ids),
             },
         )
         self.emit_completed(result)

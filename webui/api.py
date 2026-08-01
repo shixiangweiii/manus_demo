@@ -11,12 +11,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import logging
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from runtime.factory import RuntimeInitializationError
 from webui import config_schema
 
 router = APIRouter(prefix="/api/webui")
+logger = logging.getLogger(__name__)
+
+
+class CreateSessionRequest(BaseModel):
+    overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------
@@ -44,7 +53,10 @@ def _session_manager(request: Request) -> Any:
 
 
 @router.post("/session")
-async def create_session(request: Request) -> JSONResponse:
+async def create_session(
+    request: Request,
+    body: CreateSessionRequest,
+) -> JSONResponse:
     """校验 overrides 并创建独立运行时会话。运行中返回 409。"""
     mgr = _session_manager(request)
     if mgr is None:
@@ -52,10 +64,8 @@ async def create_session(request: Request) -> JSONResponse:
     if mgr.is_running:
         return JSONResponse({"error": "run_in_progress", "message": "任务运行中，无法变更会话"}, status_code=409)
 
-    body = await request.json()
-    overrides = body.get("overrides") or {}
     try:
-        coerced = config_schema.validate(overrides)
+        coerced = config_schema.validate(body.overrides)
     except config_schema.ConfigValidationError as exc:
         return JSONResponse({"error": "invalid_config", "errors": exc.errors}, status_code=422)
 
@@ -65,6 +75,22 @@ async def create_session(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "invalid_config", "message": str(exc)},
             status_code=422,
+        )
+    except RuntimeInitializationError as exc:
+        logger.warning("WebUI runtime dependency is unavailable: %s", exc)
+        return JSONResponse(
+            {
+                "error": "runtime_unavailable",
+                "component": exc.component,
+                "message": str(exc),
+            },
+            status_code=503,
+        )
+    except Exception:
+        logger.exception("Unexpected WebUI runtime initialization failure")
+        return JSONResponse(
+            {"error": "internal_error", "message": "Runtime initialization failed"},
+            status_code=500,
         )
     return JSONResponse({"session": session.describe()})
 

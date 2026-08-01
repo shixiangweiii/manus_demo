@@ -32,24 +32,25 @@ class EvalSetExecutor:
         run: EvalRunRecord,
         on_progress: Callable[[EvalRunRecord], None] | None = None,
     ) -> EvalRunRecord:
-        if not evalset.tasks:
-            run.status = RunStatus.FAILED
-            run.error = "评测集中没有任务"
-            return run
-        run.repeat = validate_repeat(run.repeat)
         run.status = RunStatus.RUNNING
         run.started_at = time.time()
-        run.progress.total_units = len(evalset.tasks) * len(run.experiments) * run.repeat
-
-        def progress(completed, total, case, experiment):
-            run.progress.completed_units = completed
-            run.progress.total_units = total
-            run.progress.current_task_id = case.task_id
-            run.progress.current_experiment = experiment.id
-            if on_progress:
-                on_progress(run)
 
         try:
+            if not evalset.tasks:
+                raise ValueError("评测集中没有任务")
+            run.repeat = validate_repeat(run.repeat)
+            run.progress.total_units = (
+                len(evalset.tasks) * len(run.experiments) * run.repeat
+            )
+
+            def progress(completed, total, case, experiment):
+                run.progress.completed_units = completed
+                run.progress.total_units = total
+                run.progress.current_task_id = case.task_id
+                run.progress.current_experiment = experiment.id
+                if on_progress:
+                    on_progress(run)
+
             run.report = await EvaluationRunner(self.settings).evaluate_matrix(
                 evalset.tasks,
                 run.experiments,
@@ -61,9 +62,10 @@ class EvalSetExecutor:
         except Exception as exc:
             run.status = RunStatus.FAILED
             run.error = f"{type(exc).__name__}: {exc}"
-        run.finished_at = time.time()
-        run.progress.current_task_id = ""
-        run.progress.current_experiment = ""
-        if on_progress:
-            on_progress(run)
+        finally:
+            run.finished_at = time.time()
+            run.progress.current_task_id = ""
+            run.progress.current_experiment = ""
+            if on_progress:
+                on_progress(run)
         return run

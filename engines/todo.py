@@ -7,6 +7,7 @@ import time
 from agents.emergent_planner import EmergentPlannerAgent
 from core.models import EngineKind, TaskRequest
 from engines.base import TaskEngine
+from execution.react import to_legacy_effort
 
 
 class TodoEngine(TaskEngine):
@@ -32,7 +33,7 @@ class TodoEngine(TaskEngine):
         answer = await planner.execute(
             request.task,
             request.context,
-            effort=self.effort,
+            effort=to_legacy_effort(self.effort),
         )
         self.executor.results = [
             self.executor.from_legacy(item) for item in planner.last_results

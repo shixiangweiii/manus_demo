@@ -9,8 +9,8 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-import config
-from tools.agentbay.runtime import concurrency_sem, create_session, delete_session, get_agentbay_sdk
+from core.settings import CapabilitySettings
+from tools.agentbay.runtime import create_session, delete_session, get_agentbay_sdk
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 
 class AgentBayBrowserTool(BaseTool):
     """Use AgentBay BrowserUse through Playwright CDP."""
+
+    def __init__(
+        self,
+        settings: CapabilitySettings,
+        sandbox_dir: str,
+        semaphore: asyncio.Semaphore,
+    ) -> None:
+        self._settings = settings
+        self._sandbox_dir = sandbox_dir
+        self._semaphore = semaphore
 
     @property
     def name(self) -> str:
@@ -71,18 +81,27 @@ class AgentBayBrowserTool(BaseTool):
         if operation not in {"title", "text", "screenshot"}:
             return "Error: operation must be one of: title, text, screenshot."
 
-        timeout_ms = _bounded_int(kwargs.get("timeout_ms"), config.AGENTBAY_BROWSER_TIMEOUT_MS, 1000, 60000)
+        timeout_ms = _bounded_int(
+            kwargs.get("timeout_ms"),
+            self._settings.agentbay_browser_timeout_ms,
+            1000,
+            60000,
+        )
         max_chars = _bounded_int(kwargs.get("max_chars"), 4000, 200, 12000)
         selector = str(kwargs.get("selector", "") or "").strip()
         full_page = bool(kwargs.get("full_page", False))
 
-        async with concurrency_sem():
+        async with self._semaphore:
             handle = None
             result_text = ""
             deleted = True
             delete_error = ""
             try:
-                handle = await create_session(config.AGENTBAY_BROWSER_IMAGE, self.name)
+                handle = await create_session(
+                    self._settings.agentbay_browser_image,
+                    self.name,
+                    self._settings,
+                )
                 logger.info("[AgentBayBrowserTool] Created session %s", handle.session_id)
                 result_text = await asyncio.to_thread(
                     self._run_browser_sync,
@@ -94,6 +113,8 @@ class AgentBayBrowserTool(BaseTool):
                     full_page,
                     timeout_ms,
                     max_chars,
+                    self._settings,
+                    self._sandbox_dir,
                 )
             except Exception as exc:
                 sid = getattr(handle, "session_id", "(no session)")
@@ -123,8 +144,10 @@ class AgentBayBrowserTool(BaseTool):
         full_page: bool,
         timeout_ms: int,
         max_chars: int,
+        settings: CapabilitySettings,
+        sandbox_dir: str,
     ) -> str:
-        _, _, _, BrowserOption = get_agentbay_sdk()
+        _, _, _, BrowserOption = get_agentbay_sdk(settings)
         from playwright.sync_api import sync_playwright
 
         initialized = session.browser.initialize(BrowserOption())
@@ -162,7 +185,7 @@ class AgentBayBrowserTool(BaseTool):
                         "text:\n" + text.strip(),
                     ])
 
-                screenshot_dir = os.path.join(config.SANDBOX_DIR, "agentbay_screenshots")
+                screenshot_dir = os.path.join(sandbox_dir, "agentbay_screenshots")
                 os.makedirs(screenshot_dir, exist_ok=True)
                 filename = f"{uuid.uuid4().hex}.png"
                 path = os.path.join(screenshot_dir, filename)

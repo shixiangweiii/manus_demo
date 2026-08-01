@@ -21,3 +21,7 @@ python main.py run "比较三个方案并汇总" --engine dag
 python main.py run "探索这个目录的问题" --engine todo --executor thinking
 python main.py workflow workflow_spec.json
 ```
+
+Workflow parameter references use only `${steps.<step_id>}` and the referenced step must be a declared dependency. Write `$${steps.<step_id>}` to produce the literal `${steps.<step_id>}` text. Other strings such as `${HOME}` are left unchanged and are never interpreted as workflow references.
+
+DAG success allows action nodes skipped because a condition did not select their branch. An execution failure, rollback, failure cascade, unfinished graph, absence of any completed action, or failed final reflection still makes the DAG unsuccessful. Result metadata separates `failed_action_ids` from `condition_skipped_ids`.

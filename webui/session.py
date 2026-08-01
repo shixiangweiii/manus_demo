@@ -123,7 +123,10 @@ class SessionManager:
     async def close_session(self) -> None:
         if self.is_running:
             raise BusyError("任务运行中，无法关闭会话")
+        session = self.session
         self.session = None
+        if session is not None:
+            await session.runtime.aclose()
 
     async def shutdown(self) -> None:
         session = self.session
@@ -136,6 +139,8 @@ class SessionManager:
             run.task.cancel()
             await asyncio.gather(run.task, return_exceptions=True)
         self._current_run = None
+        if session is not None:
+            await session.runtime.aclose()
         self.session = None
 
     def start_run(self, text: str) -> str:

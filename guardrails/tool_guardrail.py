@@ -1,10 +1,8 @@
 """
 Validate tool inputs before execution.
 
-Defense-in-depth ON TOP of ShellTool.BLOCKED_PATTERNS (not a replacement):
-centralized, configurable, event-emitting. Returns a GuardrailDecision; the
-the runtime guardrail resolves write confirmations from structured settings.
-在 ShellTool 黑名单之上的纵深防御：集中、可配、可埋点。返回决策，写操作 CONFIRM 由 engine 按配置裁决。
+ShellTool and this guardrail share the same shell policy so validation cannot
+drift between the execution and observation paths.
 """
 
 from __future__ import annotations
@@ -16,10 +14,10 @@ import ipaddress
 from guardrails.models import GuardrailAction, GuardrailDecision, GuardrailLayer
 from guardrails.patterns import (
     DANGEROUS_PYTHON_PATTERNS,
-    DANGEROUS_SHELL_PATTERNS,
     GENERIC_EXFIL_PATTERNS,
     first_match,
 )
+from tools.shell_safety import assess_shell_command
 
 # file_ops actions considered "writes" (require confirm/block per config)
 _WRITE_ACTIONS = {"write", "append", "delete"}
@@ -44,8 +42,13 @@ def _confirm(reason: str) -> GuardrailDecision:
 class ToolGuardrail:
     """Per-tool input validation. / 按工具的输入校验。"""
 
-    def __init__(self, sandbox_dir: str = "~/.manus_demo/sandbox") -> None:
+    def __init__(
+        self,
+        sandbox_dir: str = "~/.manus_demo/sandbox",
+        shell_mode: str = "restricted",
+    ) -> None:
         self._sandbox = os.path.realpath(os.path.expanduser(sandbox_dir))
+        self._shell_mode = shell_mode
 
     def _within_sandbox(self, filename: str) -> bool:
         if not filename:
@@ -61,9 +64,9 @@ class ToolGuardrail:
 
         if tool_name == "execute_shell":
             cmd = str(params.get("command", ""))
-            hit = first_match(cmd, DANGEROUS_SHELL_PATTERNS)
-            if hit:
-                return _block(f"dangerous shell pattern '{hit}'", risk="ASI02")
+            assessment = assess_shell_command(cmd, self._sandbox, self._shell_mode)
+            if not assessment.allowed:
+                return _block(assessment.reason, risk="ASI02")
 
         elif tool_name in {"execute_python", "agentbay_code"}:
             code = str(params.get("code", ""))

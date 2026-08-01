@@ -74,22 +74,9 @@ class BaseTool(ABC):
         Recursively redact sensitive fields in tool parameters before recording.
         递归清洗工具参数中的敏感字段，避免在 Span 属性中泄露。
         """
-        from tracing.config import SENSITIVE_KEYS
+        from core.redaction import redact_value
 
-        sanitized = {}
-        for key, value in params.items():
-            if any(s in key.lower() for s in SENSITIVE_KEYS):
-                sanitized[key] = "[REDACTED]"
-            elif isinstance(value, dict):
-                sanitized[key] = BaseTool._sanitize_params(value)
-            elif isinstance(value, list):
-                sanitized[key] = [
-                    BaseTool._sanitize_params(item) if isinstance(item, dict) else item
-                    for item in value
-                ]
-            else:
-                sanitized[key] = value
-        return sanitized
+        return redact_value(params)
 
     # ------------------------------------------------------------------
     # OpenAI function-calling schema

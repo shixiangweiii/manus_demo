@@ -42,21 +42,6 @@ CREDENTIAL_PATTERNS: list[re.Pattern] = [
 ]
 
 # ----------------------------------------------------------------------
-# 19.1 Dangerous shell command patterns (defense-in-depth over ShellTool blacklist)
-# 危险 shell 命令（在 ShellTool 黑名单之上的纵深防御）
-# ----------------------------------------------------------------------
-DANGEROUS_SHELL_PATTERNS: list[re.Pattern] = [
-    re.compile(r"\bcurl\b.*\|\s*(ba)?sh", re.IGNORECASE),
-    re.compile(r"\bwget\b.*\|\s*(ba)?sh", re.IGNORECASE),
-    re.compile(r"\bn(?:et)?c(?:at)?\b.*-e\b", re.IGNORECASE),
-    re.compile(r"\brm\s+-[a-zA-Z]*f[a-zA-Z]*\s+/"),
-    re.compile(r"\b(printenv|env)\b.*(API|KEY|TOKEN|SECRET)", re.IGNORECASE),
-    re.compile(r"/dev/(tcp|udp)/"),                          # bash reverse shell
-    re.compile(r"\bcat\b\s+/etc/(passwd|shadow)"),
-    re.compile(r"\bsudo\b|\bsu\b|\bpkexec\b"),
-]
-
-# ----------------------------------------------------------------------
 # 19.1 Dangerous python code patterns
 # 危险 python 代码
 # ----------------------------------------------------------------------

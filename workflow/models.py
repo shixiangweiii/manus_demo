@@ -18,9 +18,12 @@ from pydantic import BaseModel, Field
 
 class WorkflowStep(BaseModel):
     """A single deterministic tool step. / 单个确定性工具步骤。"""
-    id: str = Field(description="Unique step id (referenced by ${id} templating)")
+    id: str = Field(description="Unique step id (referenced by ${steps.<id>})")
     tool: str = Field(description="Tool name to invoke (must exist in the tool set)")
-    params: dict[str, Any] = Field(default_factory=dict, description="Tool params; string values may contain ${dep_id} templates")
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Tool params; strings may contain ${steps.<step_id>} templates",
+    )
     depends_on: list[str] = Field(default_factory=list, description="Step ids this step depends on")
 
 

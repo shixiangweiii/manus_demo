@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -26,12 +27,15 @@ class AgentRuntime:
         self.context = context
         self.settings = context.settings
         self.events = context.events
+        self._closed = False
 
     async def run(
         self,
         task: str | TaskRequest,
         overrides: dict[str, Any] | RunSettings | None = None,
     ) -> EngineResult:
+        if self._closed:
+            raise RuntimeError("AgentRuntime is closed")
         request = task if isinstance(task, TaskRequest) else TaskRequest(task=task)
         run_settings = RunSettings.from_app(self.settings)
         if isinstance(overrides, RunSettings):
@@ -89,8 +93,20 @@ class AgentRuntime:
                 if not result.success:
                     checkpoint.error = "Engine completed without satisfying the task"
                 self.context.checkpoint_store.save(checkpoint)
-            self.events.emit("task_completed", self._completion_payload(result))
+            await self.events.emit_async("task_completed", self._completion_payload(result))
             return result
+        except asyncio.CancelledError:
+            if checkpoint is not None:
+                from checkpoint.models import CheckpointStatus
+
+                checkpoint.state = CheckpointStatus.CANCELLED
+                checkpoint.error = "Task cancelled"
+                try:
+                    self.context.checkpoint_store.save(checkpoint)
+                except Exception:
+                    logger.error("Could not persist cancelled task checkpoint", exc_info=True)
+            await self.events.emit_async("task_cancelled", {"error": "Task cancelled"})
+            raise
         except Exception as exc:
             if checkpoint is not None:
                 from checkpoint.models import CheckpointStatus
@@ -101,11 +117,13 @@ class AgentRuntime:
                     self.context.checkpoint_store.save(checkpoint)
                 except Exception:
                     logger.error("Could not persist failed task checkpoint", exc_info=True)
-            self.events.emit(
+            await self.events.emit_async(
                 "task_failed",
                 {"error": f"{type(exc).__name__}: {exc}"},
             )
             raise
+        finally:
+            await self.events.drain()
 
     def _validate_run_capabilities(self, run: RunSettings) -> None:
         """Reject capability labels that were not enabled on this runtime."""
@@ -125,6 +143,8 @@ class AgentRuntime:
         task_id: str | None = None,
         run_id: str | None = None,
     ) -> EngineResult:
+        if self._closed:
+            raise RuntimeError("AgentRuntime is closed")
         if not self.settings.capabilities.workflow:
             raise ValueError("Workflow capability is disabled in settings.toml")
         from workflow.models import WorkflowSpec
@@ -180,8 +200,20 @@ class AgentRuntime:
                 if not result.success:
                     checkpoint.error = "Workflow completed unsuccessfully"
                 self.context.checkpoint_store.save(checkpoint)
-            self.events.emit("task_completed", self._completion_payload(result))
+            await self.events.emit_async("task_completed", self._completion_payload(result))
             return result
+        except asyncio.CancelledError:
+            if checkpoint is not None:
+                from checkpoint.models import CheckpointStatus
+
+                checkpoint.state = CheckpointStatus.CANCELLED
+                checkpoint.error = "Workflow cancelled"
+                try:
+                    self.context.checkpoint_store.save(checkpoint)
+                except Exception:
+                    logger.error("Could not persist cancelled workflow checkpoint", exc_info=True)
+            await self.events.emit_async("task_cancelled", {"error": "Workflow cancelled"})
+            raise
         except Exception as exc:
             if checkpoint is not None:
                 from checkpoint.models import CheckpointStatus
@@ -192,8 +224,21 @@ class AgentRuntime:
                     self.context.checkpoint_store.save(checkpoint)
                 except Exception:
                     logger.error("Could not persist failed workflow checkpoint", exc_info=True)
-            self.events.emit("task_failed", {"error": f"{type(exc).__name__}: {exc}"})
+            await self.events.emit_async(
+                "task_failed",
+                {"error": f"{type(exc).__name__}: {exc}"},
+            )
             raise
+        finally:
+            await self.events.drain()
+
+    async def aclose(self) -> None:
+        """Release runtime-owned asynchronous resources."""
+        if self._closed:
+            return
+        self._closed = True
+        await self.events.drain()
+        await self.context.llm_client.aclose()
 
     async def resume(self, task_id: str, *, run_id: str | None = None) -> EngineResult:
         store = self.context.checkpoint_store

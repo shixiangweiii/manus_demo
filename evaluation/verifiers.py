@@ -369,7 +369,7 @@ def _file_contains(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ve
     fuzzy = spec.params.get("fuzzy", False)
     threshold = spec.params.get("threshold", 0.8)
 
-    if not isinstance(content_pattern, str) or not content_pattern:
+    if not isinstance(content_pattern, str) or not content_pattern.strip():
         spec.passed = False
         spec.detail = "file_contains requires a non-empty 'content' parameter"
         return spec

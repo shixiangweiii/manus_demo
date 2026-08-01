@@ -27,6 +27,8 @@ Target Python 3.11+, use four-space indentation, straightforward control flow, a
 
 Put normal settings and feature switches in `settings.toml`; keep only secrets in `.env`, using `.env.example` as the key list. CLI flags are single-run overrides. Before handoff, run the documented import, `--help`, `compileall`, static-reference, and `git diff --check` checks. State clearly that these checks do not prove real agent quality.
 
+Local execution is capability-gated. Shell defaults to `restricted`, which permits one allowlisted argv command inside the sandbox; `trusted` uses full bash with the local user's permissions. Python execution is disabled unless `python_mode = "trusted"`. Runtime-owning hosts must call `await runtime.aclose()`, while the host process alone shuts down the shared Tracing provider.
+
 ## Commit & Pull Request Guidelines
 
 Use concise action-oriented subjects; recent history uses Chinese summaries such as `修复subagent相关bug to #82161950`. Add `to #<work-item>` only for a real tracker item. PRs should describe behavior and configuration changes, list exact validation commands, and include screenshots for WebUI changes. Keep generated output and secrets out of commits.

@@ -20,8 +20,9 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 class EvaluationStore:
     def __init__(self, root: str | Path | None = None) -> None:
-        default = get_settings().evaluation.output_dir
-        self.root = Path(root or default).expanduser()
+        if root is None:
+            root = get_settings().evaluation.output_dir
+        self.root = Path(root).expanduser()
         self.root.mkdir(parents=True, exist_ok=True)
         for name in ("documents", "evalsets", "runs", "analyses"):
             (self.root / name).mkdir(exist_ok=True)
@@ -49,15 +50,27 @@ class EvaluationStore:
             return None
         if not path.exists():
             return None
-        return model_type.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            return model_type.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(
+                "Skipping invalid evaluation record: %s (%s)",
+                path,
+                type(exc).__name__,
+            )
+            return None
 
     def _list(self, kind: str, model_type: type[ModelT]) -> list[ModelT]:
         items = []
         for path in (self.root / kind).glob("*.json"):
             try:
                 items.append(model_type.model_validate_json(path.read_text(encoding="utf-8")))
-            except Exception:
-                logger.warning("Skipping invalid evaluation record: %s", path, exc_info=True)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid evaluation record: %s (%s)",
+                    path,
+                    type(exc).__name__,
+                )
         return sorted(items, key=lambda item: getattr(item, "created_at", 0), reverse=True)
 
     def save_document(self, item: DocumentRecord) -> None:

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +19,13 @@ from evaluation.document import DocumentIngestError, ingest_document
 from evaluation.executor import EvalSetExecutor, validate_repeat
 from evaluation.experiments import build_experiments
 from evaluation.generator import EvalSetGenerator
-from evaluation.models import EvalRunRecord, EvalSetStatus
+from evaluation.models import EvalRunRecord, EvalSetStatus, RunStatus
 from evaluation.reporter import render_markdown
 from evaluation.store import EvaluationStore
 from llm.client import LLMClient
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -30,11 +34,43 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     store = store or EvaluationStore(settings.evaluation.output_dir)
-    app = FastAPI(title="Manus Demo Evaluation", version="local")
+    background_tasks: set[asyncio.Task] = set()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        tasks = tuple(background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        from tracing import shutdown_tracing
+
+        shutdown_tracing()
+
+    app = FastAPI(
+        title="Manus Demo Evaluation",
+        version="local",
+        lifespan=lifespan,
+    )
 
     def spawn(coro) -> None:
         task = asyncio.create_task(coro)
-        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        background_tasks.add(task)
+
+        def finish(done: asyncio.Task) -> None:
+            background_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                done.result()
+            except Exception as exc:
+                logger.error(
+                    "Evaluation background task failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(finish)
 
     @app.get("/api/evaluation/overview")
     async def overview() -> dict[str, Any]:
@@ -63,10 +99,6 @@ def create_app(
         document = store.get_document(str(body.get("doc_id", "")))
         if document is None:
             return JSONResponse({"error": "document not found"}, status_code=404)
-        llm = None
-        if settings.llm.api_key:
-            llm = LLMClient.from_settings(settings)
-
         from evaluation.models import GeneratedEvalSet
 
         try:
@@ -85,17 +117,34 @@ def create_app(
             target_goal=str(body.get("target_goal", "")),
             requested_num_tasks=requested_num_tasks,
         )
+        llm = LLMClient.from_settings(settings) if settings.llm.api_key else None
 
         async def generate_and_save() -> None:
-            generated = await EvalSetGenerator(settings, llm).generate(
-                document,
-                name=pending.name,
-                target_goal=pending.target_goal,
-                num_tasks=pending.requested_num_tasks,
-            )
-            generated.evalset_id = pending.evalset_id
-            generated.created_at = pending.created_at
-            store.save_evalset(generated)
+            try:
+                generated = await EvalSetGenerator(settings, llm).generate(
+                    document,
+                    name=pending.name,
+                    target_goal=pending.target_goal,
+                    num_tasks=pending.requested_num_tasks,
+                )
+                generated.evalset_id = pending.evalset_id
+                generated.created_at = pending.created_at
+                store.save_evalset(generated)
+            except asyncio.CancelledError:
+                pending.status = EvalSetStatus.FAILED
+                pending.generation_error = "Evaluation generation cancelled"
+                pending.updated_at = time.time()
+                store.save_evalset(pending)
+                raise
+            except Exception as exc:
+                pending.status = EvalSetStatus.FAILED
+                pending.generation_error = f"{type(exc).__name__}: {exc}"
+                pending.updated_at = time.time()
+                store.save_evalset(pending)
+                raise
+            finally:
+                if llm is not None:
+                    await llm.aclose()
 
         store.save_evalset(pending)
         spawn(generate_and_save())
@@ -136,8 +185,20 @@ def create_app(
         store.save_run(run)
 
         async def execute_and_save() -> None:
-            await EvalSetExecutor(settings).execute(evalset, run, store.save_run)
-            store.save_run(run)
+            try:
+                await EvalSetExecutor(settings).execute(evalset, run, store.save_run)
+            except asyncio.CancelledError:
+                run.status = RunStatus.FAILED
+                run.error = "Evaluation run cancelled during server shutdown"
+                run.finished_at = time.time()
+                store.save_run(run)
+                raise
+            except Exception as exc:
+                run.status = RunStatus.FAILED
+                run.error = f"{type(exc).__name__}: {exc}"
+                run.finished_at = time.time()
+                store.save_run(run)
+                raise
 
         spawn(execute_and_save())
         return JSONResponse(run.model_dump(mode="json"), status_code=202)

@@ -8,8 +8,12 @@ The repository has three core layers:
 
 Hosts (`cli.py`, `webui/`, and `evaluation/`) call `AgentRuntime` and subscribe to the same `EventBus`. They do not inspect implementation-specific log text or branch on engine classes. Tracing, console output, WebUI streaming, and evaluation metrics therefore observe one structured event stream.
 
+`EventBus.emit()` supports synchronous callers and tracks async subscribers until `drain()`. `emit_async()` provides an awaited delivery boundary. Each subscriber receives its own recursive copy of mutable event containers, while opaque runtime objects such as HITL futures retain identity.
+
 `runtime/factory.py` is the composition root. It registers base tools, attaches Tracing when enabled, and optionally adds MCP, AgentBay, Subagent, Handoff, remote Agent, memory, skill, guardrail, and self-evolution adapters. These capabilities may add tools, context, or lifecycle work, but do not choose the orchestration engine.
 
 Retained modules in `agents/`, `dag/`, `react/`, and `workflow/` contain implementation details adapted behind the new contracts. `config.py` is a temporary read-only compatibility facade for peripheral modules; new code should use `AppSettings` directly.
 
 Checkpoints store only the semantic engine, executor, effort, task, and latest outcome. Older path-specific checkpoint JSON is intentionally ignored.
+
+The runtime owns its LLM HTTP client and exposes idempotent `aclose()`. CLI commands, WebUI sessions, and each evaluation unit close the runtimes they create. The process host owns the shared Tracing provider and flushes it only during overall shutdown. Cancelled tasks publish `task_cancelled` and persist a `cancelled` checkpoint state before re-raising cancellation.

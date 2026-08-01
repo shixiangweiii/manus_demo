@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,26 @@ from agents.prompt_utils import (
 )
 from context.manager import ContextManager
 from core.events import EventBus
+from core.redaction import redact_text
 from core.settings import AppSettings, get_settings, validate_settings
 from llm.client import LLMClient
+from openai import OpenAIError
 from runtime.context import RuntimeContext
 from tools.registry import build_default_tools
 
 logger = logging.getLogger(__name__)
+
+
+class RuntimeInitializationError(RuntimeError):
+    """A configured runtime dependency could not be initialized."""
+
+    def __init__(self, component: str, cause: BaseException) -> None:
+        self.component = component
+        self.cause = cause
+        super().__init__(
+            f"Could not initialize runtime component '{component}': "
+            f"{type(cause).__name__}: {redact_text(cause)}"
+        )
 
 
 async def _register_capability_tools(context: RuntimeContext) -> None:
@@ -36,10 +51,17 @@ async def _register_capability_tools(context: RuntimeContext) -> None:
     if caps.agentbay:
         from tools.agentbay import AgentBayBrowserTool, AgentBayCodeTool
 
+        agentbay_semaphore = asyncio.Semaphore(max(1, caps.agentbay_max_concurrent))
         if caps.agentbay_code_tool:
-            registry.register(AgentBayCodeTool())
+            registry.register(AgentBayCodeTool(caps, agentbay_semaphore))
         if caps.agentbay_browser_tool:
-            registry.register(AgentBayBrowserTool())
+            registry.register(
+                AgentBayBrowserTool(
+                    caps,
+                    settings.paths.sandbox_dir,
+                    agentbay_semaphore,
+                )
+            )
 
     if caps.mcp_bridge:
         from tools.mcp.discovery import discover_mcp_bridge_tools
@@ -200,53 +222,75 @@ async def build_runtime(
     settings = settings or get_settings()
     validate_settings(settings)
     events = events or EventBus()
-    llm_client = LLMClient.from_settings(settings)
-    context_manager = ContextManager(max_tokens=settings.engines.max_context_tokens)
-    context = RuntimeContext(
-        settings=settings,
-        llm_client=llm_client,
-        tools=build_default_tools(settings, events),
-        events=events,
-        context_manager=context_manager,
-        interactive=interactive,
-    )
-    if settings.tracing.enabled:
-        from tracing import TracingBridge, init_tracing
-
-        init_tracing(settings.tracing)
-        context.tracing_bridge = TracingBridge()
-        events.subscribe(context.tracing_bridge.on_runtime_event)
-    if settings.capabilities.guardrails:
-        from guardrails.engine import GuardrailEngine
-
-        context.guardrail = GuardrailEngine(
-            settings.capabilities,
-            on_event=events.legacy_callback,
-            sandbox_dir=settings.paths.sandbox_dir,
+    llm_client: LLMClient | None = None
+    component = "llm"
+    try:
+        llm_client = LLMClient.from_settings(settings)
+        component = "core services"
+        context_manager = ContextManager(max_tokens=settings.engines.max_context_tokens)
+        context = RuntimeContext(
+            settings=settings,
+            llm_client=llm_client,
+            tools=build_default_tools(settings, events),
+            events=events,
+            context_manager=context_manager,
+            interactive=interactive,
         )
-    if settings.capabilities.checkpoint:
-        from checkpoint.store import RuntimeCheckpointStore
+        if settings.tracing.enabled:
+            component = "tracing"
+            from tracing import TracingBridge, init_tracing
 
-        context.checkpoint_store = RuntimeCheckpointStore(settings.paths.checkpoint_dir)
-    await _register_capability_tools(context)
+            init_tracing(settings.tracing)
+            context.tracing_bridge = TracingBridge(settings.tracing)
+            events.subscribe(context.tracing_bridge.on_runtime_event)
+        if settings.capabilities.guardrails:
+            component = "guardrails"
+            from guardrails.engine import GuardrailEngine
 
-    if settings.capabilities.self_evolution:
-        if context.agentic_memory_service is None:
-            logger.warning("Self-evolution requires capabilities.agentic_memory=true")
-        else:
-            from evolution.learner import ExperienceLearner
-
-            context.experience_learner = ExperienceLearner(
-                llm_client=context.llm_client,
-                memory_service=context.agentic_memory_service,
+            context.guardrail = GuardrailEngine(
+                settings.capabilities,
                 on_event=events.legacy_callback,
+                sandbox_dir=settings.paths.sandbox_dir,
+                shell_mode=settings.tools.shell_mode,
             )
-            if settings.capabilities.skill_auto_distill:
-                from evolution.skill_distiller import SkillAutoDistiller
+        if settings.capabilities.checkpoint:
+            component = "checkpoint"
+            from checkpoint.store import RuntimeCheckpointStore
 
-                context.skill_distiller = SkillAutoDistiller(
+            context.checkpoint_store = RuntimeCheckpointStore(
+                settings.paths.checkpoint_dir
+            )
+        component = "capabilities"
+        await _register_capability_tools(context)
+
+        if settings.capabilities.self_evolution:
+            component = "self evolution"
+            if context.agentic_memory_service is None:
+                logger.warning("Self-evolution requires capabilities.agentic_memory=true")
+            else:
+                from evolution.learner import ExperienceLearner
+
+                context.experience_learner = ExperienceLearner(
                     llm_client=context.llm_client,
                     memory_service=context.agentic_memory_service,
+                    settings=settings.capabilities,
                     on_event=events.legacy_callback,
                 )
-    return AgentRuntime(context)
+                if settings.capabilities.skill_auto_distill:
+                    from evolution.skill_distiller import SkillAutoDistiller
+
+                    context.skill_distiller = SkillAutoDistiller(
+                        llm_client=context.llm_client,
+                        memory_service=context.agentic_memory_service,
+                        settings=settings.capabilities,
+                        on_event=events.legacy_callback,
+                    )
+        return AgentRuntime(context)
+    except (ImportError, OSError, ConnectionError, TimeoutError, OpenAIError) as exc:
+        if llm_client is not None:
+            await llm_client.aclose()
+        raise RuntimeInitializationError(component, exc) from exc
+    except BaseException:
+        if llm_client is not None:
+            await llm_client.aclose()
+        raise

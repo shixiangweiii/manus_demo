@@ -4,7 +4,7 @@ Tracing Decorators - Declarative instrumentation for methods.
 
 Provides:
 - @traced(span_name, attributes): General-purpose method tracing
-- _truncate / _is_sensitive_key / _safe_set_attribute: Shared helpers
+- _truncate / _safe_set_attribute: Shared helpers
 
 LLM spans are created by ``LLMClient``. Runtime, action, and tool spans are
 derived from structured ``EventBus`` events by ``TracingBridge``.
@@ -21,6 +21,7 @@ from typing import Any, Callable
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode, Span
 
+from core.redaction import is_sensitive_key, redact_text
 from tracing import config as tracing_config
 from tracing.spans import AttrKey
 
@@ -33,19 +34,10 @@ def _truncate(value: Any, max_length: int | None = None) -> str:
     将值截断到配置的最大属性长度。
     """
     max_len = max_length or tracing_config.MAX_ATTRIBUTE_LENGTH
-    text = str(value)
+    text = redact_text(str(value))
     if len(text) > max_len:
         return text[:max_len] + "...[truncated]"
     return text
-
-
-def _is_sensitive_key(key: str) -> bool:
-    """
-    Check if an attribute key contains sensitive information.
-    检查属性键是否包含敏感信息。
-    """
-    key_lower = key.lower()
-    return any(s in key_lower for s in tracing_config.SENSITIVE_KEYS)
 
 
 def _safe_set_attribute(span: Span, key: str, value: Any) -> None:
@@ -53,7 +45,7 @@ def _safe_set_attribute(span: Span, key: str, value: Any) -> None:
     Safely set a span attribute with truncation and sensitive data protection.
     安全地设置 Span 属性，带截断和敏感数据保护。
     """
-    if _is_sensitive_key(key):
+    if is_sensitive_key(key):
         span.set_attribute(key, "[REDACTED]")
         return
 
@@ -111,8 +103,14 @@ def traced(span_name: str = "", attributes: dict[str, Any] | None = None):
                     except Exception as exc:
                         elapsed_ms = (time.perf_counter() - start) * 1000
                         span.set_attribute(AttrKey.LATENCY_MS, round(elapsed_ms, 2))
-                        span.set_status(StatusCode.ERROR, str(exc))
-                        span.record_exception(exc)
+                        if tracing_config.LOG_PROMPTS:
+                            detail = redact_text(str(exc))
+                            span.record_exception(
+                                RuntimeError(f"{type(exc).__name__}: {detail}")
+                            )
+                        else:
+                            detail = "Traced call failed"
+                        span.set_status(StatusCode.ERROR, detail)
                         raise
 
             return async_wrapper
@@ -136,8 +134,14 @@ def traced(span_name: str = "", attributes: dict[str, Any] | None = None):
                     except Exception as exc:
                         elapsed_ms = (time.perf_counter() - start) * 1000
                         span.set_attribute(AttrKey.LATENCY_MS, round(elapsed_ms, 2))
-                        span.set_status(StatusCode.ERROR, str(exc))
-                        span.record_exception(exc)
+                        if tracing_config.LOG_PROMPTS:
+                            detail = redact_text(str(exc))
+                            span.record_exception(
+                                RuntimeError(f"{type(exc).__name__}: {detail}")
+                            )
+                        else:
+                            detail = "Traced call failed"
+                        span.set_status(StatusCode.ERROR, detail)
                         raise
 
             return sync_wrapper

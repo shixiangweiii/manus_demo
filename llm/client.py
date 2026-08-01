@@ -26,7 +26,8 @@ from openai import (
     RateLimitError,
 )
 
-from core.settings import AppSettings, get_settings
+from core.redaction import redact_text, redact_value
+from core.settings import AppSettings
 from llm.models import LLMCallRecord
 from tracing.spans import AttrKey
 
@@ -116,7 +117,13 @@ class LLMClient:
         tracing_max_attribute_length: int | None = None,
         settings_snapshot: AppSettings | None = None,
     ):
-        defaults = settings_snapshot or get_settings()
+        if settings_snapshot is None:
+            raise ValueError(
+                "LLMClient requires an explicit AppSettings snapshot; "
+                "use LLMClient.from_settings(settings)"
+            )
+        defaults = settings_snapshot
+        self._closed = False
         self.model = defaults.llm.model if model is None else model
         self._client = AsyncOpenAI(
             base_url=defaults.llm.base_url if base_url is None else base_url,
@@ -176,6 +183,13 @@ class LLMClient:
             settings_snapshot=settings,
         )
 
+    async def aclose(self) -> None:
+        """Close the owned async HTTP client exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        await self._client.close()
+
     # ------------------------------------------------------------------
     # Core chat completion
     # 基础文本对话
@@ -204,6 +218,7 @@ class LLMClient:
             "chat", messages, temperature, max_tokens, caller_tag=caller_tag,
         )
         last_error: Exception | None = None
+        call_record: LLMCallRecord | None = None
         api_messages = _sanitize_messages_for_api(messages)
         try:
             attempts = self.max_attempts if self.retry_enabled else 1
@@ -217,10 +232,17 @@ class LLMClient:
                         **kwargs,
                     )
                     if self.token_tracking:
-                        self._record_call(resp.usage, "chat", messages, caller_tag=caller_tag)
+                        call_record = self._record_call(
+                            resp.usage, "chat", messages, caller_tag=caller_tag
+                        )
                     result = resp.choices[0].message.content or ""
                     response_data = self._extract_response_data(resp, "chat")
-                    self._end_llm_span(span_ctx, success=True, response_data=response_data)
+                    self._end_llm_span(
+                        span_ctx,
+                        success=True,
+                        response_data=response_data,
+                        call_record=call_record,
+                    )
                     return result
                 except RETRYABLE_ERRORS as exc:
                     last_error = exc
@@ -266,6 +288,7 @@ class LLMClient:
             "chat_with_tools", messages, temperature, max_tokens, caller_tag=caller_tag,
         )
         last_error: Exception | None = None
+        call_record: LLMCallRecord | None = None
         api_messages = _sanitize_messages_for_api(messages)
         try:
             attempts = self.max_attempts if self.retry_enabled else 1
@@ -281,10 +304,20 @@ class LLMClient:
                         **kwargs,
                     )
                     if self.token_tracking:
-                        self._record_call(resp.usage, "chat_with_tools", messages, caller_tag=caller_tag)
+                        call_record = self._record_call(
+                            resp.usage,
+                            "chat_with_tools",
+                            messages,
+                            caller_tag=caller_tag,
+                        )
                     result = resp.choices[0].message
                     response_data = self._extract_response_data(resp, "chat_with_tools")
-                    self._end_llm_span(span_ctx, success=True, response_data=response_data)
+                    self._end_llm_span(
+                        span_ctx,
+                        success=True,
+                        response_data=response_data,
+                        call_record=call_record,
+                    )
                     return result
                 except RETRYABLE_ERRORS as exc:
                     last_error = exc
@@ -330,6 +363,7 @@ class LLMClient:
             "chat_json", messages, temperature, max_tokens, caller_tag=caller_tag,
         )
         response_data: dict[str, Any] | None = None
+        call_record: LLMCallRecord | None = None
         api_messages = _sanitize_messages_for_api(messages)
         try:
             last_error: Exception | None = None
@@ -345,7 +379,9 @@ class LLMClient:
                         **kwargs,
                     )
                     if self.token_tracking:
-                        self._record_call(resp.usage, "chat_json", messages, caller_tag=caller_tag)
+                        call_record = self._record_call(
+                            resp.usage, "chat_json", messages, caller_tag=caller_tag
+                        )
                     text = resp.choices[0].message.content or "{}"
                     logger.debug("[chat_json] Raw response: %.500s", text)
                     response_data = self._extract_response_data(resp, "chat_json")
@@ -354,6 +390,7 @@ class LLMClient:
                     if "response_format" not in str(exc).lower():
                         raise
                     logger.warning("JSON mode not supported, falling back to plain text: %s", exc)
+                    records_before = len(self._call_records)
                     text = await self.chat(
                         messages,
                         temperature=temperature,
@@ -361,6 +398,8 @@ class LLMClient:
                         caller_tag=caller_tag,
                         _skip_tracing=True,
                     )
+                    if len(self._call_records) > records_before:
+                        call_record = self._call_records[-1]
                     logger.debug("[chat_json] Fallback response: %.500s", text)
                     response_data = {
                         "response_content": text,
@@ -385,7 +424,12 @@ class LLMClient:
                 raise last_error or RuntimeError("LLM JSON call failed")
 
             result = self.parse_json(text)
-            self._end_llm_span(span_ctx, success=True, response_data=response_data)
+            self._end_llm_span(
+                span_ctx,
+                success=True,
+                response_data=response_data,
+                call_record=call_record,
+            )
             return result
         except Exception as exc:
             self._end_llm_span(span_ctx, success=False, error=exc)
@@ -439,7 +483,7 @@ class LLMClient:
         call_type: str,
         messages: list[dict[str, Any]],
         caller_tag: str = "",
-    ) -> None:
+    ) -> LLMCallRecord | None:
         """Record token usage for a single LLM API call.
 
         caller_tag identifies which agent issued the call so the
@@ -447,20 +491,21 @@ class LLMClient:
         own bucket separate from the parent).
         """
         if not self.token_tracking:
-            return
+            return None
 
         prompt_summary = ""
         for msg in messages:
             if msg.get("role") == "user":
                 content = msg.get("content", "")
-                prompt_summary = content[:200] if len(content) > 200 else content
+                text = str(content)
+                prompt_summary = redact_text(text[:200] if len(text) > 200 else text)
                 break
         if not prompt_summary:
             prompt_summary = call_type
 
         if usage is None:
             logger.warning("[LLMClient] API response missing usage data (model=%s)", self.model)
-            return
+            return None
 
         prompt_tokens = getattr(usage, 'prompt_tokens', 0) or 0
         completion_tokens = getattr(usage, 'completion_tokens', 0) or 0
@@ -477,7 +522,7 @@ class LLMClient:
             if not reasoning_tokens:
                 reasoning_tokens = getattr(usage, 'reasoning_tokens', 0) or 0
 
-        self._call_records.append(LLMCallRecord(
+        record = LLMCallRecord(
             call_type=call_type,
             prompt_summary=prompt_summary,
             prompt_tokens=prompt_tokens,
@@ -486,7 +531,9 @@ class LLMClient:
             reasoning_tokens=reasoning_tokens,
             engine=self.model,
             caller_tag=caller_tag,
-        ))
+        )
+        self._call_records.append(record)
+        return record
 
     def get_call_records(self) -> list[LLMCallRecord]:
         """Return a copy of the call records list."""
@@ -571,7 +618,11 @@ class LLMClient:
                         body_lines.append(str(content))
                     if tool_calls:
                         try:
-                            tc_repr = json.dumps(tool_calls, ensure_ascii=False, default=str)
+                            tc_repr = json.dumps(
+                                redact_value(tool_calls),
+                                ensure_ascii=False,
+                                default=str,
+                            )
                         except (TypeError, ValueError):
                             tc_repr = str(tool_calls)
                         body_lines.append(f"tool_calls={tc_repr}")
@@ -580,7 +631,9 @@ class LLMClient:
                 if parts:
                     span.set_attribute(
                         "gen_ai.prompt.content",
-                        "\n\n".join(parts)[:self.tracing_max_attribute_length],
+                        redact_text("\n\n".join(parts))[
+                            :self.tracing_max_attribute_length
+                        ],
                     )
 
             import time
@@ -589,7 +642,14 @@ class LLMClient:
             logger.debug("[LLMClient] Failed to start tracing span", exc_info=True)
             return None
 
-    def _end_llm_span(self, span_ctx: Any, success: bool = True, error: Exception | None = None, response_data: dict[str, Any] | None = None) -> None:
+    def _end_llm_span(
+        self,
+        span_ctx: Any,
+        success: bool = True,
+        error: Exception | None = None,
+        response_data: dict[str, Any] | None = None,
+        call_record: LLMCallRecord | None = None,
+    ) -> None:
         """
         End a tracing span for an LLM call.
         结束 LLM 调用的追踪 Span。
@@ -609,19 +669,18 @@ class LLMClient:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             span.set_attribute("latency_ms", round(elapsed_ms, 2))
 
-            # Record token usage from last call record.
-            # Depends on _record_call being called before _end_llm_span
-            # (safe in single-threaded asyncio event loop — no await between them).
-            if self._call_records:
-                last_record = self._call_records[-1]
-                if last_record.prompt_tokens > 0:
-                    span.set_attribute("gen_ai.usage.input_tokens", last_record.prompt_tokens)
-                if last_record.completion_tokens > 0:
-                    span.set_attribute("gen_ai.usage.output_tokens", last_record.completion_tokens)
-                if last_record.total_tokens > 0:
-                    span.set_attribute("gen_ai.usage.total_tokens", last_record.total_tokens)
-                if last_record.reasoning_tokens > 0:
-                    span.set_attribute(AttrKey.GEN_AI_USAGE_REASONING_TOKENS, last_record.reasoning_tokens)
+            if call_record is not None:
+                if call_record.prompt_tokens > 0:
+                    span.set_attribute("gen_ai.usage.input_tokens", call_record.prompt_tokens)
+                if call_record.completion_tokens > 0:
+                    span.set_attribute("gen_ai.usage.output_tokens", call_record.completion_tokens)
+                if call_record.total_tokens > 0:
+                    span.set_attribute("gen_ai.usage.total_tokens", call_record.total_tokens)
+                if call_record.reasoning_tokens > 0:
+                    span.set_attribute(
+                        AttrKey.GEN_AI_USAGE_REASONING_TOKENS,
+                        call_record.reasoning_tokens,
+                    )
 
             # Record response content only when prompt logging is enabled.
             if response_data:
@@ -629,13 +688,15 @@ class LLMClient:
                 if content and self.tracing_log_prompts:
                     span.set_attribute(
                         "gen_ai.response.content",
-                        content[:self.tracing_max_attribute_length],
+                        redact_text(str(content))[:self.tracing_max_attribute_length],
                     )
                 tool_calls = response_data.get("tool_calls")
                 if tool_calls and self.tracing_log_prompts:
                     span.set_attribute(
                         "gen_ai.response.tool_calls",
-                        json.dumps(tool_calls, ensure_ascii=False)[:self.tracing_max_attribute_length],
+                        json.dumps(
+                            redact_value(tool_calls), ensure_ascii=False, default=str
+                        )[:self.tracing_max_attribute_length],
                     )
                 finish_reason = response_data.get("finish_reason", "")
                 if finish_reason:
@@ -644,7 +705,7 @@ class LLMClient:
                 if thinking and self.tracing_log_prompts:
                     span.set_attribute(
                         AttrKey.GEN_AI_RESPONSE_THINKING_CONTENT,
-                        thinking[:self.tracing_max_attribute_length],
+                        redact_text(str(thinking))[:self.tracing_max_attribute_length],
                     )
 
             if success:
@@ -652,9 +713,18 @@ class LLMClient:
             else:
                 if error:
                     span.set_attribute("error.type", type(error).__name__)
-                    span.set_attribute("error.message", str(error)[:500])
-                    span.record_exception(error)
-                span.set_status(StatusCode.ERROR, str(error)[:200] if error else "unknown error")
+                    if self.tracing_log_prompts:
+                        safe_error = redact_text(str(error))
+                        span.set_attribute("error.message", safe_error[:500])
+                        span.record_exception(
+                            RuntimeError(f"{type(error).__name__}: {safe_error}")
+                        )
+                        status_message = safe_error[:200]
+                    else:
+                        status_message = "LLM call failed"
+                else:
+                    status_message = "unknown error"
+                span.set_status(StatusCode.ERROR, status_message)
 
             # End span before detaching context (OTel lifecycle convention).
             span.end()

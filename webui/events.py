@@ -73,6 +73,9 @@ class EventBridge:
             payload: Any
             truncated = False
             if event_name == "ask_user_prompt" and isinstance(data, dict):
+                timeout_seconds = int(data.get("timeout_seconds", 120))
+                if timeout_seconds <= 0:
+                    raise ValueError("HITL timeout_seconds must be positive")
                 # 序列化之前注册 Future（序列化会剥离它）
                 # register the Future BEFORE serialization (which strips it)
                 if self._prompt_hook is not None and "response_future" in data:
@@ -84,7 +87,7 @@ class EventBridge:
                 payload = {
                     "question": str(data.get("question", "")),
                     "prompt_id": str(data.get("prompt_id", "")),
-                    "timeout_seconds": int(data.get("timeout_seconds", 120)),
+                    "timeout_seconds": timeout_seconds,
                 }
             else:
                 payload, truncated = serialize_event(event_name, data)

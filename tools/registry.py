@@ -48,31 +48,38 @@ def build_default_tools(settings: AppSettings, events: EventBus) -> ToolRegistry
     from tools.user_location import UserLocationTool
     from tools.web_search import WebSearchTool
 
-    return ToolRegistry(
-        [
-            WebSearchTool(settings.tools),
-            FetchUrlTool(settings.tools),
-            UserLocationTool(
-                configured_location=settings.tools.user_location,
-                state_dir=settings.paths.state_dir,
-                ip_lookup=settings.tools.location_ip_lookup,
-                ssl_verify=settings.tools.location_ssl_verify,
-            ),
+    tools: list[BaseTool] = [
+        WebSearchTool(settings.tools),
+        FetchUrlTool(settings.tools),
+        UserLocationTool(
+            configured_location=settings.tools.user_location,
+            state_dir=settings.paths.state_dir,
+            ip_lookup=settings.tools.location_ip_lookup,
+            ssl_verify=settings.tools.location_ssl_verify,
+        ),
+        FileOpsTool(settings.paths.sandbox_dir),
+    ]
+    if settings.tools.python_mode == "trusted":
+        tools.append(
             CodeExecutorTool(
+                trusted=True,
                 sandbox_dir=settings.paths.sandbox_dir,
                 timeout=settings.tools.code_timeout_seconds,
                 max_output_bytes=settings.tools.subprocess_max_output_bytes,
                 ssl_verify=settings.tools.location_ssl_verify,
                 max_concurrent=settings.tools.code_max_concurrent,
-            ),
-            FileOpsTool(settings.paths.sandbox_dir),
+            )
+        )
+    if settings.tools.shell_mode != "disabled":
+        tools.append(
             ShellTool(
                 workdir=settings.paths.sandbox_dir,
+                mode=settings.tools.shell_mode,
                 timeout=settings.tools.shell_timeout_seconds,
                 python_command=settings.tools.python_command,
                 max_output_bytes=settings.tools.subprocess_max_output_bytes,
                 max_concurrent=settings.tools.shell_max_concurrent,
                 ssl_verify=settings.tools.location_ssl_verify,
-            ),
-        ]
-    )
+            )
+        )
+    return ToolRegistry(tools)

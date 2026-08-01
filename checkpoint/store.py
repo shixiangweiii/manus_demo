@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -15,6 +16,9 @@ from checkpoint.models import (
     RuntimeCheckpointSummary,
 )
 from core.settings import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeCheckpointStore:
@@ -57,7 +61,8 @@ class RuntimeCheckpointStore:
         for path in self.directory.glob("*.runtime.json"):
             try:
                 checkpoint = self.load(path.name.removesuffix(".runtime.json"))
-            except CheckpointCorruptedError:
+            except (CheckpointCorruptedError, ValueError) as exc:
+                logger.warning("Skipping invalid runtime checkpoint: %s (%s)", path, exc)
                 continue
             if checkpoint is None:
                 continue

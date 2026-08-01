@@ -10,10 +10,12 @@ Provides:
 
 Usage:
     # AgentRuntime 根据 settings.toml 初始化，亦可手动初始化：
+    from core.settings import get_settings
     from tracing import init_tracing, get_tracer, TracingBridge
 
-    init_tracing()
-    bridge = TracingBridge()
+    settings = get_settings()
+    init_tracing(settings.tracing)
+    bridge = TracingBridge(settings.tracing)
     tracer = get_tracer("my_module")
 
 """

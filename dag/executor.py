@@ -114,6 +114,8 @@ class DAGExecutor:
         self._adaptive_enabled = adaptive_enabled and planner is not None
         self._processed_conditions: set[tuple[str, str]] = set()  # 已评估条件边缓存 (source_id, target_id)
         self._node_attempt_counts: dict[str, int] = {}  # 单节点重试计数（检测 FAILED->PENDING 循环）
+        self.failed_action_ids: set[str] = set()
+        self.condition_skipped_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Main execution loop
@@ -139,6 +141,8 @@ class DAGExecutor:
         max_steps = max(len(dag.nodes) * 3, 100)  # Safety guard: prevent infinite loop
         self._processed_conditions.clear()  # Reset condition memoization
         self._node_attempt_counts.clear()  # Reset per-node retry counters
+        self.failed_action_ids.clear()
+        self.condition_skipped_ids.clear()
         # 动态性体现：哪些节点在哪一轮执行，完全取决于当时的运行时状态——前序节点的完成情况、失败情况、跳过情况，每一轮都不一样。
         # 如果 act_1_1 意外快速完成而 act_1_2 还在跑，下一轮可能只有依赖 act_1_1 的节点就绪，而依赖两者的节点还要等。
         while not dag.is_complete() and step < max_steps:
@@ -393,6 +397,9 @@ class DAGExecutor:
         # 1、检测有无 ROLLBACK 边 → 有则执行回滚节点（如清理临时文件），无则直接跳过
         # 2、将失败节点标记为 ROLLED_BACK 或 SKIPPED → 依据回滚结果动态决定
         # 3、级联跳过整个下游子树 → 不再执行任何依赖失败节点的后续操作
+        if node.node_type == NodeType.ACTION:
+            self.failed_action_ids.add(node.id)
+
         rollback_targets = dag.get_rollback_targets(node.id)
         if rollback_targets:
             logger.info("[DAGExecutor] Executing rollback for node %s", node.id)
@@ -406,6 +413,8 @@ class DAGExecutor:
                         self._sm.transition(rb_node, NodeStatus.COMPLETED)
                     else:
                         self._sm.transition(rb_node, NodeStatus.FAILED)
+                        if rb_node.node_type == NodeType.ACTION:
+                            self.failed_action_ids.add(rb_node.id)
                         self._sm.transition(rb_node, NodeStatus.SKIPPED)
                         logger.warning("[DAGExecutor] Rollback node %s failed", rb_id)
 
@@ -471,6 +480,15 @@ class DAGExecutor:
                 })
                 if not condition_met:
                     # 条件不满足：通过状态机跳过目标节点及其整个下游子树
+                    skipped_ids = [target.id, *dag.get_downstream(target.id)]
+                    self.condition_skipped_ids.update(
+                        node_id
+                        for node_id in skipped_ids
+                        if node_id in dag.nodes
+                        and dag.nodes[node_id].node_type == NodeType.ACTION
+                        and dag.nodes[node_id].status
+                        in (NodeStatus.PENDING, NodeStatus.READY)
+                    )
                     self._sm.transition(target, NodeStatus.SKIPPED)
                     dag.mark_subtree_skipped(target.id)
                     is_fallback = any(

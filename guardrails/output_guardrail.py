@@ -2,9 +2,8 @@
 OutputGuardrail - redact PII / credentials from the final answer.
 输出护栏——对最终答案中的 PII / 凭证脱敏。
 
-Reuses the credential patterns and aligns with tracing.config.SENSITIVE_KEYS so
-redaction is consistent with span redaction policy.
-复用凭证模式，与 tracing 的 SENSITIVE_KEYS 脱敏策略保持一致。
+Reuses credential patterns so redaction is consistent with the shared secret
+handling policy used by runtime traces.
 """
 
 from __future__ import annotations

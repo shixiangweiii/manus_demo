@@ -10,7 +10,8 @@ from opentelemetry.context import attach, detach
 from opentelemetry.trace import Span, Status, StatusCode, set_span_in_context
 
 from core.events import RuntimeEvent
-from tracing import config as tracing_config
+from core.redaction import redact_text, redact_value
+from core.settings import TracingSettings
 from tracing.provider import get_tracer
 
 logger = logging.getLogger(__name__)
@@ -19,10 +20,10 @@ logger = logging.getLogger(__name__)
 class TracingBridge:
     """A small event subscriber; routing never depends on display text."""
 
-    def __init__(self) -> None:
+    def __init__(self, settings: TracingSettings) -> None:
         self._tracer = get_tracer("manus_demo.runtime")
-        self._log_prompts = tracing_config.LOG_PROMPTS
-        self._max_attribute_length = tracing_config.MAX_ATTRIBUTE_LENGTH
+        self._log_prompts = settings.log_prompts
+        self._max_attribute_length = settings.max_attribute_length
         self._root_span: Span | None = None
         self._engine_span: Span | None = None
         self._action_spans: dict[str, Span] = {}
@@ -49,7 +50,9 @@ class TracingBridge:
             if self._log_prompts:
                 self._root_span.set_attribute(
                     "task.input",
-                    str(payload.get("task", ""))[:self._max_attribute_length],
+                    redact_text(str(payload.get("task", "")))[
+                        :self._max_attribute_length
+                    ],
                 )
             return
         if event.name == "engine_started":
@@ -118,7 +121,7 @@ class TracingBridge:
         if event.name in {"task_completed", "task_complete"}:
             self._finish_all(failed=payload.get("success") is False)
             return
-        if event.name in {"task_failed", "execution_error"}:
+        if event.name in {"task_failed", "task_cancelled", "execution_error"}:
             self._finish_all(failed=True)
             return
 
@@ -155,11 +158,14 @@ class TracingBridge:
 
     def _safe_json(self, value: Any) -> str:
         try:
-            return json.dumps(value, ensure_ascii=False, default=str)[
-                :self._max_attribute_length
-            ]
+            serialized = json.dumps(
+                redact_value(value),
+                ensure_ascii=False,
+                default=lambda item: redact_text(str(item)),
+            )
+            return redact_text(serialized)[:self._max_attribute_length]
         except Exception:
-            return str(value)[:self._max_attribute_length]
+            return redact_text(str(value))[:self._max_attribute_length]
 
     @staticmethod
     def _end_span(span: Span | None, *, failed: bool = False) -> None:

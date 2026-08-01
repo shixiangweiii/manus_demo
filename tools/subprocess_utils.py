@@ -20,21 +20,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from dataclasses import dataclass
+
+from core.redaction import is_sensitive_key
 
 
 logger = logging.getLogger(__name__)
-
-# Keys matching these patterns (case-insensitive) are stripped from subprocess env.
-_SENSITIVE_PATTERNS = [
-    re.compile(r"api.?key", re.IGNORECASE),
-    re.compile(r"secret", re.IGNORECASE),
-    re.compile(r"token", re.IGNORECASE),
-    re.compile(r"password", re.IGNORECASE),
-    re.compile(r"credential", re.IGNORECASE),
-]
-
 
 def build_safe_env(*, ssl_verify: bool = True) -> dict[str, str]:
     """
@@ -42,12 +33,7 @@ def build_safe_env(*, ssl_verify: bool = True) -> dict[str, str]:
     返回清理后的环境变量副本，移除 API Key、密钥等敏感条目。
     """
     env = dict(os.environ)
-    keys_to_remove = []
-    for key in env:
-        for pattern in _SENSITIVE_PATTERNS:
-            if pattern.search(key):
-                keys_to_remove.append(key)
-                break
+    keys_to_remove = [key for key in env if is_sensitive_key(key)]
     for key in keys_to_remove:
         env.pop(key, None)
 

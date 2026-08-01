@@ -87,6 +87,8 @@ class PathSettings:
 @dataclass
 class ToolSettings:
     python_command: str = "python3"
+    shell_mode: str = "restricted"
+    python_mode: str = "disabled"
     code_timeout_seconds: int = 30
     shell_timeout_seconds: int = 30
     subprocess_max_output_bytes: int = 524288
@@ -283,11 +285,23 @@ class RunSettings:
         unknown = set(overrides) - allowed
         if unknown:
             raise ValueError(f"Unknown run setting(s): {', '.join(sorted(unknown))}")
+        capabilities = overrides.get("capabilities", self.capabilities)
+        if isinstance(capabilities, str) or not isinstance(
+            capabilities, (list, tuple)
+        ):
+            raise ValueError("Run setting capabilities must be a list of names")
+        if any(
+            not isinstance(name, str) or not name.strip()
+            for name in capabilities
+        ):
+            raise ValueError(
+                "Run setting capabilities must contain non-empty strings"
+            )
         return RunSettings(
             engine=EngineKind(overrides.get("engine", self.engine)),
             executor=ExecutorKind(overrides.get("executor", self.executor)),
             effort=Effort(overrides.get("effort", self.effort)),
-            capabilities=tuple(overrides.get("capabilities", self.capabilities)),
+            capabilities=tuple(name.strip() for name in capabilities),
         )
 
 
@@ -628,6 +642,14 @@ def validate_settings(settings: AppSettings) -> None:
                 "capabilities.mcp_bridge_config_path",
             )
     allowed_values = {
+        "tools.shell_mode": (
+            settings.tools.shell_mode,
+            {"disabled", "restricted", "trusted"},
+        ),
+        "tools.python_mode": (
+            settings.tools.python_mode,
+            {"disabled", "trusted"},
+        ),
         "tracing.backend": (
             settings.tracing.backend,
             {"console", "file", "rich", "otlp", "phoenix"},

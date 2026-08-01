@@ -30,9 +30,10 @@ def render_markdown(report: EvaluationReport) -> str:
     lines.extend(["", "## Case Results", ""])
     for result in report.results:
         status = "PASS" if result.metrics.success else "FAIL"
+        engine = result.actual_engine.value if result.actual_engine else "unknown"
         lines.append(
             f"- `{result.case_id}` / `{result.experiment.id}` / trial {result.trial}: "
-            f"**{status}**, engine={result.actual_engine.value}, "
+            f"**{status}**, engine={engine}, "
             f"latency={result.metrics.latency_ms:.0f}ms, tokens={result.metrics.tokens}"
         )
         if result.error:
