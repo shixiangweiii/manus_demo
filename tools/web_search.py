@@ -6,7 +6,7 @@ Web 搜索工具 —— 优先使用百炼 MCP 搜索，回退到 DuckDuckGo（D
 - Bailian MCP（阿里云百炼）提供更丰富的搜索结果（含摘要而非仅 snippet）
 - 需要 DASHSCOPE_API_KEY，为空时自动回退到 DDGS
 - DDGS 零密钥、零配置回退：保留原有搜索能力
-- 错误透传：失败时返回以 "Error:" 开头的字符串，由 ReAct 循环识别处理
+- 错误透传：失败时返回以 "Error:" 开头的字符串，由工具调用循环识别处理
 """
 
 from __future__ import annotations

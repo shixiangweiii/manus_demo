@@ -41,11 +41,11 @@ class ContextManager:
         self,
         max_tokens: int | None = None,
         reserve_recent: int = 6,  # 保留的最近消息条数（不参与压缩）
-        keep_thinking_blocks: bool = True,
+        keep_reasoning_blocks: bool = True,
     ):
-        self.max_tokens = max_tokens or get_settings().engines.max_context_tokens
+        self.max_tokens = max_tokens or get_settings().execution.max_context_tokens
         self.reserve_recent = reserve_recent
-        self.keep_thinking_blocks = keep_thinking_blocks
+        self.keep_reasoning_blocks = keep_reasoning_blocks
 
     # ------------------------------------------------------------------
     # Token estimation
@@ -74,17 +74,17 @@ class ContextManager:
           - msg.content (str)
           - msg.tool_calls[].function.name + .arguments (assistant tool-call JSON
             is billed as prompt tokens but has no `content`; previously missed)
-          - msg["thinking_content"] (reasoning-model thinking blocks)
+          - msg["reasoning_content"] (reasoning-model metadata)
           - per-message overhead (~4 tokens for role markers)
         """
         total = 0
         for msg in messages:
             content = msg.get("content", "") or ""
             total += self.estimate_tokens(content) + 4  # 每条消息约 4 个 Token 的固定开销
-            # thinking_content 由 ReasoningEngine（feature flag）和 ReActEngine（Phase 3 起）写入
-            thinking = msg.get("thinking_content", "") or ""
-            if thinking:
-                total += self.estimate_tokens(thinking) + 4
+            # reasoning_content 由 ReasoningAwareToolCallingLoop 和 ToolCallingLoop 写入
+            reasoning = msg.get("reasoning_content", "") or ""
+            if reasoning:
+                total += self.estimate_tokens(reasoning) + 4
             # Assistant messages may carry tool_calls without textual content —
             # those still consume prompt tokens at the API. Account for them.
             for tc in msg.get("tool_calls", []) or []:
@@ -203,13 +203,13 @@ class ContextManager:
                 split_idx = split_idx - 1
                 continue
 
-            # If prev is an assistant with thinking_content, keep it with its subsequent messages
+            # If prev is an assistant with reasoning_content, keep it with its subsequent messages
             # so the reasoning context is not severed from the response it informs.
-            if self.keep_thinking_blocks and prev_role == "assistant" and prev_msg.get("thinking_content"):
+            if self.keep_reasoning_blocks and prev_role == "assistant" and prev_msg.get("reasoning_content"):
                 split_idx = split_idx - 1
                 continue
 
-            # Safe boundary: user, assistant without tool_calls/thinking, etc.
+            # Safe boundary: user, assistant without tool calls/reasoning, etc.
             break
 
         return max(split_idx, 0)
@@ -218,17 +218,17 @@ class ContextManager:
     def _messages_to_text(messages: list[dict[str, Any]]) -> str:
         """
         Convert messages to a readable text block for summarization.
-        Includes thinking_content so reasoning is not lost during compression.
+        Includes reasoning_content so reasoning is not lost during compression.
         将消息列表转换为可读文本块，供 LLM 进行摘要。
-        包含 thinking_content，避免压缩时丢失推理过程。
+        包含 reasoning_content，避免压缩时丢失推理过程。
         """
         lines = []
         for msg in messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "") or ""
-            thinking = msg.get("thinking_content", "") or ""
-            if thinking:
-                lines.append(f"[{role} thinking]: {thinking}")
+            reasoning = msg.get("reasoning_content", "") or ""
+            if reasoning:
+                lines.append(f"[{role} reasoning]: {reasoning}")
             if content:
                 lines.append(f"[{role}]: {content}")
         return "\n".join(lines)

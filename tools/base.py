@@ -27,9 +27,9 @@ class BaseTool(ABC):
     """
 
     # Tools that transfer control on success (Handoff). When True and the
-    # tool succeeds, ReActEngine ends the loop and uses the tool's output as the
+    # tool succeeds, ToolCallingLoop ends the loop and uses the tool's output as the
     # final answer. Default False — normal tools never transfer control.
-    # 标记“控制权转移”类工具（Handoff）。为 True 且成功时，ReActEngine
+    # 标记“控制权转移”类工具（Handoff）。为 True 且成功时，ToolCallingLoop
     # 终止循环并以该工具输出作为最终答案。默认 False，普通工具不转移控制权。
     is_handoff: bool = False
 

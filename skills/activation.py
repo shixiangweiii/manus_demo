@@ -10,11 +10,11 @@ LLM 调用此工具时，返回完整 SKILL.md 内容，提供激活技能的详
 约束和工具引导（渐进式披露第二层）。
 
 After activation, the skill's allowed_tools list is
-applied as a tool filter on the current ReAct loop, and max activations
+applied as a tool filter on the current structured tool-calling loop, and max activations
 per task are enforced.
 
 激活后，技能的 allowed_tools 列表作为工具过滤应用于当前
-ReAct 循环，并强制执行每任务最大激活次数。
+结构化工具调用循环，并强制执行每任务最大激活次数。
 """
 
 from __future__ import annotations

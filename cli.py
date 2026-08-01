@@ -31,7 +31,7 @@ def _add_run_options(parser: argparse.ArgumentParser) -> None:
         "--effort",
         choices=[effort.value for effort in Effort],
         default=None,
-        help="Reasoning effort (default: settings.toml)",
+        help="Runtime effort level (default: settings.toml)",
     )
 
 

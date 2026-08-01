@@ -2,8 +2,8 @@
 SubAgentTool - Meta-tool that spawns SubAgents for complex subtasks.
 子智能体工具 —— 为复杂子任务派生子智能体的元工具。
 
-This tool allows any action executor to delegate complex subtasks to an isolated SubAgent
-via the standard ReAct tool-calling interface.
+This tool allows any action executor to delegate complex subtasks to an isolated
+SubAgent through the standard native tool-calling interface.
 
 Anti-pattern defenses:
 - #3 depth=1: SubAgent tool list never includes "subagent" — structural enforcement
@@ -33,7 +33,7 @@ class SubAgentTool(BaseTool):
     """
     Meta-tool that spawns a SubAgent for complex subtasks.
     When the LLM calls this tool, it creates an isolated SubAgent
-    with a restricted tool set, runs its ReAct loop, and returns
+    with a restricted tool set, runs its structured tool-calling loop, and returns
     only a structured summary of the results.
     """
 
@@ -126,8 +126,8 @@ class SubAgentTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> str:
         """
-        Spawn a SubAgent, run its ReAct loop, and return a structured summary.
-        派生子智能体，运行其 ReAct 循环，返回结构化摘要。
+        Spawn a SubAgent, run its tool-calling loop, and return a structured summary.
+        派生子智能体，运行其结构化工具调用循环，返回结构化摘要。
         """
         # Capture _parent_name into a local immediately, before any await.
         # This function later calls `await asyncio.to_thread(os.makedirs, ...)`, so the
@@ -265,7 +265,7 @@ class SubAgentTool(BaseTool):
 
             # Only the expensive SubAgent.run() is gated by Semaphore;
             # whitelist validation / sandbox creation above already ran in parallel.
-            # 信号量只 wrap 真正昂贵的 ReAct 循环；快路径不挤占并发槽。
+            # 信号量只 wrap 真正昂贵的工具调用循环；快路径不挤占并发槽。
             async with self._semaphore:
                 result: SubAgentResult = await subagent.run(context="")
 
@@ -279,10 +279,10 @@ class SubAgentTool(BaseTool):
 
             # Return structured summary as JSON string (anti-pattern #6).
             # A non-COMPLETED status (FAILED / TIMED_OUT) must surface as an
-            # `Error:`-prefixed string so callers detect it via classify_result
-            # (both the normal ReAct path and the emergent parallel dispatch).
+            # `Error:`-prefixed string so callers detect it via classify_tool_result
+            # (both the standard tool-calling path and emergent parallel dispatch).
             # The full summary is preserved after the marker so no info is lost.
-            # 非 COMPLETED 状态加 `Error:` 前缀，让 classify_result 能识别失败；摘要保留不丢。
+            # 非 COMPLETED 状态加 `Error:` 前缀，让 classify_tool_result 能识别失败；摘要保留不丢。
             summary_text = self._add_tool_metadata(
                 result.summary_text,
                 requested_whitelist=requested_whitelist,

@@ -8,7 +8,7 @@ class TokenUsage(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     reasoning_tokens: int = 0
-    engine: str = ""
+    model: str = ""
 
 
 class LLMCallRecord(BaseModel):
@@ -18,12 +18,12 @@ class LLMCallRecord(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     reasoning_tokens: int = 0
-    engine: str = ""
+    model: str = ""
     caller_tag: str = ""
 
 
 class TokenUsageSummary(BaseModel):
     call_records: list[LLMCallRecord] = Field(default_factory=list)
-    by_engine: dict[str, TokenUsage] = Field(default_factory=dict)
+    by_model: dict[str, TokenUsage] = Field(default_factory=dict)
     by_caller: dict[str, TokenUsage] = Field(default_factory=dict)
     total: TokenUsage = Field(default_factory=TokenUsage)

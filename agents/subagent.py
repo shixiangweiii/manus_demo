@@ -28,7 +28,7 @@ from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from llm.client import LLMClient
 from pydantic import ValidationError
-from react.engine import ReActEngine
+from tool_calling.loop import ToolCallingLoop
 from agents.subagent_models import SubAgentResult, SubAgentStatus, SubAgentSummary
 from execution.models import ToolCallRecord
 from tools.base import BaseTool
@@ -159,8 +159,8 @@ class SubAgent:
         self.tools = {t.name: t for t in tools}
         tool_router = ToolRouter(available_tools=list(self.tools.keys()))
 
-        # Internal ReAct engine with its own independent messages list
-        self._react_engine = ReActEngine(
+        # Private native tool-calling loop with an independent message history.
+        self._tool_calling_loop = ToolCallingLoop(
             llm_client=llm_client,
             tools=tools,
             max_iterations=max_iterations or config.SUBAGENT_MAX_ITERATIONS,
@@ -194,7 +194,7 @@ class SubAgent:
     def _failure_tool_calls(self) -> list[ToolCallRecord]:
         """Snapshot the most-up-to-date tool_calls_log on failure.
 
-        Prefers ReActEngine._current_log over the on_iteration
+        Prefers ToolCallingLoop._current_log over the on_iteration
         snapshot. The live log captures tool calls written mid-iteration —
         on_iteration only fires at iteration boundaries, so a timeout/budget
         cancel during iteration N+1 would otherwise lose any calls already
@@ -202,10 +202,10 @@ class SubAgent:
 
         Returns a fresh list copy (caller can mutate safely).
 
-        失败路径取 ReActEngine._current_log 实时快照,而非
+        失败路径取 ToolCallingLoop._current_log 实时快照,而非
         on_iteration 在迭代末尾的副本——后者在中途取消时会丢最后一轮调用。
         """
-        live = getattr(self._react_engine, "_current_log", None)
+        live = getattr(self._tool_calling_loop, "_current_log", None)
         if live:
             return list(live)
         return list(self._accumulated_tool_calls)
@@ -219,7 +219,7 @@ class SubAgent:
         calls — inflating tokens_used AND mis-firing the per-call budget check
         (a SubAgent could be killed by tokens a sibling consumed). Filtering by
         caller_tag == self.name makes the count exact: both the internal
-        ReActEngine calls (agent_name=self.name → caller_tag) and the summarize
+        ToolCallingLoop calls (agent_name=self.name → caller_tag) and the summarize
         call are tagged with this SubAgent's name. _records_before is kept as a
         cheap start-offset optimization (excludes prior-task records).
         并发下多 SubAgent 共享一个全局记录列表，位置切片会算进兄弟的调用（token 虚高 +
@@ -232,10 +232,14 @@ class SubAgent:
             if r.caller_tag == self.name
         )
 
-    def _on_react_iteration(self, iteration: int, tool_calls: list[ToolCallRecord]) -> None:
-        """ReAct iteration callback — snapshot tool calls and check token budget.
+    def _on_tool_calling_iteration(
+        self,
+        iteration: int,
+        tool_calls: list[ToolCallRecord],
+    ) -> None:
+        """Tool-calling iteration callback for logs and token-budget checks.
 
-        ReAct engine passes the **cumulative** tool_calls_log (engine.py:194,285),
+        The tool-calling loop passes the **cumulative** tool_calls_log,
         not a delta. Use shallow copy to snapshot it; using extend() here would
         cause quadratic growth (iteration N produces N(N+1)/2 entries).
         """
@@ -243,9 +247,9 @@ class SubAgent:
         self._accumulated_tool_calls = list(tool_calls)
 
         # Emit progress so UI, tracing, and evaluation can observe
-        # SubAgent's internal ReAct iterations rather than seeing only
+        # SubAgent's internal tool-calling iterations rather than seeing only
         # start/complete bookends.
-        # 发出迭代进度事件，让观察者看到 SubAgent 内部 ReAct 进展。
+        # 发出迭代进度事件，让观察者看到 SubAgent 内部工具调用进展。
         self._emit("subagent_iteration", {
             "subagent_id": self.name,
             "iteration": iteration,
@@ -295,14 +299,15 @@ class SubAgent:
         })
 
         try:
-            # Run ReAct loop with timeout protection + on_iteration callback
+            # Run the native tool-calling loop with timeout protection and
+            # an iteration callback.
             step_result = await asyncio.wait_for(
-                self._react_engine.execute(
+                self._tool_calling_loop.execute(
                     prompt=self.task_description,
                     context=context,
                     node_id=self.name,
                     system_hint=self._system_prompt,
-                    on_iteration=self._on_react_iteration,
+                    on_iteration=self._on_tool_calling_iteration,
                 ),
                 timeout=self.timeout,
             )
@@ -312,7 +317,7 @@ class SubAgent:
             tokens_used = self._own_tokens_used()
             iterations_used = step_result.iterations_completed
 
-            logger.info("[SubAgent] %s ReAct loop done: success=%s, iterations=%d, tokens=%d, duration=%.0fms",
+            logger.info("[SubAgent] %s tool-calling loop done: success=%s, iterations=%d, tokens=%d, duration=%.0fms",
                         self.name, step_result.success, iterations_used, tokens_used, elapsed_ms)
 
             if step_result.success:
@@ -534,8 +539,8 @@ class SubAgent:
                          min(len(output), 8000))
 
             # Tag this summary call so it lands in the SubAgent's bucket
-            # rather than the parent's (the SubAgent already paid for its ReAct
-            # loop tokens — this final summary call should also be SubAgent's).
+            # rather than the parent's (the SubAgent already paid for its action-loop
+            # tokens — this final summary call should also be SubAgent's).
             response = await self.llm_client.chat_json(
                 messages, temperature=0.2, max_tokens=1500,
                 caller_tag=self.name,

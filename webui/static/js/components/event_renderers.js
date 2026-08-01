@@ -78,10 +78,10 @@ function TokenTable({ data }) {
           data.total.reasoning_tokens ? ` / 推理 ${fmtTokens(data.total.reasoning_tokens)}` : ""}）
         · ${(data.call_records || []).length} 次调用
       </div>
-      ${["by_engine", "by_caller"].map((key) => rows(data[key]).length > 0 && html`
+      ${["by_model", "by_caller"].map((key) => rows(data[key]).length > 0 && html`
         <table class="token-table">
           <thead><tr>
-            <th>${key === "by_engine" ? "引擎" : "调用方"}</th>
+            <th>${key === "by_model" ? "模型" : "调用方"}</th>
             <th>输入</th><th>输出</th><th>总计</th>
           </tr></thead>
           <tbody>

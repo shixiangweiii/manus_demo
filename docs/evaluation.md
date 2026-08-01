@@ -4,7 +4,7 @@
 
 ```bash
 python -m evaluation run --dry-run
-python -m evaluation run --engines sequential dag --executors react --efforts low medium
+python -m evaluation run --engines sequential dag --executors tool_calling reasoning_aware_tool_calling --efforts low medium
 python -m evaluation upload notes.md
 python -m evaluation generate <document-id>
 python -m evaluation report <run-id>

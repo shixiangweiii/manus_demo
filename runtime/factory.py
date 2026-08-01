@@ -227,7 +227,7 @@ async def build_runtime(
     try:
         llm_client = LLMClient.from_settings(settings)
         component = "core services"
-        context_manager = ContextManager(max_tokens=settings.engines.max_context_tokens)
+        context_manager = ContextManager(max_tokens=settings.execution.max_context_tokens)
         context = RuntimeContext(
             settings=settings,
             llm_client=llm_client,

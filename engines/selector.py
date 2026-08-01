@@ -60,5 +60,5 @@ def select_executor(settings: AppSettings, requested: ExecutorKind) -> ExecutorK
     if requested != ExecutorKind.AUTO:
         return requested
     if settings.llm.supports_reasoning:
-        return ExecutorKind.THINKING
-    return ExecutorKind.REACT
+        return ExecutorKind.REASONING_AWARE_TOOL_CALLING
+    return ExecutorKind.TOOL_CALLING

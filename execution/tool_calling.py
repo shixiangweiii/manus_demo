@@ -1,4 +1,4 @@
-"""Reasoning-model-aware action executor."""
+"""Standard native tool-calling action executor."""
 
 from __future__ import annotations
 
@@ -7,15 +7,17 @@ from core.events import EventBus
 from core.models import Action, ActionResult, Effort, ExecutorKind
 from core.settings import AppSettings
 from execution.base import ActionExecutor
-from execution.react import to_legacy_effort
+from execution.models import resolve_effort
 from llm.client import LLMClient
-from react.reasoning_engine import ReasoningEngine
+from tool_calling.loop import ToolCallingLoop
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
 
-class ThinkingAwareActionExecutor(ActionExecutor):
-    kind = ExecutorKind.THINKING
+class ToolCallingActionExecutor(ActionExecutor):
+    """Execute one action through the standard structured tool-calling loop."""
+
+    kind = ExecutorKind.TOOL_CALLING
 
     def __init__(
         self,
@@ -27,20 +29,18 @@ class ThinkingAwareActionExecutor(ActionExecutor):
         guardrail=None,
     ) -> None:
         self._events = events
-        self._engine = ReasoningEngine(
+        self._loop = ToolCallingLoop(
             llm_client=llm_client,
             tools=tools,
-            max_iterations=settings.engines.max_action_iterations,
-            max_thinking_tokens=settings.engines.max_thinking_tokens,
-            max_thinking_rounds=settings.engines.max_thinking_rounds,
+            max_iterations=settings.execution.max_action_iterations,
             tool_router=ToolRouter(
                 available_tools=[tool.name for tool in tools],
                 failure_threshold=settings.tools.failure_threshold,
             ),
             context_manager=context_manager,
-            agent_name="ThinkingAwareActionExecutor",
+            agent_name="ToolCallingActionExecutor",
             guardrail=guardrail,
-            temperature=settings.engines.thinking_temperature,
+            temperature=settings.execution.tool_calling_temperature,
             result_truncation_limit=settings.tools.result_truncation_limit,
             on_event=events.legacy_callback,
         )
@@ -56,11 +56,11 @@ class ThinkingAwareActionExecutor(ActionExecutor):
         if action.success_criteria:
             prompt += f"\n\nSuccess criteria: {action.success_criteria}"
         try:
-            legacy = await self._engine.execute(
+            legacy = await self._loop.execute(
                 prompt=prompt,
                 context=context,
                 node_id=action.id,
-                effort=to_legacy_effort(effort),
+                effort=resolve_effort(effort),
             )
         except Exception as exc:
             self._events.emit(
@@ -73,4 +73,4 @@ class ThinkingAwareActionExecutor(ActionExecutor):
         return result
 
     def set_allowed_tools(self, tool_names: list[str] | None) -> None:
-        self._engine.set_allowed_tools(tool_names)
+        self._loop.set_allowed_tools(tool_names)

@@ -1,15 +1,15 @@
 """
-AskUserTool - Human-in-the-Loop tool for the ReAct engine.
+AskUserTool - Human-in-the-Loop tool for the structured tool-calling loop.
 人机交互工具——动作执行循环中的 HITL 工具。
 
 When the LLM encounters ambiguous or incomplete information, it can
 call this tool to ask the user for clarification. The tool suspends
-the ReAct loop until the user provides input.
+the structured tool-calling loop until the user provides input.
 
 Design principles:
   - Human-as-Tool pattern: the human is registered as a tool in the
     agent's tool list, and the LLM decides when to call it.
-  - Async-safe: uses asyncio.Future to bridge the async ReAct loop
+  - Async-safe: uses asyncio.Future to bridge the async action loop
     with synchronous user input, without blocking the event loop.
   - Guarded: max prompts per task prevents infinite prompting loops.
   - Excluded from SubAgent whitelist (depth=1): SubAgents cannot
@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 class AskUserTool(BaseTool):
     """
-    HITL tool that pauses the ReAct loop to ask the user a question.
-    人机交互工具，暂停 ReAct 循环向用户提问。
+    HITL tool that pauses the structured tool-calling loop for a question.
+    人机交互工具，暂停结构化工具调用循环并向用户提问。
 
     The tool creates an asyncio.Future, emits an event carrying it,
     and awaits the Future. The UI layer (main.py) resolves the Future
@@ -138,7 +138,7 @@ class AskUserTool(BaseTool):
                 )
                 # User cancellation (Ctrl+C / EOF) is signalled by the UI layer
                 # via the sentinel "(user cancelled)". Convert to Error: prefix
-                # so ReActEngine treats it as a tool failure (ToolRouter accounting,
+                # so ToolCallingLoop treats it as a tool failure (ToolRouter accounting,
                 # evaluation distinguishability) — matching the timeout/limit paths.
                 # 用户取消（Ctrl+C / EOF）由 UI 层通过 "(user cancelled)" sentinel 传达；
                 # 转为 Error 前缀以与 timeout/上限路径风格一致，并让 ToolRouter / evaluation 可区分。

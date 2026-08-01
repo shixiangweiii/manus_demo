@@ -288,7 +288,7 @@ class MemoryRevokeTool(BaseTool):
                 "memory_id": memory_id,
             }, ensure_ascii=False)
         else:
-            # Return an Error:-prefixed string so ToolRouter/classify_result treats
+            # Return an Error:-prefixed string so ToolRouter/classify_tool_result treats
             # a failed revoke as a failure (a JSON {"status":"error"} reads as success).
-            # 返回 Error: 前缀字符串，让 classify_result 识别为失败（JSON 体会被误判成功）。
+            # 返回 Error: 前缀字符串，让 classify_tool_result 识别为失败（JSON 体会被误判成功）。
             return f"Error: Memory record '{memory_id}' not found"

@@ -9,10 +9,11 @@ Core Design Principles:
    before any execution begins. This ensures systematic progress and allows for
    dynamic re-planning when unexpected situations arise.
 
-2. ReAct (Reasoning + Acting): During execution, the agent follows a
-   Thought-Action-Observation loop. It first reasons about the current situation,
-   then takes an action (using tools), and finally observes the result before
-   deciding the next step.
+2. Native Tool Calling: During action execution, the model emits structured
+   tool_calls. The runtime executes each tool and returns its result in a
+   role="tool" message before the model chooses the next step. This has the
+   semantics of reasoning, acting, and observing, but it does not require or
+   parse the classic ReAct text labels Thought:, Action:, and Observation:.
 
 3. Multi-Agent Coordination: Different specialized agents handle different aspects:
    - Planner Agent: Decomposes high-level tasks into executable steps

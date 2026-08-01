@@ -1,4 +1,9 @@
-"""Standard ReAct action executor."""
+"""Reasoning-model-aware native tool-calling action executor.
+
+This executor uses the same structured Action/tool-result Observation cycle as
+the standard tool-calling executor, with separate handling for reasoning-only
+output and reasoning budgets.
+"""
 
 from __future__ import annotations
 
@@ -7,23 +12,17 @@ from core.events import EventBus
 from core.models import Action, ActionResult, Effort, ExecutorKind
 from core.settings import AppSettings
 from execution.base import ActionExecutor
+from execution.models import resolve_effort
 from llm.client import LLMClient
-from react.engine import ReActEngine
-from execution.models import ReasoningEffort
+from tool_calling.reasoning_aware_loop import ReasoningAwareToolCallingLoop
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
 
-def to_legacy_effort(effort: Effort) -> ReasoningEffort:
-    if effort == Effort.LOW:
-        return ReasoningEffort.LOW
-    if effort == Effort.HIGH:
-        return ReasoningEffort.HIGH
-    return ReasoningEffort.MEDIUM
+class ReasoningAwareToolCallingActionExecutor(ActionExecutor):
+    """Execute one action with reasoning-aware structured tool calling."""
 
-
-class ReactActionExecutor(ActionExecutor):
-    kind = ExecutorKind.REACT
+    kind = ExecutorKind.REASONING_AWARE_TOOL_CALLING
 
     def __init__(
         self,
@@ -35,18 +34,20 @@ class ReactActionExecutor(ActionExecutor):
         guardrail=None,
     ) -> None:
         self._events = events
-        self._engine = ReActEngine(
+        self._loop = ReasoningAwareToolCallingLoop(
             llm_client=llm_client,
             tools=tools,
-            max_iterations=settings.engines.max_action_iterations,
+            max_iterations=settings.execution.max_action_iterations,
+            max_reasoning_tokens=settings.execution.max_reasoning_tokens,
+            max_reasoning_rounds=settings.execution.max_reasoning_rounds,
             tool_router=ToolRouter(
                 available_tools=[tool.name for tool in tools],
                 failure_threshold=settings.tools.failure_threshold,
             ),
             context_manager=context_manager,
-            agent_name="ReactActionExecutor",
+            agent_name="ReasoningAwareToolCallingActionExecutor",
             guardrail=guardrail,
-            temperature=settings.engines.react_temperature,
+            temperature=settings.execution.reasoning_aware_tool_calling_temperature,
             result_truncation_limit=settings.tools.result_truncation_limit,
             on_event=events.legacy_callback,
         )
@@ -62,11 +63,11 @@ class ReactActionExecutor(ActionExecutor):
         if action.success_criteria:
             prompt += f"\n\nSuccess criteria: {action.success_criteria}"
         try:
-            legacy = await self._engine.execute(
+            legacy = await self._loop.execute(
                 prompt=prompt,
                 context=context,
                 node_id=action.id,
-                effort=to_legacy_effort(effort),
+                effort=resolve_effort(effort),
             )
         except Exception as exc:
             self._events.emit(
@@ -79,4 +80,4 @@ class ReactActionExecutor(ActionExecutor):
         return result
 
     def set_allowed_tools(self, tool_names: list[str] | None) -> None:
-        self._engine.set_allowed_tools(tool_names)
+        self._loop.set_allowed_tools(tool_names)

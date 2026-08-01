@@ -48,7 +48,7 @@ from typing import Any, Callable, Protocol
 from dag.graph import TaskDAG
 from dag.state_machine import NodeStateMachine
 from dag.models import EdgeType, NodeStatus, NodeType, TaskNode
-from execution.models import ReasoningEffort, StepResult
+from execution.models import ResolvedEffort, StepResult
 
 
 class NodeExecutor(Protocol):
@@ -91,7 +91,7 @@ class DAGExecutor:
         planner: Any | None = None,
         max_parallel: int | None = None,
         on_event: Callable[[str, Any], None] | None = None,
-        effort: ReasoningEffort | None = None,
+        effort: ResolvedEffort | None = None,
         on_checkpoint: Callable[[], None] | None = None,
         serial_execution: bool = True,
         node_timeout: int = 300,
@@ -104,7 +104,7 @@ class DAGExecutor:
         self._planner = planner                  # 用于超步间自适应规划
         self._max_parallel = max_parallel or 3
         self._emit = on_event or (lambda *_: None)  # 事件回调（用于 UI 实时更新）
-        self._effort = effort                    # reasoning_effort 透传到 execute_node
+        self._effort = effort                    # resolved_effort 透传到 execute_node
         self._on_checkpoint = on_checkpoint      # callback after each super-step boundary
         self._serial_execution = serial_execution
         self._node_timeout = node_timeout

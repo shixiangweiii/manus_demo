@@ -1,23 +1,37 @@
 """
-ReAct Engine - Unified ReAct (Reasoning + Acting) execution engine.
-ReAct 引擎 —— 统一的 ReAct（推理 + 行动）执行引擎。
+Native tool-calling action loop.
+基于模型原生工具调用的动作执行循环。
 
-This module provides the shared action loop used by runtime executors.
+This module provides the shared structured tool-calling loop used by runtime
+executors. ``ToolCallingLoop`` names the implementation by its actual runtime
+mechanism: model-emitted ``tool_calls`` are executed and their results are fed
+back into the next model turn.
+
+This implementation does NOT prompt for or parse a label-based textual protocol
+with literal ``Thought:``, ``Action:``, and ``Observation:`` labels. A provider
+``tool_call`` is the Action, and its matching ``role="tool"`` result is the
+Observation. Reasoning content, when a provider returns it, is separate metadata
+and is not required to be displayed.
+
+本模块不要求模型输出、也不解析字面的 ``Thought:`` / ``Action:`` /
+``Observation:`` 文本协议。结构化 ``tool_call`` 对应 Action，匹配的
+``role="tool"`` 结果对应 Observation；供应商返回的 reasoning 内容属于独立
+元数据，不是本循环成立或对外展示的必要条件。
 
 Features:
-  - Standardized ReAct loop implementation
+  - Standardized native tool-calling action loop
   - Integrated ToolRouter for failure-based tool switching
   - Configurable iteration limits
   - Tool call result recording
   - Error handling with detailed logs
 
 Usage:
-  engine = ReActEngine(
+  loop = ToolCallingLoop(
       llm_client=llm_client,
       tools=tools,
       max_iterations=10,
   )
-  result = await engine.execute(prompt, context)
+  result = await loop.execute(prompt, context)
 
 Runtime executors select this implementation explicitly through executor
 configuration.
@@ -31,24 +45,24 @@ import logging
 from typing import Any, Callable
 
 # NOTE: `build_convergence_hint` is imported lazily inside execute() to break a
-# latent circular import: react.engine -> agents.prompt_utils -> agents/__init__.py
-# (eager) -> agents.subagent -> react.engine. The top-level import worked under
-# specific test orderings but failed for direct `from react.engine import X`
-# probes. Lazy import keeps the module load graph acyclic.
-# 延迟导入,打破 react.engine ↔ agents 包的潜在循环依赖。
+# latent circular import: tool_calling.loop -> agents.prompt_utils ->
+# agents/__init__.py (eager) -> agents.subagent -> tool_calling.loop. The
+# top-level import worked under specific test orderings but failed for direct
+# module-import probes. Lazy import keeps the module load graph acyclic.
+# 延迟导入，打破 tool_calling.loop ↔ agents 包的潜在循环依赖。
 from context.manager import ContextManager
-from llm.client import LLMClient, _extract_thinking_content, _strip_thinking_from_content
-from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
-from execution.models import ReasoningEffort, StepResult, ToolCallRecord
+from llm.client import LLMClient, _extract_reasoning_content_from_tags, _strip_reasoning_from_content
+from tool_calling.tool_execution import ToolExecutionPolicy, execute_tool_calls
+from execution.models import ResolvedEffort, StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
 logger = logging.getLogger(__name__)
 
 
-class ReActEngine:
+class ToolCallingLoop:
     """
-    Unified ReAct execution engine for Manus Demo.
+    Native tool-calling loop for executing one runtime action.
 
     The core loop:
       while not done:
@@ -56,9 +70,12 @@ class ReActEngine:
           if response has tool_calls:
               for each tool_call:
                   result = tool.execute(**args)
-                  record observation
+                  append result as a role="tool" observation
           else:
               step is done, return final answer
+
+    It does not implement a label-based
+    ``Thought:/Action:/Observation:`` text protocol.
 
     Key features:
       - Integrated ToolRouter for failure handling
@@ -85,10 +102,10 @@ class ReActEngine:
         self.max_iterations = max_iterations or 10
         self.temperature = temperature
         self.result_truncation_limit = result_truncation_limit
-        # Name of the runtime component owning this engine — propagated to tools
+        # Name of the runtime component owning this loop — propagated to tools
         # via tool.set_caller(name) right before each traced_execute call so that
         # SubAgentTool can correctly attribute parent_agent in tracing.
-        # 拥有此引擎的 Agent 名称——在每次 tool 执行前通过 set_caller 注入，
+        # 拥有此循环的 Agent 名称——在每次 tool 执行前通过 set_caller 注入，
         # 用于 SubAgentTool 准确归因 parent_agent。
         self.agent_name = agent_name
         self.guardrail = guardrail
@@ -114,7 +131,7 @@ class ReActEngine:
 
         # Tools that transfer control on success (Handoff). When such a
         # tool succeeds, end the loop and use its FULL output as the final answer.
-        # Empty set (the default for every engine without a handoff tool) makes
+        # Empty set (the default for every loop without a handoff tool) makes
         # the check below a no-op — zero behavior change for existing loops.
         # 控制权转移类工具集合（Handoff）。成功时终止循环、以其完整输出为答案。
         # 无 handoff 工具时为空集 → 下方检查零开销，现有循环行为不变。
@@ -133,12 +150,12 @@ class ReActEngine:
         self._current_log: list[ToolCallRecord] = []
 
     def _apply_effort(
-        self, effort: ReasoningEffort,
+        self, effort: ResolvedEffort,
     ) -> tuple[float, int]:
         """Return (temperature, max_iterations) for effort level."""
-        if effort == ReasoningEffort.LOW:
+        if effort == ResolvedEffort.LOW:
             return 0.3, max(3, self.max_iterations // 2)
-        elif effort == ReasoningEffort.HIGH:
+        elif effort == ResolvedEffort.HIGH:
             return 0.7, self.max_iterations
         else:  # MEDIUM
             return self.temperature, self.max_iterations
@@ -159,9 +176,10 @@ class ReActEngine:
         handoff (Error:) leaves _last_ok False → no transfer. Empty
         _handoff_tool_names (no handoff tool) → no-op.
 
-        Extracted so both engine loops honor #20 — fixes drift where only
-        ReActEngine.execute had the inline check (ReasoningEngine bypassed it).
-        此逻辑由两个执行循环共享，避免 Thinking 路径漏掉 handoff 终止。
+        Extracted so both action loops honor #20 — fixes drift where only
+        ToolCallingLoop.execute had the inline check while the
+        reasoning-aware subclass bypassed it.
+        此逻辑由两个执行循环共享，避免推理感知路径漏掉 handoff 终止。
         """
         if not self._handoff_tool_names or not getattr(response_msg, "tool_calls", None):
             return None
@@ -192,10 +210,10 @@ class ReActEngine:
         node_id: str | None = None,
         system_hint: str = "",
         on_iteration: Callable[[int, list[ToolCallRecord]], None] | None = None,
-        effort: ReasoningEffort | None = None,
+        effort: ResolvedEffort | None = None,
     ) -> StepResult:
         """
-        Execute a single task using the ReAct loop.
+        Execute a single task using the native tool-calling action loop.
 
         Args:
             prompt: The main task prompt for the LLM
@@ -204,13 +222,14 @@ class ReActEngine:
             system_hint: Additional system-level hint for the LLM
             on_iteration: Optional callback invoked after each iteration with
                 (iteration_number, current_tool_calls_log). Can raise to abort.
-            effort: Reasoning effort level affecting temperature/iterations/truncation.
+            effort: Resolved runtime effort affecting temperature, iteration,
+                and truncation policies.
 
         Returns:
             StepResult: Contains success status, output text, and tool call log
         """
         step_id = node_id or "default"
-        effective_effort = effort or ReasoningEffort.MEDIUM
+        effective_effort = effort or ResolvedEffort.MEDIUM
         effective_temp, effective_max_iter = self._apply_effort(effective_effort)
         effective_policy = ToolExecutionPolicy.for_effort(
             effective_effort,
@@ -224,16 +243,16 @@ class ReActEngine:
 
         # Create a fresh local list per execution and rebind
         # self._current_log to it. Do NOT reuse + clear the previous list —
-        # if the same ReActEngine instance is invoked concurrently (e.g.
+        # if the same ToolCallingLoop instance is invoked concurrently (e.g.
         # parallel DAG execution), clearing would
         # wipe a list that the other in-flight execute() is still appending
         # to. New list per call isolates lifetimes. Outsiders reading
         # self._current_log see whichever execute() rebound it last; the
         # canonical "SubAgent failure path" reader is safe because SubAgent
-        # owns a PRIVATE ReActEngine (created in SubAgent.__init__) so at
+        # owns a PRIVATE ToolCallingLoop (created in SubAgent.__init__) so at
         # most one execute() is in flight on it at a time.
         # 每次 execute() 用新 list,避免并发 execute() 的 clear 互相清空。
-        # SubAgent 路径安全:SubAgent 自己 new 的私有 engine,无并发。
+        # SubAgent 路径安全：SubAgent 自己创建的私有 loop 无并发。
         tool_calls_log: list[ToolCallRecord] = []
         self._current_log = tool_calls_log
         iteration = 0
@@ -242,11 +261,11 @@ class ReActEngine:
         if system_hint:
             messages.append({"role": "system", "content": system_hint})
 
-        logger.info("[ReActEngine] Starting execution for %s: %s", step_id, prompt[:100])
+        logger.info("[ToolCallingLoop] Starting execution for %s: %s", step_id, prompt[:100])
 
         while iteration < effective_max_iter:
             iteration += 1
-            logger.debug("[ReActEngine] Iteration %d/%d", iteration, effective_max_iter)
+            logger.debug("[ToolCallingLoop] Iteration %d/%d", iteration, effective_max_iter)
 
             try:
                 continue_msg = "Continue executing based on the tool results above."
@@ -278,27 +297,32 @@ class ReActEngine:
 
                 if self.context_manager is not None:
                     messages = await self.context_manager.compress_if_needed(
-                        messages, self.llm_client, caller_tag=self.agent_name or "ReActEngine"
+                        messages, self.llm_client, caller_tag=self.agent_name or "ToolCallingLoop"
                     )
 
                 response_msg = await self.llm_client.chat_with_tools(
                     messages,
                     tools=self.tool_schemas,
                     temperature=effective_temp,
-                    caller_tag=self.agent_name or "ReActEngine",
+                    caller_tag=self.agent_name or "ToolCallingLoop",
                 )
 
-                # Extract and separate thinking from response content
-                thinking = getattr(response_msg, "reasoning_content", None) or ""
-                if not thinking:
-                    thinking = _extract_thinking_content(response_msg.content or "")
-                response_text = _strip_thinking_from_content(response_msg.content or "", thinking)
+                # Separate provider reasoning metadata from answer content.
+                # This is not parsing a literal ``Thought:`` field: the
+                # provider may expose reasoning_content or embed <think> tags.
+                reasoning_content = getattr(response_msg, "reasoning_content", None) or ""
+                if not reasoning_content:
+                    reasoning_content = _extract_reasoning_content_from_tags(response_msg.content or "")
+                response_text = _strip_reasoning_from_content(
+                    response_msg.content or "",
+                    reasoning_content,
+                )
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": response_text,
                 }
-                if thinking:
-                    assistant_msg["thinking_content"] = thinking
+                if reasoning_content:
+                    assistant_msg["reasoning_content"] = reasoning_content
                 if response_msg.tool_calls:
                     assistant_msg["tool_calls"] = [
                         {
@@ -314,7 +338,7 @@ class ReActEngine:
                 messages.append(assistant_msg)
 
             except Exception as exc:
-                logger.error("[ReActEngine] LLM call failed: %s", exc)
+                logger.error("[ToolCallingLoop] LLM call failed: %s", exc)
                 return StepResult(
                     step_id=step_id,
                     success=False,
@@ -325,17 +349,17 @@ class ReActEngine:
 
             if not response_msg.tool_calls:
                 if response_text.strip():
-                    # Real answer after thinking was stripped
+                    # Real answer after provider reasoning metadata was separated.
                     final_output = response_text
-                elif thinking and not response_text.strip():
-                    # Reasoning-only round: model is still thinking, no final answer yet
-                    logger.info("[ReActEngine] Reasoning-only response, requesting explicit answer")
+                elif reasoning_content and not response_text.strip():
+                    # Reasoning-only round: no final answer yet.
+                    logger.info("[ToolCallingLoop] Reasoning-only response, requesting explicit answer")
                     needs_explicit_answer = True
                     continue
                 else:
                     # Truly empty response (edge case)
                     final_output = response_msg.content or "Task completed (no output)."
-                    logger.info("[ReActEngine] Completed in %d iterations", iteration)
+                    logger.info("[ToolCallingLoop] Completed in %d iterations", iteration)
                     if on_iteration:
                         on_iteration(iteration, tool_calls_log)
                     return StepResult(
@@ -346,7 +370,7 @@ class ReActEngine:
                         iterations_completed=iteration,
                     )
 
-                logger.info("[ReActEngine] Completed in %d iterations", iteration)
+                logger.info("[ToolCallingLoop] Completed in %d iterations", iteration)
                 if on_iteration:
                     on_iteration(iteration, tool_calls_log)
                 return StepResult(
@@ -357,8 +381,8 @@ class ReActEngine:
                     iterations_completed=iteration,
                 )
 
-            # Execute tool calls. Independent calls run concurrently via
-            # Shared tool-call execution keeps all ReAct paths consistent.
+            # Execute structured Actions. Independent calls run concurrently via
+            # shared tool-call execution so all tool-calling paths stay aligned.
             # + gather + result processing loop. Same behavior, single source.
             tool_messages = await execute_tool_calls(
                 response_msg.tool_calls,
@@ -368,14 +392,14 @@ class ReActEngine:
                 agent_name=self.agent_name,
                 truncation_limit=effective_policy.truncation_limit,
                 tool_calls_log=tool_calls_log,
-                log_prefix="ReActEngine",
+                log_prefix="ToolCallingLoop",
                 policy=effective_policy,
                 guardrail=self.guardrail,
                 on_event=self._on_event,
             )
             messages.extend(tool_messages)
 
-            # Handoff control transfer shared by both action-loop variants.
+            # Handoff control transfer shared by both tool-calling variants.
             transfer = self._check_handoff_transfer(
                 response_msg, step_id, tool_calls_log, iteration, on_iteration,
             )
@@ -385,7 +409,7 @@ class ReActEngine:
             if on_iteration:
                 on_iteration(iteration, tool_calls_log)
 
-        logger.warning("[ReActEngine] Hit max iterations (%d)", effective_max_iter)
+        logger.warning("[ToolCallingLoop] Hit max iterations (%d)", effective_max_iter)
         return StepResult(
             step_id=step_id,
             success=False,
@@ -411,7 +435,7 @@ class ReActEngine:
         from the backup made at construction time.
 
         Priority chain: ToolGuardrail > allowed-tools > default tool set.
-        Guardrails are checked in engine_helpers.execute_tool_calls() before
+        Guardrails are checked in tool_execution.execute_tool_calls() before
         tool execution, independently of this filter. So even if a tool is
         in allowed_tools, the guardrail can still BLOCK it.
 
@@ -421,7 +445,7 @@ class ReActEngine:
         当 tool_names 为 None 或空时，恢复构造时的完整工具集。
 
         优先级链：ToolGuardrail > allowed-tools > default tool set。
-        护栏在 engine_helpers.execute_tool_calls() 中工具执行前检查，
+        护栏在 tool_execution.execute_tool_calls() 中工具执行前检查，
         独立于本过滤。因此即使工具在 allowed_tools 中，护栏仍可 BLOCK。
         """
         if tool_names:

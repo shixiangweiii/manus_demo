@@ -50,13 +50,13 @@ class ToolRouter:
     Tracks tool usage and suggests alternatives on repeated failures.
     追踪工具使用情况，在连续失败时建议替代工具。
 
-    Usage in ReAct loop:
+    Usage in a structured tool-calling loop:
       1. Before tool execution: router might inject a hint
       2. After success: router.record_success(node_id, tool_name)
       3. After failure: router.record_failure(node_id, tool_name)
       4. Before next LLM call: router.get_hint(node_id) for context
 
-    在 ReAct 循环中的用法：
+    在结构化工具调用循环中的用法：
       1. 工具执行前：路由器可能注入建议提示
       2. 成功后：router.record_success(node_id, tool_name)
       3. 失败后：router.record_failure(node_id, tool_name)

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`main.py` is the thin CLI entry point and `cli.py` contains command handling. Stable contracts and configuration live in `core/`; runtime composition lives in `runtime/`. Task orchestration implementations are under `engines/`, while per-action ReAct implementations are under `execution/` and `react/`. Base and optional tools are registered through `tools/registry.py`. User-facing adapters are `webui/`, `tracing/`, and the unified `evaluation/` package. Retained peripheral capabilities live in `a2a/`, `memory/`, `skills/`, `evolution/`, `guardrails/`, and `checkpoint/`. Treat `sxw_aicoding/`, `agentbay_research/`, generated traces, and local evaluation output as historical or generated material.
+`main.py` is the thin CLI entry point and `cli.py` contains command handling. Stable contracts and configuration live in `core/`; runtime composition lives in `runtime/`. Task orchestration implementations are under `engines/`, per-action executors are under `execution/`, and reusable native tool-calling loops are under `tool_calling/`. `ToolCallingLoop` handles the standard structured loop; `ReasoningAwareToolCallingLoop` adds reasoning-model budgets and reasoning-only rounds. Neither implements a literal `Thought:` / `Action:` / `Observation:` text protocol. Base and optional tools are registered through `tools/registry.py`. User-facing adapters are `webui/`, `tracing/`, and the unified `evaluation/` package. Retained peripheral capabilities live in `a2a/`, `memory/`, `skills/`, `evolution/`, `guardrails/`, and `checkpoint/`. Treat `sxw_aicoding/`, `agentbay_research/`, generated traces, and local evaluation output as historical or generated material.
 
 ## Build and Development Commands
 

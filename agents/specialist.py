@@ -23,8 +23,8 @@ import config
 from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from llm.client import LLMClient
-from react.engine import ReActEngine
-from execution.models import ReasoningEffort
+from tool_calling.loop import ToolCallingLoop
+from execution.models import ResolvedEffort
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -90,9 +90,10 @@ SPECIALIST_REGISTRY: dict[str, SpecialistSpec] = {
 class SpecialistAgent:
     """
     A specialist agent that takes over (control transfer) with the caller's
-    context and returns its full output. Reuses ReActEngine with a private
-    messages list (same isolation pattern as SubAgent).
-    专家 agent：带调用方上下文接管并返回完整输出；复用 ReActEngine（私有 messages）。
+    context and returns its full output. Reuses ToolCallingLoop with a private
+    message history (the same isolation pattern as SubAgent).
+    专家 agent：带调用方上下文接管并返回完整输出；复用 ToolCallingLoop，
+    并使用私有消息历史。
     """
 
     def __init__(
@@ -137,7 +138,7 @@ class SpecialistAgent:
         )
 
         tool_router = ToolRouter(available_tools=self._tool_names)
-        self._react_engine = ReActEngine(
+        self._tool_calling_loop = ToolCallingLoop(
             llm_client=llm_client,
             tools=tools,
             max_iterations=max_iterations or config.HANDOFF_MAX_ITERATIONS,
@@ -154,15 +155,15 @@ class SpecialistAgent:
         self,
         task: str,
         context: str = "",
-        effort: ReasoningEffort | None = None,
+        effort: ResolvedEffort | None = None,
     ) -> str:
         """Run the specialist with the caller's context; return its FULL output.
-        带调用方上下文运行专家，返回完整输出（控制权转移由调用方/引擎处理）。"""
-        result = await self._react_engine.execute(
+        带调用方上下文运行专家，返回完整输出（控制权转移由调用方/循环处理）。"""
+        result = await self._tool_calling_loop.execute(
             prompt=task,
             context=context,
             node_id=f"specialist-{self.spec.name}",
             system_hint=self.system_prompt,
-            effort=effort or ReasoningEffort.MEDIUM,
+            effort=effort or ResolvedEffort.MEDIUM,
         )
         return result.output

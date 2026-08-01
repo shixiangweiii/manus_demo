@@ -36,15 +36,15 @@ logger = logging.getLogger(__name__)
 RETRYABLE_ERRORS = (APIConnectionError, RateLimitError, InternalServerError)
 
 # Internal message keys that must NOT be sent to the OpenAI-compatible API.
-# These are annotation fields used by engines/tracing/context internally.
-_INTERNAL_MESSAGE_KEYS = frozenset({"thinking_content"})
+# These are annotation fields used by loops, tracing, and context management.
+_INTERNAL_MESSAGE_KEYS = frozenset({"reasoning_content"})
 
 
 def _sanitize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Strip internal-only keys from messages before sending to the API provider.
 
     Returns a new list; the original messages list is not modified.
-    Internal fields like thinking_content are kept in the engine's local
+    Internal fields like reasoning_content are kept in the loop's local
     transcript for tracing/context purposes but must not leak into the
     OpenAI chat.completions.create() payload.
     """
@@ -54,15 +54,15 @@ def _sanitize_messages_for_api(messages: list[dict[str, Any]]) -> list[dict[str,
     ]
 
 
-def _extract_thinking_content(content: str | None) -> str:
+def _extract_reasoning_content_from_tags(content: str | None) -> str:
     """从 DeepSeek R1 风格的 <think/> 标签中提取推理内容。
-    Extract thinking content from DeepSeek R1 style <think/> tags.
+    Extract reasoning content from DeepSeek R1 style <think/> tags.
 
     DeepSeek R1 format: <think\\n...reasoning...\\n</think\\n>actual response
     Opening tag has no closing > — the newline IS the delimiter.
     Closing tag is </think\\n>.
 
-    Returns the thinking portion, or "" if no thinking tags found.
+    Returns the reasoning portion, or "" if no supported tags are found.
     """
     if not content or "<think" not in content:
         return ""
@@ -75,14 +75,17 @@ def _extract_thinking_content(content: str | None) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _strip_thinking_from_content(content: str, thinking: str) -> str:
-    """Remove the thinking portion from content, returning only the response.
+def _strip_reasoning_from_content(
+    content: str,
+    reasoning_content: str,
+) -> str:
+    """Remove tagged reasoning content, returning only the response.
 
-    For DeepSeek official API, content never contains thinking (it's in
+    For DeepSeek official API, content never contains reasoning (it's in
     reasoning_content), so content is returned as-is. For self-hosted R1
     models where <think/> tags are in content, we strip them out.
     """
-    if not thinking or not content:
+    if not reasoning_content or not content:
         return content
     if "<think" in content:
         stripped = re.sub(r"<think\n.*?\n</think\n>", "", content, count=1, flags=re.DOTALL)
@@ -278,7 +281,8 @@ class LLMClient:
 
         OpenAI 风格的 function calling 对话。
         返回原始响应消息对象，调用方可检查 tool_calls 和 content。
-        这是 ReAct 循环的核心：让 LLM 自主决策调用哪个工具。
+        这是结构化工具调用循环的模型决策入口：LLM 自主选择是否调用工具，
+        不依赖对字面 ``Action:`` 文本的解析。
         tool_choice="auto" 让 LLM 自行决定是否调用工具（也可能直接给出文本答案）。
 
         Supports configured retry and traces llm.chat_with_tools calls.
@@ -529,7 +533,7 @@ class LLMClient:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             reasoning_tokens=reasoning_tokens,
-            engine=self.model,
+            model=self.model,
             caller_tag=caller_tag,
         )
         self._call_records.append(record)
@@ -701,11 +705,13 @@ class LLMClient:
                 finish_reason = response_data.get("finish_reason", "")
                 if finish_reason:
                     span.set_attribute("gen_ai.response.finish_reason", finish_reason)
-                thinking = response_data.get("thinking_content", "")
-                if thinking and self.tracing_log_prompts:
+                reasoning_content = response_data.get("reasoning_content", "")
+                if reasoning_content and self.tracing_log_prompts:
                     span.set_attribute(
-                        AttrKey.GEN_AI_RESPONSE_THINKING_CONTENT,
-                        redact_text(str(thinking))[:self.tracing_max_attribute_length],
+                        AttrKey.GEN_AI_RESPONSE_REASONING_CONTENT,
+                        redact_text(str(reasoning_content))[
+                            :self.tracing_max_attribute_length
+                        ],
                     )
 
             if success:
@@ -745,7 +751,7 @@ class LLMClient:
         """
         try:
             if not resp or not resp.choices:
-                return {"response_content": "", "tool_calls": None, "finish_reason": "", "thinking_content": ""}
+                return {"response_content": "", "tool_calls": None, "finish_reason": "", "reasoning_content": ""}
 
             choice = resp.choices[0]
             message = choice.message
@@ -778,8 +784,12 @@ class LLMClient:
                 "response_content": content,
                 "tool_calls": tool_calls,
                 "finish_reason": finish_reason,
-                "thinking_content": reasoning_content if reasoning_content else _extract_thinking_content(content),
+                "reasoning_content": (
+                    reasoning_content
+                    if reasoning_content
+                    else _extract_reasoning_content_from_tags(content)
+                ),
             }
         except Exception:
             logger.debug("[LLMClient] Failed to extract response data for tracing", exc_info=True)
-            return {"response_content": "", "tool_calls": None, "finish_reason": "", "thinking_content": ""}
+            return {"response_content": "", "tool_calls": None, "finish_reason": "", "reasoning_content": ""}

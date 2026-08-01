@@ -15,8 +15,8 @@ from engines.sequential import SequentialPlanEngine
 from engines.todo import TodoEngine
 from engines.workflow import WorkflowEngine
 from engines.selector import EffortPolicy, EngineSelector, select_executor
-from execution.react import ReactActionExecutor
-from execution.thinking import ThinkingAwareActionExecutor
+from execution.reasoning_aware_tool_calling import ReasoningAwareToolCallingActionExecutor
+from execution.tool_calling import ToolCallingActionExecutor
 from runtime.context import RuntimeContext
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ class AgentRuntime:
                 reset = getattr(capability, "reset_task_state", None)
                 if callable(reset):
                     reset()
-            executor = self._build_executor(ExecutorKind.REACT)
+            executor = self._build_executor(ExecutorKind.TOOL_CALLING)
             engine = self._build_engine(EngineKind.WORKFLOW, executor, Effort.LOW)
             result = await engine.run(request)
             result.answer = self._apply_output_guardrail(result.answer)
@@ -276,9 +276,9 @@ class AgentRuntime:
 
     def _build_executor(self, kind: ExecutorKind):
         executor_type = (
-            ThinkingAwareActionExecutor
-            if kind == ExecutorKind.THINKING
-            else ReactActionExecutor
+            ReasoningAwareToolCallingActionExecutor
+            if kind == ExecutorKind.REASONING_AWARE_TOOL_CALLING
+            else ToolCallingActionExecutor
         )
         executor = executor_type(
             llm_client=self.context.llm_client,

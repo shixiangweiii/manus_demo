@@ -128,7 +128,7 @@ class BaseAgent:
         self.add_message("assistant", str(result))
         return result
 
-    async def think_with_tools(
+    async def request_tool_calling_turn(
         self,
         user_input: str,
         tools: list[dict[str, Any]],
@@ -140,7 +140,8 @@ class BaseAgent:
 
         发送 user_input 并附带工具定义，返回原始响应消息对象。
         调用方需自行检查 response.tool_calls 来决定后续执行哪个工具。
-        这是 ReAct 循环的核心：LLM 选择并调用工具。
+        这是结构化工具调用循环的 Action 阶段：LLM 通过原生
+        tool calling 选择工具，而不是输出供解析的 ``Action:`` 文本。
 
         caller_tag defaults to self.name; override via kwargs.
         """
@@ -181,7 +182,9 @@ class BaseAgent:
     def add_tool_result(self, tool_call_id: str, result: str) -> None:
         """
         Record a tool execution result in the message history.
-        将工具执行结果记录到消息历史中，供下一轮 LLM 推理使用（ReAct 的 Observe 步骤）。
+        将工具执行结果记录到消息历史中，供下一轮 LLM 推理使用。这在语义上
+        在 reason/act/observe 语义中对应 Observation，但不是字面的
+        ``Observation:`` 文本协议。
         """
         self._messages.append({
             "role": "tool",

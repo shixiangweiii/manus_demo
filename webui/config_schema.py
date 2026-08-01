@@ -29,9 +29,9 @@ GROUPS = (
         "runtime",
         "运行选择",
         (
-            Item("engine", "enum", "推理引擎", "auto 或一种编排方式", tuple(k.value for k in EngineKind if k != EngineKind.WORKFLOW)),
+            Item("engine", "enum", "编排引擎", "auto 或一种任务编排方式", tuple(k.value for k in EngineKind if k != EngineKind.WORKFLOW)),
             Item("executor", "enum", "动作执行器", "auto 根据模型能力选择", tuple(k.value for k in ExecutorKind)),
-            Item("effort", "enum", "推理力度", "auto 根据引擎选择", tuple(k.value for k in Effort)),
+            Item("effort", "enum", "运行力度", "auto 根据编排引擎选择", tuple(k.value for k in Effort)),
         ),
     ),
     (
@@ -80,9 +80,9 @@ def get_schema() -> dict[str, Any]:
 def get_values(settings: AppSettings | None = None) -> dict[str, object]:
     settings = settings or get_settings()
     return {
-        "engine": settings.engines.default.value,
-        "executor": settings.engines.executor.value,
-        "effort": settings.engines.effort.value,
+        "engine": settings.runtime.engine.value,
+        "executor": settings.runtime.executor.value,
+        "effort": settings.runtime.effort.value,
         "subagent": settings.capabilities.subagent,
         "hitl": settings.capabilities.hitl,
         "agentic_memory": settings.capabilities.agentic_memory,

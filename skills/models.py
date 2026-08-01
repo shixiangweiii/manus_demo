@@ -54,10 +54,10 @@ class SkillMeta:
 
     Approximately 100 tokens per skill when formatted in the system prompt.
     Each skill's name and description are shown to the LLM at startup so it
-    can decide whether to activate a skill during the ReAct loop.
+    can decide whether to activate a skill during the structured tool-calling loop.
 
     每个技能在系统提示词中约占 100 tokens。
-    启动时向 LLM 展示每个技能的名称和描述，LLM 在 ReAct 循环中自行决定
+    启动时向 LLM 展示每个技能的名称和描述，LLM 在结构化工具调用循环中自行决定
     是否激活某个技能。
     """
     # Required fields / 必填字段

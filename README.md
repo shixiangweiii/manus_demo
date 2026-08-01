@@ -4,7 +4,7 @@
 
 ## 架构概览
 
-`AgentRuntime` 接收任务并由 `EngineSelector` 选择编排引擎。Sequential、DAG、TODO 和 Goal 引擎都通过同一个 `ActionExecutor` 执行动作；Workflow 只接受显式工作流文件。React 与 Thinking 执行器的自动选择只依据 `llm.supports_reasoning`。
+`AgentRuntime` 接收任务并由 `EngineSelector` 选择编排引擎。Sequential、DAG、TODO 和 Goal 引擎都通过同一个 `ActionExecutor` 执行动作；Workflow 只接受显式工作流文件。`tool_calling` 使用模型原生工具调用，`reasoning_aware_tool_calling` 在同一执行协议上增加推理模型的独立推理轮次和预算控制；自动选择只依据 `llm.supports_reasoning`。
 
 ```text
 CLI / WebUI / Evaluation
@@ -13,10 +13,22 @@ CLI / WebUI / Evaluation
           |
  TaskEngine: sequential | dag | todo | goal | workflow
           |
- ActionExecutor: react | thinking
+ ActionExecutor: tool_calling | reasoning_aware_tool_calling
+          |
+ ToolCallingLoop: standard | reasoning-aware
           |
       ToolRegistry
 ```
+
+`ToolCallingLoop` 按实际协议命名：模型通过结构化 `tool_calls` 发起动作，运行时执行工具并以 `role="tool"` 消息回传结果。它不要求模型输出、也不解析经典文本式 ReAct 的字面协议：
+
+```text
+Thought: ...
+Action: ...
+Observation: ...
+```
+
+`ReasoningAwareToolCallingLoop` 是其推理模型感知子类：模型的 reasoning 内容可以由供应商放在独立字段中，也可以不对外显示；该子类额外处理纯推理轮次、推理 token 预算和推理轮次上限。详细说明见 [引擎与执行器](docs/engines.md)。
 
 A2A、远程 Agent、Subagent、记忆、知识库、技能、自演化、Guardrails 和 Checkpoint 作为可选工具或生命周期钩子接入，不参与核心路由判断。
 
@@ -28,7 +40,7 @@ pip install -r requirements.txt
 cp .env.example .env
 python main.py --help
 python main.py chat
-python main.py run "整理当前目录结构" --engine sequential --executor react --effort low
+python main.py run "整理当前目录结构" --engine sequential --executor tool_calling --effort low
 python main.py workflow workflow_spec.json
 python main.py mcp-server
 ```

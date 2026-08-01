@@ -43,12 +43,14 @@ class LLMSettings:
 
 
 @dataclass
-class EngineSettings:
-    default: EngineKind = EngineKind.AUTO
+class RuntimeSettings:
+    engine: EngineKind = EngineKind.AUTO
     executor: ExecutorKind = ExecutorKind.AUTO
     effort: Effort = Effort.AUTO
-    max_context_tokens: int = 16000
-    max_action_iterations: int = 10
+
+
+@dataclass
+class EngineSettings:
     max_replan_attempts: int = 3
     max_parallel_nodes: int = 3
     dag_serial_execution: bool = True
@@ -62,12 +64,18 @@ class EngineSettings:
     goal_reanchor_interval: int = 5
     goal_reflection_interval: int = 1
     goal_stagnation_window: int = 3
-    react_temperature: float = 0.5
-    thinking_temperature: float = 0.5
     planner_temperature: float = 0.3
     reflector_temperature: float = 0.1
-    max_thinking_tokens: int = 10000
-    max_thinking_rounds: int = 5
+
+
+@dataclass
+class ExecutionSettings:
+    max_context_tokens: int = 16000
+    max_action_iterations: int = 10
+    tool_calling_temperature: float = 0.5
+    reasoning_aware_tool_calling_temperature: float = 0.5
+    max_reasoning_tokens: int = 10000
+    max_reasoning_rounds: int = 5
 
 
 @dataclass
@@ -251,7 +259,9 @@ class EvaluationSettings:
 @dataclass
 class AppSettings:
     llm: LLMSettings = field(default_factory=LLMSettings)
+    runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
     engines: EngineSettings = field(default_factory=EngineSettings)
+    execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     paths: PathSettings = field(default_factory=PathSettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
     capabilities: CapabilitySettings = field(default_factory=CapabilitySettings)
@@ -273,9 +283,9 @@ class RunSettings:
     @classmethod
     def from_app(cls, settings: AppSettings) -> "RunSettings":
         return cls(
-            engine=settings.engines.default,
-            executor=settings.engines.executor,
-            effort=settings.engines.effort,
+            engine=settings.runtime.engine,
+            executor=settings.runtime.executor,
+            effort=settings.runtime.effort,
         )
 
     def with_overrides(self, overrides: dict[str, Any] | None) -> "RunSettings":
@@ -307,7 +317,9 @@ class RunSettings:
 
 _SECTION_TYPES = {
     "llm": LLMSettings,
+    "runtime": RuntimeSettings,
     "engines": EngineSettings,
+    "execution": ExecutionSettings,
     "paths": PathSettings,
     "tools": ToolSettings,
     "capabilities": CapabilitySettings,
@@ -437,15 +449,15 @@ def validate_settings(settings: AppSettings) -> None:
     _validate_required_text(settings)
     capabilities = settings.capabilities
     positive_fields = {
-        "engines.max_context_tokens": settings.engines.max_context_tokens,
-        "engines.max_action_iterations": settings.engines.max_action_iterations,
+        "execution.max_context_tokens": settings.execution.max_context_tokens,
+        "execution.max_action_iterations": settings.execution.max_action_iterations,
         "engines.max_parallel_nodes": settings.engines.max_parallel_nodes,
         "engines.adaptive_interval": settings.engines.adaptive_interval,
         "engines.max_todo_iterations": settings.engines.max_todo_iterations,
         "engines.node_timeout_seconds": settings.engines.node_timeout_seconds,
         "engines.max_todo_items": settings.engines.max_todo_items,
-        "engines.max_thinking_tokens": settings.engines.max_thinking_tokens,
-        "engines.max_thinking_rounds": settings.engines.max_thinking_rounds,
+        "execution.max_reasoning_tokens": settings.execution.max_reasoning_tokens,
+        "execution.max_reasoning_rounds": settings.execution.max_reasoning_rounds,
         "engines.goal_reflection_interval": settings.engines.goal_reflection_interval,
         "engines.goal_stagnation_window": settings.engines.goal_stagnation_window,
         "tools.code_timeout_seconds": settings.tools.code_timeout_seconds,
@@ -538,17 +550,17 @@ def validate_settings(settings: AppSettings) -> None:
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"Invalid setting {name}: must be between 0 and 1")
     temperature_fields = {
-        "engines.react_temperature": settings.engines.react_temperature,
-        "engines.thinking_temperature": settings.engines.thinking_temperature,
+        "execution.tool_calling_temperature": settings.execution.tool_calling_temperature,
+        "execution.reasoning_aware_tool_calling_temperature": settings.execution.reasoning_aware_tool_calling_temperature,
         "engines.planner_temperature": settings.engines.planner_temperature,
         "engines.reflector_temperature": settings.engines.reflector_temperature,
     }
     for name, value in temperature_fields.items():
         if not 0.0 <= value <= 2.0:
             raise ValueError(f"Invalid setting {name}: must be between 0 and 2")
-    if settings.engines.default == EngineKind.WORKFLOW:
+    if settings.runtime.engine == EngineKind.WORKFLOW:
         raise ValueError(
-            "Invalid setting engines.default: workflow requires an explicit workflow file"
+            "Invalid setting runtime.engine: workflow requires an explicit workflow file"
         )
     if settings.tracing.backend in {"otlp", "phoenix"} and not settings.tracing.endpoint.strip():
         raise ValueError(

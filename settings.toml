@@ -9,12 +9,12 @@ retry_backoff_factor = 2.0
 token_tracking = true
 reasoning_token_tracking = true
 
-[engines]
-default = "auto"
+[runtime]
+engine = "auto"
 executor = "auto"
 effort = "auto"
-max_context_tokens = 16000
-max_action_iterations = 10
+
+[engines]
 max_replan_attempts = 3
 max_parallel_nodes = 3
 dag_serial_execution = true
@@ -28,12 +28,16 @@ max_todo_iterations = 60
 goal_reanchor_interval = 5
 goal_reflection_interval = 1
 goal_stagnation_window = 3
-react_temperature = 0.5
-thinking_temperature = 0.5
 planner_temperature = 0.3
 reflector_temperature = 0.1
-max_thinking_tokens = 10000
-max_thinking_rounds = 5
+
+[execution]
+max_context_tokens = 16000
+max_action_iterations = 10
+tool_calling_temperature = 0.5
+reasoning_aware_tool_calling_temperature = 0.5
+max_reasoning_tokens = 10000
+max_reasoning_rounds = 5
 
 [paths]
 state_dir = "~/.manus_demo"

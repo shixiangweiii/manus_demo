@@ -1,15 +1,15 @@
 """
-Goal-Driven Planner Agent - "Begin with the End in Mind" execution engine.
-目标驱动规划智能体 —— 「以终为始」执行引擎。
+Goal-Driven Planner Agent - "Begin with the End in Mind" planning strategy.
+目标驱动规划智能体 —— 「以终为始」规划策略。
 
 Inspired by ReflAct (EMNLP 2025) goal-state reflection and backward planning,
-this engine maintains a persistent GoalDocument throughout execution to prevent
+this planner maintains a persistent GoalDocument throughout execution to prevent
 goal drift in long-horizon tasks.
 
 受 ReflAct（EMNLP 2025）目标状态反思和逆向规划启发，
-该引擎在执行过程中维护持久化目标文档，防止长流程任务中的目标漂移。
+该规划器在执行过程中维护持久化目标文档，防止长流程任务中的目标漂移。
 
-Key differences from the dynamic TODO engine:
+Key differences from the dynamic TODO planner:
   - GoalDocument persists across all iterations (goal is never lost)
   - Backward planning derives milestones from end state, not task description
   - GoalReflection (ReflAct-style) before each action compares current vs goal
@@ -30,7 +30,7 @@ Core loop:
   4. while has_pending and iteration < max:
      - GoalReflection: compare current state vs goal
      - Select TODO guided by reflection
-     - Execute TODO with goal-injected ReAct loop
+     - Execute TODO with a goal-guided native tool-calling loop
      - Reanchor goal every N iterations
   5. Compile final answer against goal document
 """
@@ -55,7 +55,7 @@ from engines.goal_models import (
     MilestonePlan,
 )
 from engines.todo_models import TodoItem, TodoList, TodoStatus
-from execution.models import ReasoningEffort, StepResult, ToolCallRecord
+from execution.models import ResolvedEffort, StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -262,9 +262,9 @@ class GoalDrivenPlannerAgent(BaseAgent):
         if action_executor is None:
             from core.events import EventBus
             from core.settings import get_settings
-            from execution.react import ReactActionExecutor
+            from execution.tool_calling import ToolCallingActionExecutor
 
-            action_executor = ReactActionExecutor(
+            action_executor = ToolCallingActionExecutor(
                 llm_client=llm_client,
                 tools=list(self.tools.values()),
                 settings=get_settings(),
@@ -276,7 +276,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
         self._goal_doc: GoalDocument | None = None
         self._todo_list: TodoList | None = None
         self._reanchor_counter: int = 0
-        self._current_effort: ReasoningEffort = ReasoningEffort.MEDIUM
+        self._current_effort: ResolvedEffort = ResolvedEffort.MEDIUM
         self.last_results: list[StepResult] = []
         self.goal_satisfied: bool = False
 
@@ -290,7 +290,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
         task: str,
         context: str = "",
         *,
-        effort: ReasoningEffort | None = None,
+        effort: ResolvedEffort | None = None,
         on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
         """
@@ -310,7 +310,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
         self._todo_list = None
         self.last_results = []
         self.goal_satisfied = False
-        self._current_effort = effort or ReasoningEffort.MEDIUM
+        self._current_effort = effort or ResolvedEffort.MEDIUM
 
         logger.info("[GoalDrivenPlanner] Starting execution: %s", task[:100])
         self._emit("phase", "Building goal document...")
@@ -347,7 +347,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
         self,
         task: str,
         context: str,
-        effort: ReasoningEffort,
+        effort: ResolvedEffort,
         goal_doc: GoalDocument,
         todo_list: TodoList,
         all_results: list[StepResult],
@@ -435,7 +435,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
 
             self._emit("todo_start", {"todo": current_todo})
 
-            # Step C: Execute TODO with goal-guided ReAct
+            # Step C: Execute TODO with a goal-guided tool-calling loop
             try:
                 result = await asyncio.wait_for(
                     self._execute_todo_goal_guided(current_todo, goal_doc, last_reflection),
@@ -705,8 +705,8 @@ class GoalDrivenPlannerAgent(BaseAgent):
         return ready[0]
 
     # ------------------------------------------------------------------
-    # Goal-Guided ReAct Execution
-    # 目标引导的 ReAct 执行
+    # Goal-guided native tool-calling execution
+    # 目标引导的原生工具调用执行
     # ------------------------------------------------------------------
 
     async def _execute_todo_goal_guided(

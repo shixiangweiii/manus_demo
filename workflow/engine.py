@@ -7,7 +7,7 @@ import re
 from typing import Any, Callable
 
 from tools.base import BaseTool
-from react.tool_call_helpers import classify_result
+from tool_calling.tool_execution import classify_tool_result
 from workflow.models import WorkflowResult, WorkflowSpec, WorkflowStep
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,7 @@ class WorkflowEngine:
 
             step_results[step.id] = output
             # fail-fast on Error:-prefixed tool result (BaseTool error convention)
-            is_error, _ = classify_result(output)
+            is_error, _ = classify_tool_result(output)
             if is_error:
                 logger.warning("[WorkflowEngine] step '%s' returned error: %s", step.id, output[:200])
                 result.failed_step = step.id

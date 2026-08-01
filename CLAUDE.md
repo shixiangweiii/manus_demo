@@ -16,7 +16,7 @@ Use the repository virtual environment (`.venv/`). There is **no build step and 
 # CLI host (main.py is a thin shim into cli.py)
 .venv/bin/python main.py --help
 .venv/bin/python main.py chat                      # interactive session
-.venv/bin/python main.py run "整理当前目录结构" --engine sequential --executor react --effort low
+.venv/bin/python main.py run "整理当前目录结构" --engine sequential --executor tool_calling --effort low
 .venv/bin/python main.py workflow workflow_spec.json   # deterministic tool graph
 .venv/bin/python main.py mcp-server                # expose local tools over MCP
 .venv/bin/python main.py tasks                     # list checkpoint records
@@ -54,7 +54,7 @@ Three layers, plus host adapters. Read `docs/architecture.md` and `docs/engines.
 
 2. **`runtime/`** — composition root. `runtime/factory.py::build_runtime()` is the only place that wires tools, tracing, guardrails, checkpoints, and the optional capability adapters together; it returns an `AgentRuntime` (`runtime/app.py`). `AgentRuntime.run()` selects the engine/executor/effort, runs lifecycle hooks, persists checkpoints, and publishes events. It owns its LLM HTTP client and exposes idempotent `aclose()`.
 
-3. **`engines/` + `execution/`** — engines decide *which actions exist*; executors decide *how one action runs*. Every engine implements `TaskEngine.run(TaskRequest) -> EngineResult` (`engines/base.py`) and delegates individual actions to an `ActionExecutor` (`execution/base.py`): `sequential`, `dag`, `todo`, `goal`, `workflow` engines; `react` and `thinking` executors. Auto-routing (`engines/selector.py`) checks explicit settings, then goal/exploratory/dependency markers, then falls back to Sequential; Workflow never auto-routes. Executor auto-selection reads only `llm.supports_reasoning` — it never inspects model names.
+3. **`engines/` + `execution/`** — engines decide *which actions exist*; executors decide *how one action runs*. Every engine implements `TaskEngine.run(TaskRequest) -> EngineResult` (`engines/base.py`) and delegates individual actions to an `ActionExecutor` (`execution/base.py`): `sequential`, `dag`, `todo`, `goal`, `workflow` engines; `tool_calling` and `reasoning_aware_tool_calling` executors. `tool_calling/` contains the shared structured tool loop and its reasoning-model-aware subclass; neither parses literal `Thought:` / `Action:` / `Observation:` text. Auto-routing (`engines/selector.py`) checks explicit settings, then goal/exploratory/dependency markers, then falls back to Sequential; Workflow never auto-routes. Executor auto-selection reads only `llm.supports_reasoning` — it never inspects model names.
 
 Hosts — `cli.py`, `webui/`, `evaluation/` — call `AgentRuntime` and subscribe to the same `EventBus`. **Hosts must not branch on engine classes or parse implementation-specific log text.** Console output, tracing, WebUI streaming, and evaluation metrics all observe one structured event stream, so adding a consumer never requires touching engines.
 
@@ -70,6 +70,7 @@ Everything in `runtime/factory.py::_register_capability_tools()` — AgentBay, M
 
 Fixed precedence (do not work around it): dataclass defaults in `core/settings.py` → `settings.toml` → whitelisted secrets in `.env`/environment → CLI overrides for one run.
 
+- `[runtime]` stores engine/executor/effort defaults, `[engines]` stores orchestration tuning, and `[execution]` stores action-loop and context limits.
 - **Unknown TOML sections/fields fail at startup.** Extra non-secret `.env` keys also fail with a migration hint. Ordinary process environment variables are intentionally ignored.
 - `.env` accepts only `LLM_API_KEY`, `DASHSCOPE_API_KEY`, `AGENTBAY_API_KEY` (see `.env.example`). Never put credentials in `remote_agent_server_json` or other ordinary settings.
 - `config.py` is a **read-only compatibility facade** for retained peripheral modules — it mirrors `AppSettings` fields as module constants. It is not a second config source and must not receive new fields. New code uses `AppSettings` directly.

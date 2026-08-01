@@ -4,15 +4,16 @@ Handoff 工具——上下文传递式专家委派与控制权转移。
 
 When the LLM calls this tool, a SpecialistAgent takes over with the caller's
 context briefing and runs to completion; its FULL output becomes the final
-answer for the current ReAct loop (control transfer). This complements the
+answer for the current tool-calling action loop (control transfer). This complements the
 isolated, summary-only SubAgent.
 
 LLM 调用本工具时，专家 agent 带调用方上下文接管并跑完，其完整输出成为当前
-ReAct 循环的最终答案（控制权转移）。与隔离式、仅摘要的 SubAgent 互补。
+结构化工具调用循环的最终答案（控制权转移）。与隔离式、仅摘要的 SubAgent 互补。
 
 Control-transfer mechanism: this tool sets `is_handoff = True`; on success it
 stores the full output on `self._last_output` / `self._last_ok`, which
-ReActEngine reads to terminate the loop with that output (untruncated).
+ToolCallingLoop reads this state to terminate the loop with that output
+(untruncated).
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 class HandoffTool(BaseTool):
     """Delegate to a specialist agent with control transfer. / 控制权转移式专家委派。"""
 
-    # ReActEngine recognizes this to end the loop on success (control transfer).
+    # ToolCallingLoop recognizes this to end the loop on success (control transfer).
     is_handoff = True
 
     def __init__(
@@ -60,8 +61,8 @@ class HandoffTool(BaseTool):
         self._parent_name = parent_name
         self._call_count = 0
 
-        # Control-transfer hand-off state read by ReActEngine after execution.
-        # 控制权转移状态：ReActEngine 在执行后读取（取完整、未截断输出）。
+        # Control-transfer hand-off state read by ToolCallingLoop after execution.
+        # 控制权转移状态：ToolCallingLoop 在执行后读取（取完整、未截断输出）。
         self._last_ok: bool = False
         self._last_output: str = ""
 
@@ -174,7 +175,7 @@ class HandoffTool(BaseTool):
             self._on_event("handoff_failed", {"target": target, "error": msg})
             return msg
 
-        # Success → record control-transfer state for ReActEngine to pick up.
+        # Success → record control-transfer state for ToolCallingLoop to pick up.
         self._last_ok = True
         self._last_output = output or ""
         self._on_event("handoff_complete", {
@@ -192,6 +193,6 @@ class HandoffTool(BaseTool):
         self._last_output = ""
 
     def set_caller(self, name: str) -> None:
-        """ReActEngine injects the actual caller name before execution (attribution)."""
+        """ToolCallingLoop injects the caller name before execution."""
         if name:
             self._parent_name = name

@@ -4,8 +4,14 @@ from importlib import import_module
 
 _EXPORTS = {
     "ActionExecutor": ("execution.base", "ActionExecutor"),
-    "ReactActionExecutor": ("execution.react", "ReactActionExecutor"),
-    "ThinkingAwareActionExecutor": ("execution.thinking", "ThinkingAwareActionExecutor"),
+    "ToolCallingActionExecutor": (
+        "execution.tool_calling",
+        "ToolCallingActionExecutor",
+    ),
+    "ReasoningAwareToolCallingActionExecutor": (
+        "execution.reasoning_aware_tool_calling",
+        "ReasoningAwareToolCallingActionExecutor",
+    ),
 }
 
 __all__ = list(_EXPORTS)

@@ -1,14 +1,17 @@
 """
-Shared tool execution logic for all ReAct-style loops.
-所有 ReAct 风格循环共享的工具执行逻辑。
+Shared tool execution logic for native tool-calling action loops.
+原生工具调用动作执行循环共享的工具执行逻辑。
 
-Extracts tool-call behavior shared across ReAct-style executors:
-  - react.engine.ReActEngine.execute
-  - react.reasoning_engine.ReasoningEngine.execute
+Extracts structured tool-call behavior shared across action-loop executors:
+  - tool_calling.loop.ToolCallingLoop.execute
+  - tool_calling.reasoning_aware_loop.ReasoningAwareToolCallingLoop.execute
   - agents.emergent_planner.EmergentPlannerAgent._execute_todo
   - agents.goal_driven_planner.GoalDrivenPlannerAgent._execute_todo_goal_guided
 
-将多个 ReAct 路径重复的工具调用行为收敛为共享模块。
+将多个结构化工具调用路径的重复执行行为收敛为共享模块。
+
+These helpers implement the Action/tool-result Observation transport. They do
+not parse the classic textual ``Thought:/Action:/Observation:`` protocol.
 """
 
 from __future__ import annotations
@@ -19,16 +22,73 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from react.tool_call_helpers import (
-    attribute_caller,
-    classify_result,
-    truncate_for_llm,
-)
-from execution.models import ReasoningEffort, ToolCallRecord
+from execution.models import ResolvedEffort, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
 logger = logging.getLogger(__name__)
+
+RATE_LIMITED_MARKER = "SubAgent call limit reached"
+RATE_LIMITED_RESULT_MARKERS = (
+    RATE_LIMITED_MARKER,
+    "429",
+    "Too Many Requests",
+    "rate-limited",
+    "rate limited",
+)
+
+
+def set_tool_caller(tool: Any, agent_name: str) -> None:
+    """Notify a tool which agent is calling it immediately before execution.
+
+    Call this directly before ``await tool.traced_execute(...)`` without an
+    intervening await so concurrent tasks cannot overwrite caller attribution.
+    """
+    if not agent_name or not hasattr(tool, "set_caller"):
+        return
+    try:
+        tool.set_caller(agent_name)
+    except Exception:
+        logger.debug(
+            "[tool_execution] set_caller failed for tool=%s",
+            getattr(tool, "name", repr(tool)),
+            exc_info=True,
+        )
+
+
+def classify_tool_result(
+    result: Any,
+    exc: BaseException | None = None,
+) -> tuple[bool, bool]:
+    """Classify a tool outcome as ``(is_error, is_rate_limited)``.
+
+    Exceptions and ``Error:`` results are failures; recognized rate-limit
+    markers use the router's rate-limited bucket instead of its failure bucket.
+    """
+    if exc is not None:
+        return True, False
+    if isinstance(result, str) and result.lstrip().lower().startswith("error"):
+        return True, any(
+            marker.lower() in result.lower()
+            for marker in RATE_LIMITED_RESULT_MARKERS
+        )
+    return False, False
+
+
+def truncate_tool_result_for_llm(
+    result: Any,
+    limit: int,
+    is_error: bool,
+) -> tuple[Any, Any]:
+    """Return the recorded and LLM-facing forms of one tool result."""
+    if is_error or not isinstance(result, str) or len(result) <= limit:
+        return result, result
+    truncated = result[:limit]
+    marker = (
+        f"\n\n[Tool output truncated at {limit} characters "
+        f"to control context size; original length={len(result)}]"
+    )
+    return truncated, truncated + marker
 
 
 @dataclass
@@ -53,10 +113,10 @@ class ToolExecutionPolicy:
         return ToolExecutionPolicy()
 
     @staticmethod
-    def for_effort(effort: ReasoningEffort, base: int = 2000) -> ToolExecutionPolicy:
-        if effort == ReasoningEffort.LOW:
+    def for_effort(effort: ResolvedEffort, base: int = 2000) -> ToolExecutionPolicy:
+        if effort == ResolvedEffort.LOW:
             return ToolExecutionPolicy(truncation_limit=max(500, base // 2))
-        elif effort == ReasoningEffort.HIGH:
+        elif effort == ResolvedEffort.HIGH:
             return ToolExecutionPolicy(truncation_limit=base * 2)
         return ToolExecutionPolicy(truncation_limit=base)
 
@@ -86,15 +146,14 @@ async def execute_tool_calls(
 
     When *policy* is provided it overrides *truncation_limit* and controls
     error message formatting. When *policy* is None (default), the function
-    uses *truncation_limit* directly
-    call sites.
+    uses *truncation_limit* directly.
 
     并行执行工具调用、分类结果、记账到 ToolRouter。
     返回与 tool_calls 同序的 tool-message 列表。tool_calls_log 原地追加。
     """
     effective_policy = policy or ToolExecutionPolicy(truncation_limit=truncation_limit)
     effective_truncation = effective_policy.truncation_limit
-    prefix = log_prefix or "ReAct"
+    prefix = log_prefix or "ToolCalling"
 
     _GAction = None
     if guardrail is not None:
@@ -144,32 +203,32 @@ async def execute_tool_calls(
 
         if argument_error:
             res = f"Error: {argument_error}"
-            is_err, rl = classify_result(res, None)
+            is_err, rl = classify_tool_result(res, None)
             return finish(res, is_err, rl)
 
         t = tools.get(fn_name)
         if t is None:
             res = f"Error: Unknown tool '{fn_name}'"
-            is_err, rl = classify_result(res, None)
+            is_err, rl = classify_tool_result(res, None)
             return finish(res, is_err, rl)
         # Tool-input guardrail: block dangerous calls and gated writes.
-        # BEFORE execution. The engine resolves CONFIRM internally → ALLOW/BLOCK.
+        # BEFORE execution. The tool-execution layer resolves CONFIRM internally.
         if guardrail is not None:
             try:
                 decision = await guardrail.check_tool_input(fn_name, fn_args)
                 if decision.action == _GAction.BLOCK:
                     res = f"Error: [GUARDRAIL BLOCKED] {decision.reason}"
-                    is_err, rl = classify_result(res, None)
+                    is_err, rl = classify_tool_result(res, None)
                     return finish(res, is_err, rl)
             except Exception as exc:
                 logger.error("[%s] tool-input guardrail failed", prefix, exc_info=True)
                 res = f"Error: guardrail input check failed: {exc}"
-                is_err, rl = classify_result(res, None)
+                is_err, rl = classify_tool_result(res, None)
                 return finish(res, is_err, rl)
-        attribute_caller(t, agent_name)
+        set_tool_caller(t, agent_name)
         try:
             res = await t.traced_execute(**fn_args)
-            is_err, rl = classify_result(res, None)
+            is_err, rl = classify_tool_result(res, None)
             # Tool-output guardrail: neutralize injection in untrusted output.
             if guardrail is not None and not is_err:
                 try:
@@ -179,11 +238,11 @@ async def execute_tool_calls(
                 except Exception as exc:
                     logger.error("[%s] tool-output guardrail failed", prefix, exc_info=True)
                     res = f"Error: guardrail output check failed: {exc}"
-                    is_err, rl = classify_result(res, None)
+                    is_err, rl = classify_tool_result(res, None)
             return finish(res, is_err, rl)
         except Exception as exc:
             res = f"Error: Tool execution error: {exc}"
-            is_err, rl = classify_result(None, exc)
+            is_err, rl = classify_tool_result(None, exc)
             return finish(res, is_err, rl)
 
     executions = await asyncio.gather(*(_exec_one(tc) for tc in tool_calls))
@@ -198,7 +257,11 @@ async def execute_tool_calls(
         else:
             tool_router.record_success(node_id, func_name)
 
-        record_result, llm_result = truncate_for_llm(result, effective_truncation, is_error)
+        record_result, llm_result = truncate_tool_result_for_llm(
+            result,
+            effective_truncation,
+            is_error,
+        )
 
         tool_calls_log.append(ToolCallRecord(
             tool_name=func_name,

@@ -10,7 +10,7 @@ from agents.reflector import ReflectorAgent
 from core.models import Action, Effort, EngineKind, TaskRequest
 from dag.executor import DAGExecutor
 from engines.base import TaskEngine
-from execution.react import to_legacy_effort
+from execution.models import resolve_effort
 from dag.models import NodeStatus, NodeType
 
 
@@ -74,7 +74,7 @@ class DagEngine(TaskEngine):
             planner=planner if self.settings.engines.adaptive_planning else None,
             max_parallel=self.settings.engines.max_parallel_nodes,
             on_event=self.events.legacy_callback,
-            effort=to_legacy_effort(self.effort),
+            effort=resolve_effort(self.effort),
             serial_execution=(
                 self.settings.engines.dag_serial_execution
                 or self.settings.capabilities.skills

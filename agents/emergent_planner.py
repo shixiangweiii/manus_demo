@@ -21,7 +21,7 @@ Core loop:
   1. Initialize TODO list from task (1-3 items)
   2. while has_pending_todos and iteration < max_outer_iterations:
      - Select next ready TODO
-     - think_with_tools() to reason + call tools
+     - request a structured tool-calling turn
      - On success: mark TODO complete, optionally update TODO list
      - On failure: retry up to MAX_TODO_RETRIES, then mark BLOCKED
      - Stagnation detection: break if no TODOs complete for 3+ rounds
@@ -40,7 +40,7 @@ from agents.base import BaseAgent
 from context.manager import ContextManager
 from llm.client import LLMClient
 from engines.todo_models import TodoItem, TodoList, TodoStatus
-from execution.models import ReasoningEffort, StepResult, ToolCallRecord
+from execution.models import ResolvedEffort, StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -49,12 +49,12 @@ from agents.prompt_utils import (
     build_convergence_hint,
     get_emergent_parallel_guidance,
 )
-from react.tool_call_helpers import attribute_caller, classify_result
+from tool_calling.tool_execution import set_tool_caller, classify_tool_result
 
 logger = logging.getLogger(__name__)
 
 _EMERGENT_BASE_PROMPT = """\
-You are an autonomous task execution agent that follows the ReAct paradigm.
+You are an autonomous task execution agent that uses native structured tool calling.
 
 Your workflow for each TODO item:
 1. Read the TODO description and reason about what to do
@@ -62,7 +62,7 @@ Your workflow for each TODO item:
 3. Observe the tool's output and decide next steps
 4. Repeat until the TODO objective is met (stop calling tools when done)
 
-Available tools will be provided via function calling. Use them wisely.
+Available tools will be provided through structured tool calling. Use them wisely.
 When you believe the overall task is complete, respond with a clear summary
 of what was accomplished. Do NOT call any more tools once done.
 
@@ -135,14 +135,14 @@ class EmergentPlannerAgent(BaseAgent):
         self._on_event = on_event or (lambda *_: None)
         self._todo_list: TodoList | None = None
         self.last_results: list[StepResult] = []
-        self._current_effort: ReasoningEffort = ReasoningEffort.MEDIUM
+        self._current_effort: ResolvedEffort = ResolvedEffort.MEDIUM
 
         if action_executor is None:
             from core.events import EventBus
             from core.settings import get_settings
-            from execution.react import ReactActionExecutor
+            from execution.tool_calling import ToolCallingActionExecutor
 
-            action_executor = ReactActionExecutor(
+            action_executor = ToolCallingActionExecutor(
                 llm_client=llm_client,
                 tools=list(self.tools.values()),
                 settings=get_settings(),
@@ -161,7 +161,7 @@ class EmergentPlannerAgent(BaseAgent):
         task: str,
         context: str = "",
         *,
-        effort: ReasoningEffort | None = None,
+        effort: ResolvedEffort | None = None,
         on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
         """
@@ -171,7 +171,7 @@ class EmergentPlannerAgent(BaseAgent):
           1. Initialize TODO list from task description
           2. while has_pending_todos:
              - Select next ready TODO
-             - Run ReAct loop for that TODO
+             - Run the native tool-calling action loop for that TODO
              - Update TODO list based on progress
              - Add new TODOs if discovered
           3. Compile final answer from all completed TODOs
@@ -180,14 +180,14 @@ class EmergentPlannerAgent(BaseAgent):
           1. 从任务描述初始化 TODO 列表
           2. 当有待执行 TODO 时循环：
              - 选择下一个就绪 TODO
-             - 为该 TODO 运行 ReAct 循环
+             - 为该 TODO 运行原生工具调用动作循环
              - 根据进度更新 TODO 列表
              - 发现新工作时添加 TODO
           3. 从所有已完成的 TODO 汇总最终答案
         """
         self._emit("phase", "Initializing emergent planning...")
 
-        self._current_effort = effort or ReasoningEffort.MEDIUM
+        self._current_effort = effort or ResolvedEffort.MEDIUM
 
         # 初始化 TODO 列表
         self._todo_list = TodoList(task=task)
@@ -207,7 +207,7 @@ class EmergentPlannerAgent(BaseAgent):
         self,
         task: str,
         context: str,
-        effort: ReasoningEffort,
+        effort: ResolvedEffort,
         todo_list: TodoList,
         all_results: list[StepResult],
         iteration: int,
@@ -686,8 +686,8 @@ class EmergentPlannerAgent(BaseAgent):
 
     async def _execute_todo(self, todo: TodoItem) -> StepResult:
         """
-        Execute a single TODO using the ReAct loop.
-        使用 ReAct 循环执行单个 TODO。
+        Execute a single TODO using the native tool-calling action loop.
+        使用原生工具调用动作循环执行单个 TODO。
 
         This is similar in structure to the standard action loop, but differs:
         (1) does NOT call self.reset() to preserve flat message history,
@@ -727,8 +727,8 @@ class EmergentPlannerAgent(BaseAgent):
         )
 
     async def _execute_todo_guarded(self, todo: TodoItem) -> StepResult:
-        """Run a single TODO via the in-process ReAct loop with timeout/exception guard.
-        带超时与异常保护地执行单个 TODO（进程内 ReAct 循环，串行路径与预算耗尽回退共用）。"""
+        """Run one TODO via the in-process tool-calling loop with execution guards.
+        带超时与异常保护地执行单个 TODO（进程内结构化工具调用循环，串行路径与预算耗尽回退共用）。"""
         try:
             return await asyncio.wait_for(
                 self._execute_todo(todo),
@@ -859,7 +859,7 @@ class EmergentPlannerAgent(BaseAgent):
         # 直接派发绕过了 execute_tool_calls，需自行设置归因（与 traced_execute 间无 await），
         # 让 SubAgent.parent_agent 落到本规划器，和串行路径一致。
         subagent_tool = self.tools["subagent"]
-        attribute_caller(subagent_tool, self.name)
+        set_tool_caller(subagent_tool, self.name)
         call_id = f"todo:{todo.id}:subagent"
         self._emit("tool_started", {
             "tool": "subagent",
@@ -889,7 +889,7 @@ class EmergentPlannerAgent(BaseAgent):
             )
 
         summary_text = str(summary)
-        is_error, _ = classify_result(summary_text)
+        is_error, _ = classify_tool_result(summary_text)
         self._emit("tool_completed", {
             "tool": "subagent", "success": not is_error,
             "result": summary_text[:1000],

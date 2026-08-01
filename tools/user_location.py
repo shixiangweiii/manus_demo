@@ -24,7 +24,7 @@ Resolution order (each step is independent; first hit wins):
   降级为跳过验证重试一次；设为 false 则直接跳过验证。ip-api.com 使用 HTTP
   协议，不受 SSL 问题影响。
 - **错误透传**：所有异常 catch 后转 "Error:" 前缀字符串，配合
-  react/engine.py 的 Error: 检测进入 ToolRouter 失败计数。
+  共享工具结果分类器进入 ToolRouter 失败计数。
 """
 
 from __future__ import annotations

@@ -21,8 +21,8 @@ class EngineKind(str, Enum):
 
 class ExecutorKind(str, Enum):
     AUTO = "auto"
-    REACT = "react"
-    THINKING = "thinking"
+    TOOL_CALLING = "tool_calling"
+    REASONING_AWARE_TOOL_CALLING = "reasoning_aware_tool_calling"
 
 
 class Effort(str, Enum):
