@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from schema import NodeStatus, TaskNode
+from dag.models import NodeStatus, TaskNode
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +37,7 @@ class InvalidTransitionError(Exception):
 
 # The full transition table — readable at a glance.
 # 完整的状态转移表——一目了然地看清所有合法转移路径。
-# 动态性 6：状态机强制合法转移
-# v1 的 step.status 只是一个普通枚举字段，代码可以随意赋值。v2 通过 NodeStateMachine 严格管控每次转移：
+# 状态机统一强制合法转移，避免调用方直接写入无效状态。
 VALID_TRANSITIONS: dict[NodeStatus, set[NodeStatus]] = {
     NodeStatus.PENDING:     {NodeStatus.READY, NodeStatus.SKIPPED},
     NodeStatus.READY:       {NodeStatus.RUNNING, NodeStatus.SKIPPED},

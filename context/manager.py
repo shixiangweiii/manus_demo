@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import config
+from core.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +41,11 @@ class ContextManager:
         self,
         max_tokens: int | None = None,
         reserve_recent: int = 6,  # 保留的最近消息条数（不参与压缩）
+        keep_thinking_blocks: bool = True,
     ):
-        self.max_tokens = max_tokens or config.MAX_CONTEXT_TOKENS
+        self.max_tokens = max_tokens or get_settings().engines.max_context_tokens
         self.reserve_recent = reserve_recent
+        self.keep_thinking_blocks = keep_thinking_blocks
 
     # ------------------------------------------------------------------
     # Token estimation
@@ -72,7 +74,7 @@ class ContextManager:
           - msg.content (str)
           - msg.tool_calls[].function.name + .arguments (assistant tool-call JSON
             is billed as prompt tokens but has no `content`; previously missed)
-          - msg["thinking_content"] (v14: reasoning model thinking blocks)
+          - msg["thinking_content"] (reasoning-model thinking blocks)
           - per-message overhead (~4 tokens for role markers)
         """
         total = 0
@@ -203,7 +205,7 @@ class ContextManager:
 
             # If prev is an assistant with thinking_content, keep it with its subsequent messages
             # so the reasoning context is not severed from the response it informs.
-            if config.THINKING_AWARE_CONTEXT and prev_role == "assistant" and prev_msg.get("thinking_content"):
+            if self.keep_thinking_blocks and prev_role == "assistant" and prev_msg.get("thinking_content"):
                 split_idx = split_idx - 1
                 continue
 

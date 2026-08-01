@@ -303,10 +303,11 @@ class RichConsoleExporter(SpanExporter):
         attr_summary = ""
         if span.attributes:
             key_attrs = []
-            for key in ("task.complexity", "reflection.passed", "reflection.score",
-                        "tool.name", "gen_ai.request.model", "gen_ai.usage.total_tokens",
-                        "gen_ai.response.finish_reason",
-                        "dag.parallel_count", "node.status", "todo.id"):
+            for key in (
+                "agent.engine", "agent.executor", "action.id", "tool.name",
+                "gen_ai.request.model", "gen_ai.usage.total_tokens",
+                "gen_ai.response.finish_reason", "run.id", "task.id",
+            ):
                 if key in span.attributes:
                     short_key = key.split(".")[-1]
                     key_attrs.append(f"{short_key}={span.attributes[key]}")

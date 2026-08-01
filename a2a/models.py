@@ -1,6 +1,6 @@
 """
-A2A prototype models (v18.4) - Agent Card + task request/response envelope.
-A2A 原型模型（v18.4）—— Agent Card 能力广播 + 任务请求/响应信封。
+A2A models - Agent Card + task request/response envelope.
+Agent Card 能力广播 + A2A 任务请求/响应信封。
 
 A local-trusted, MCP-transported subset inspired by the Google A2A spec.
 No open-network discovery, no auth beyond "local". Just enough to demonstrate

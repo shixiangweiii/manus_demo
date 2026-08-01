@@ -9,52 +9,20 @@ Provides:
 - Exporters: FileSpanExporter, RichConsoleExporter
 
 Usage:
-    # 在 OrchestratorAgent 中自动初始化（通过 config.TRACING_ENABLED）
-    # 或手动初始化：
+    # AgentRuntime 根据 settings.toml 初始化，亦可手动初始化：
     from tracing import init_tracing, get_tracer, TracingBridge
 
     init_tracing()
     bridge = TracingBridge()
     tracer = get_tracer("my_module")
 
-v7.0: Initial implementation.
 """
 
 from __future__ import annotations
 
-import config as _config
-
-# Lazy imports to avoid loading OpenTelemetry when tracing is disabled
-# 延迟导入：TRACING_ENABLED=false 时不加载 OpenTelemetry，零开销
-if _config.TRACING_ENABLED:
-    from tracing.provider import init_tracing, get_tracer, shutdown_tracing
-    from tracing.bridge import TracingBridge
-    from tracing.decorators import traced
-else:
-    # No-op stubs when tracing is disabled
-    # Tracing 关闭时的空实现桩
-    def init_tracing() -> None:
-        """No-op when tracing is disabled."""
-        pass
-
-    def get_tracer(name: str = ""):
-        """Returns None when tracing is disabled."""
-        return None
-
-    def shutdown_tracing() -> None:
-        """No-op when tracing is disabled."""
-        pass
-
-    class TracingBridge:
-        """No-op bridge when tracing is disabled."""
-        def on_event(self, event: str, data=None) -> None:
-            pass
-
-    def traced(span_name: str = "", attributes: dict = None):
-        """No-op decorator when tracing is disabled."""
-        def decorator(func):
-            return func
-        return decorator
+from tracing.provider import init_tracing, get_tracer, shutdown_tracing
+from tracing.bridge import TracingBridge
+from tracing.decorators import traced
 
 
 __all__ = [

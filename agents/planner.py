@@ -1,59 +1,29 @@
-"""
-Planner Agent - Hybrid Plan-and-Execute with automatic routing.
-Planner 智能体 —— 混合规划，自动路由 v1 扁平计划 / v2 DAG 分层计划。
-
-v1 (simple):  Flat list of 2-6 Steps, sequential execution.
-v2 (complex): Hierarchical DAG: Goal -> SubGoals -> Actions.
-v4 (current): Two-stage hybrid classifier automatically selects v1 or v2:
-    Stage 1 — rule-based fast filter (zero cost, < 1ms)
-    Stage 2 — lightweight LLM call (only for ambiguous cases, ~60 tokens)
-
-v1（简单模式）：2-6 个扁平步骤的线性列表，顺序执行。
-v2（复杂模式）：分层 DAG：Goal -> SubGoals -> Actions。
-v4（当前）：两阶段混合分类器自动选择 v1 或 v2：
-    Stage 1 —— 规则快筛（零成本，< 1ms）
-    Stage 2 —— 轻量 LLM 调用（仅对模糊区间，~60 tokens）
-
-Design rationale (inspired by DAAO & RouteLLM, ICLR 2025):
-  Rule-based heuristics handle the obvious 60-70% of requests at zero cost.
-  Only the ambiguous 30-40% triggers an LLM classification call.
-  This balances token savings with routing accuracy.
-
-设计依据（参考 DAAO 和 RouteLLM，ICLR 2025）：
-  规则启发式处理 60-70% 显然的请求（零成本），
-  仅 30-40% 模糊区间触发 LLM 分类调用，
-  在 token 节省和路由准确率之间取得最佳平衡。
-"""
+"""Planning implementation shared by the sequential and DAG engines."""
 
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
-import config
 from agents.base import BaseAgent
 from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from dag.graph import TaskDAG
 from llm.client import LLMClient
-from schema import (
+from dag.models import (
     AdaptAction,
     AdaptationResult,
     EdgeType,
     ExitCriteria,
     NodeStatus,
     NodeType,
-    Plan,
     PlanAdaptation,
-    ReasoningEffort,
     RiskAssessment,
-    Step,
-    StepResult,
-    StepStatus,
     TaskEdge,
     TaskNode,
 )
+from engines.sequential_models import Plan, Step, StepStatus
+from execution.models import StepResult
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +77,7 @@ You MUST respond with a valid JSON object in this exact format:
 }
 """
 
-# Wave-2: builder functions instead of module-level constants. The Planner's
+# Builder functions keep the date and runtime guidance current. The planner's
 # create_plan() / create_dag() / replan() each rebuild the system prompt before
 # use, so the date / HITL guidance reflect runtime state. Module-level
 # evaluation would freeze them at import time.
@@ -267,60 +237,15 @@ def _build_planner_prompt() -> str:
 
 
 class PlannerAgent(BaseAgent):
-    """
-    Hybrid planner with automatic v1/v2/v5 routing.
-    混合规划智能体，自动路由 v1 扁平计划 / v2 DAG 分层计划 / v5 隐式规划。
+    """Create flat plans, dependency graphs, and adaptive revisions."""
 
-    Workflow:
-    工作流程：
-      1. classify_task()     -> Three-stage hybrid classifier (rules + LLM fallback)
-                                三阶段混合分类器（规则快筛 + LLM 兜底）
-      2a. create_plan()      -> v1 flat plan (simple tasks / 简单任务)
-      2b. create_dag()       -> v2 hierarchical DAG (complex tasks / 复杂任务)
-      2c. [EmergentPlanner]  -> v5 emergent planning (exploratory tasks / 探索性任务)
-      3. replan/replan_subtree() -> Re-planning for respective path
-                                    各路径对应的重规划方法
-    """
-
-    # 规则快筛用到的关键词模式（编译一次，复用多次）
-    _MULTI_STEP_PATTERN = re.compile(
-        r"然后|接着|之后|随后|再|首先.*然后|第[一二三四五六七八九十\d]+步"
-        r"|first\b|then\b|next\b|finally\b|after that\b|step\s*\d"
-        r"|afterwards\b|subsequently\b|followed by\b",
-        re.IGNORECASE,
-    )
-    _CONDITIONAL_PATTERN = re.compile(
-        r"如果|假如|若是|取决于|根据.*决定|分情况"
-        r"|\bif\b|\bdepending\b|\bbased on\b|\bwhether\b|\bin case\b|\bwhen\b.*\bthen\b",
-        re.IGNORECASE,
-    )
-    _PARALLEL_PATTERN = re.compile(
-        r"同时|并行|另外|此外|与此同时|一方面.*另一方面"
-        r"|\bmeanwhile\b|\bsimultaneously\b|\bin parallel\b|\badditionally\b|\balso\b.*\band\b",
-        re.IGNORECASE,
-    )
-    _ACTION_VERB_PATTERN = re.compile(
-        r"搜索|查找|分析|计算|生成|创建|编写|下载|上传|保存|对比|总结|翻译|转换|部署|测试|爬取|抓取|整理|汇总|调研"
-        r"|\bsearch\b|\bfind\b|\banalyze\b|\bcalculate\b|\bgenerate\b|\bcreate\b"
-        r"|\bwrite\b|\bdownload\b|\bsave\b|\bcompare\b|\bsummarize\b|\btranslate\b"
-        r"|\bbuild\b|\bdeploy\b|\btest\b|\bscrape\b|\bcrawl\b|\bcollect\b|\bresearch\b",
-        re.IGNORECASE,
-    )
-    # v5: 探索性/不确定性任务的关键词模式（适合隐式规划）
-    _EXPLORATORY_PATTERN = re.compile(
-        r"探索|调研|研究|分析.*并.*建议|检查.*并.*修复|优化|改进|评估|审查|review"
-        r"|investigate|explore|research|analyze.*and.*suggest|check.*and.*fix"
-        r"|optimize|improve|evaluate|assess|review|audit",
-        re.IGNORECASE,
-    )
-    _UNCERTAINTY_PATTERN = re.compile(
-        r"不确定|可能|也许|大概|尝试|看看|试着|了解"
-        r"|\buncertain\b|\bmaybe\b|\bperhaps\b|\bpossibly\b|\btry\b|\bexplore\b|\binvestigate\b",
-        re.IGNORECASE,
-    )
-
-    def __init__(self, llm_client: LLMClient, context_manager: ContextManager | None = None):
-        # Wave-2: build prompt per-instance (default to DAG/complex form;
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        context_manager: ContextManager | None = None,
+        temperature: float = 0.3,
+    ):
+        # Build the prompt per instance (default to DAG form;
         # create_plan/create_dag below switch as needed).
         super().__init__(
             name="Planner",
@@ -328,240 +253,15 @@ class PlannerAgent(BaseAgent):
             llm_client=llm_client,
             context_manager=context_manager,
         )
+        self.temperature = temperature
 
     # ==================================================================
-    # Task Complexity Classification (v4 — two-stage hybrid)
-    # 任务复杂度分类（v4 —— 两阶段混合分类器）
-    # ==================================================================
-
-    async def classify_task(self, task: str) -> tuple[str, ReasoningEffort]:
-        """
-        Determine whether a task is 'simple', 'complex', or 'emergent',
-        along with a reasoning effort level.
-        判断任务是"简单"、"复杂"还是"涌现型"，并返回推理力度。
-
-        Routing logic:
-          0. config.PLAN_MODE override (for testing/debugging)
-          1. Stage 1: rule-based fast filter -> simple / complex / emergent / ambiguous
-          2. Stage 2: lightweight LLM call (only if Stage 1 returns ambiguous)
-
-        Returns:
-            (complexity, effort) where complexity is "simple"/"complex"/"emergent"
-            and effort is ReasoningEffort.LOW/MEDIUM/HIGH.
-        """
-        # Config override for effort level
-        effort_override = self._resolve_effort_override()
-        if effort_override is not None:
-            # Force effort, still need complexity
-            complexity = await self._classify_complexity(task)
-            return complexity, effort_override
-
-        complexity = await self._classify_complexity(task)
-        effort = self._effort_for_complexity(complexity, task)
-        return complexity, effort
-
-    def _resolve_effort_override(self) -> ReasoningEffort | None:
-        """Return forced effort from config.REASONING_EFFORT, or None for auto."""
-        effort_str = config.REASONING_EFFORT
-        if effort_str == "auto":
-            return None
-        mapping = {
-            "low": ReasoningEffort.LOW,
-            "medium": ReasoningEffort.MEDIUM,
-            "high": ReasoningEffort.HIGH,
-        }
-        return mapping.get(effort_str)
-
-    def _effort_for_complexity(self, complexity: str, task: str) -> ReasoningEffort:
-        """Map complexity + rule score to effort."""
-        if complexity == "emergent":
-            return ReasoningEffort.HIGH
-        if complexity == "simple":
-            return ReasoningEffort.LOW
-        # complex → MEDIUM by default
-        return ReasoningEffort.MEDIUM
-
-    async def _classify_complexity(self, task: str) -> str:
-        """Classify task complexity only (without effort)."""
-        if config.PLAN_MODE in ("simple", "complex", "emergent"):
-            logger.info("[Planner] PLAN_MODE override: %s", config.PLAN_MODE)
-            if config.PLAN_MODE == "emergent" and not config.EMERGENT_PLANNING_ENABLED:
-                logger.warning("[Planner] PLAN_MODE=emergent but EMERGENT_PLANNING_ENABLED=false, downgrading to complex")
-                return "complex"
-            return config.PLAN_MODE
-
-        if not config.EMERGENT_PLANNING_ENABLED:
-            rule_result = self._rule_classify(task)
-            if rule_result == "emergent":
-                logger.info("[Planner] Emergent planning disabled, upgrading to complex")
-                return "complex"
-            if rule_result != "ambiguous":
-                return rule_result
-            llm_result = await self._llm_classify(task)
-            if llm_result == "emergent":
-                logger.info("[Planner] Emergent planning disabled (LLM suggested emergent), upgrading to complex")
-                return "complex"
-            return llm_result
-
-        rule_result = self._rule_classify(task)
-        if rule_result != "ambiguous":
-            logger.info("[Planner] Rule classifier: %s (skipping LLM)", rule_result)
-            return rule_result
-
-        logger.info("[Planner] Rule classifier: ambiguous, invoking LLM classifier")
-        return await self._llm_classify(task)
-
-    @classmethod
-    def _rule_score(cls, task: str) -> int:
-        """
-        Compute the rule-based complexity score (weights hardcoded).
-        计算规则复杂度评分（评分权重硬编码，供分类与 v17.3 校准复用）。
-
-        权重保持硬编码；v17.3 只外置 simple/complex 两个决策阈值，便于离线校准。
-        """
-        score = 0
-
-        text_len = len(task)
-        if text_len < 30:
-            score -= 2
-        elif text_len < 60:
-            score -= 1
-        elif text_len > 200:
-            score += 2
-        elif text_len > 120:
-            score += 1
-
-        multi_step_hits = len(cls._MULTI_STEP_PATTERN.findall(task))
-        if multi_step_hits >= 2:
-            score += 3
-        elif multi_step_hits == 1:
-            score += 1
-
-        if cls._CONDITIONAL_PATTERN.search(task):
-            score += 2
-
-        if cls._PARALLEL_PATTERN.search(task):
-            score += 2
-
-        action_verb_count = len(cls._ACTION_VERB_PATTERN.findall(task))
-        if action_verb_count >= 3:
-            score += 2
-        elif action_verb_count == 2:
-            score += 1
-        elif action_verb_count <= 1:
-            score -= 1
-
-        return score
-
-    @classmethod
-    def _is_emergent_by_rule(cls, task: str) -> bool:
-        """
-        Detect exploratory/uncertainty patterns that route to emergent (v5).
-        检测探索性/不确定性模式（路由到 emergent，优先于阈值判定）。
-        """
-        exploratory_hits = len(cls._EXPLORATORY_PATTERN.findall(task))
-        uncertainty_hits = len(cls._UNCERTAINTY_PATTERN.findall(task))
-        return exploratory_hits >= 1 or uncertainty_hits >= 1
-
-    @classmethod
-    def classify_by_rule(
-        cls,
-        task: str,
-        simple_threshold: int,
-        complex_threshold: int,
-    ) -> str:
-        """
-        Rule classification under explicit thresholds — no instance / no LLM needed.
-        给定阈值的规则分类（分类器与 v17.3 校准器共用，无需实例、无需 LLMClient）。
-
-        Returns "simple" / "complex" / "emergent" / "ambiguous".
-        emergent 检测优先于阈值判定（与历史行为一致）。
-        """
-        if cls._is_emergent_by_rule(task):
-            return "emergent"
-        score = cls._rule_score(task)
-        if score <= simple_threshold:
-            return "simple"
-        if score >= complex_threshold:
-            return "complex"
-        return "ambiguous"
-
-    def _rule_classify(self, task: str) -> str:
-        """
-        Stage 1: Rule-based heuristic classifier.
-        Stage 1：基于规则启发式的快速分类器。
-
-        Scores the task text on multiple dimensions. Returns:
-          - "simple"    if score <= CLASSIFIER_SIMPLE_THRESHOLD  (strongly simple signals)
-          - "complex"   if score >= CLASSIFIER_COMPLEX_THRESHOLD (strongly complex signals)
-          - "emergent"  if exploratory/uncertainty patterns detected (v5 routing)
-          - "ambiguous" otherwise       (needs LLM to decide)
-
-        按多个维度对任务文本打分。返回：
-          - "simple"    分数 <= CLASSIFIER_SIMPLE_THRESHOLD（强简单信号）
-          - "complex"   分数 >= CLASSIFIER_COMPLEX_THRESHOLD（强复杂信号）
-          - "emergent"  探索性/不确定性模式检测到时（v5 路由）
-          - "ambiguous" 其他（需要 LLM 裁决）
-
-        v17.3: 决策阈值从 config 读取（默认 -1 / 2，等于历史硬编码值），
-        可由离线校准器建议、人工通过环境变量应用，禁止静默自改。
-        """
-        result = self.classify_by_rule(
-            task,
-            config.CLASSIFIER_SIMPLE_THRESHOLD,
-            config.CLASSIFIER_COMPLEX_THRESHOLD,
-        )
-        if result != "emergent":
-            logger.debug(
-                "[Planner] Rule score for '%s...': %d -> %s",
-                task[:40], self._rule_score(task), result,
-            )
-        return result
-
-    async def _llm_classify(self, task: str) -> str:
-        """
-        Stage 2: Lightweight LLM classification for ambiguous tasks.
-        Stage 2：针对模糊任务的轻量级 LLM 分类。
-
-        Prompt is kept minimal (~60 input tokens) with temperature=0.0
-        for deterministic output. Defaults to "complex" on failure.
-
-        修复 High #7: 添加 "emergent" 选项，用于探索性/开放性任务。
-
-        Prompt 保持极简（~60 输入 tokens），temperature=0.0 确保确定性输出。
-        失败时默认降级为 "complex"。
-        """
-        self.reset()
-        prompt = (
-            'Classify as "simple", "complex", or "emergent":\n'
-            "- simple: single clear action, 1-2 steps, no parallel/conditional needs\n"
-            "- complex: multi-phase, 3+ steps, parallel work, conditional logic, or research+analysis\n"
-            "- emergent: open-ended exploration, iterative discovery, uncertain outcomes, or iterative research\n\n"
-            f"Task: {task}\n\n"
-            'JSON: {{"complexity": "simple"|"complex"|"emergent", "reason": "..."}}'
-        )
-
-        try:
-            data = await self.think_json(prompt, temperature=0.0)
-            result = data.get("complexity", "complex").lower()
-            reason = data.get("reason", "")
-            if result not in ("simple", "complex", "emergent"):
-                result = "complex"
-            logger.info("[Planner] LLM classifier: %s (%s)", result, reason[:80])
-            return result
-        except Exception as exc:
-            logger.warning("[Planner] LLM classify failed: %s. Defaulting to complex.", exc)
-            return "complex"
-
-    # ==================================================================
-    # v1 Simple Planning (flat step list)
-    # v1 简单规划（扁平步骤列表）
+    # Sequential planning (flat step list)
     # ==================================================================
 
     async def create_plan(self, task: str, context: str = "") -> Plan:
         """
-        Create a flat step-based plan (v1 path).
-        创建扁平步骤计划（v1 路径）。
+        Create a flat step-based plan for the sequential engine.
 
         Uses SIMPLE_PLANNER_SYSTEM_PROMPT for a lightweight 2-6 step plan.
         使用 SIMPLE_PLANNER_SYSTEM_PROMPT 生成 2-6 步的轻量级计划。
@@ -574,7 +274,7 @@ class PlannerAgent(BaseAgent):
             prompt += f"\n\nRelevant context:\n{context}"
 
         logger.info("[Planner] Creating simple plan for: %s", task[:80])
-        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
+        result = await self.think_json(prompt, temperature=self.temperature)
         plan = self._parse_plan(task, result)
 
         self.system_prompt = _build_planner_prompt()
@@ -588,8 +288,8 @@ class PlannerAgent(BaseAgent):
         feedback: str = "",
     ) -> Plan:
         """
-        Revise the flat plan based on execution progress and feedback (v1 path).
-        基于执行进度和反馈修订扁平计划（v1 路径）。
+        Revise the sequential plan based on execution progress and feedback.
+        基于执行进度和反馈修订顺序计划。
         """
         self.system_prompt = _build_simple_planner_prompt()
         self.reset()
@@ -622,8 +322,8 @@ class PlannerAgent(BaseAgent):
             "pick fresh IDs (e.g., if completed had 1, 2, start new at 3)."
         )
 
-        logger.info("[Planner] Re-planning (v1) task: %s", task[:80])
-        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
+        logger.info("[Planner] Re-planning sequential task: %s", task[:80])
+        result = await self.think_json(prompt, temperature=self.temperature)
         plan = self._parse_plan(task, result)
 
         self.system_prompt = _build_planner_prompt()
@@ -632,8 +332,8 @@ class PlannerAgent(BaseAgent):
     @staticmethod
     def _parse_plan(task: str, data: Any) -> Plan:
         """
-        Parse LLM JSON output into a flat Plan model (v1).
-        将 LLM 的 JSON 输出解析为扁平 Plan 模型（v1）。
+        Parse LLM JSON output into a sequential Plan model.
+        将 LLM 的 JSON 输出解析为顺序 Plan 模型。
         """
         steps = []
         if not isinstance(data, dict):
@@ -673,8 +373,8 @@ class PlannerAgent(BaseAgent):
         return plan
 
     # ==================================================================
-    # v2 DAG Planning (hierarchical)
-    # v2 DAG 规划（分层）
+    # Hierarchical DAG planning
+    # 分层 DAG 规划
     # ==================================================================
 
     async def create_dag(self, task: str, context: str = "") -> TaskDAG:
@@ -695,7 +395,7 @@ class PlannerAgent(BaseAgent):
         logger.info("[Planner] Creating DAG for: %s", task[:80])
 
         # 使用 JSON 模式调用 LLM（低温度保证输出结构稳定）
-        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
+        result = await self.think_json(prompt, temperature=self.temperature)
         dag = self._parse_dag(task, result, context)
 
         logger.info(
@@ -722,8 +422,8 @@ class PlannerAgent(BaseAgent):
         仅重新规划失败节点父节点下的子树。
         已完成的节点完全保留，只重新生成失败的分支。
 
-        This is a key upgrade over v1's full replan — we keep successful work.
-        这是相对 v1 整体重规划的关键升级——保留所有已成功的工作成果。
+        Unlike full replanning, this preserves successful work.
+        与整体重规划不同，此方法保留所有已成功的工作成果。
         """
         failed_node = dag.nodes.get(failed_node_id)
         if not failed_node:
@@ -760,15 +460,15 @@ class PlannerAgent(BaseAgent):
 
         logger.info("[Planner] Replanning subtree from %s", parent_id)
         self.reset()  # 清空历史，以全新视角重规划
-        result = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
+        result = await self.think_json(prompt, temperature=self.temperature)
         new_dag = self._parse_dag(dag.state.task, result, dag.state.context)
 
         # 将新子树合并回原 DAG（保留已完成节点）
         return self._merge_dags(dag, new_dag, parent_id)
 
     # ------------------------------------------------------------------
-    # Adaptive planning (v3) — mid-execution plan adjustment
-    # 自适应规划（v3）—— 执行中动态调整计划
+    # Adaptive planning — mid-execution plan adjustment
+    # 自适应规划——执行中动态调整计划
     # ------------------------------------------------------------------
 
     async def adapt_plan(self, dag: TaskDAG) -> AdaptationResult:
@@ -835,7 +535,7 @@ class PlannerAgent(BaseAgent):
                      dag.get_completed_action_count())
 
         try:
-            data = await self.think_json(prompt, temperature=config.PLANNER_TEMPERATURE)
+            data = await self.think_json(prompt, temperature=self.temperature)
             adaptations = []
             for a in data.get("adaptations", []):
                 action_str = a.get("action", "keep").lower()

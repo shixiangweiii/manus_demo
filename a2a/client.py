@@ -1,10 +1,10 @@
 """
-A2AClient (v18.4) - Talk to a remote agent over MCP using the A2A envelope.
-A2A 客户端（v18.4）—— 通过 MCP 与远端 agent 交互（AgentCard 发现 + 任务信封）。
+A2AClient - Talk to a remote agent over MCP using the A2A envelope.
+A2A 客户端——通过 MCP 与远端 agent 交互（AgentCard 发现 + 任务信封）。
 
-Reuses the v16 MCPClientManager for transport/discovery/calling; this is a thin
+Uses MCPClientManager for transport, discovery, and calling; this is a thin
 A2A semantics layer on top — it does NOT reimplement any transport.
-复用 v16 MCPClientManager 做传输/发现/调用；本类只是其上的 A2A 语义薄层。
+复用 MCPClientManager 做传输/发现/调用；本类只是其上的 A2A 语义薄层。
 """
 
 from __future__ import annotations

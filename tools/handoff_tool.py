@@ -1,6 +1,6 @@
 """
-HandoffTool (v18.2) - Context-passing specialist delegation with control transfer.
-Handoff 工具（v18.2）—— 上下文传递式专家委派 + 控制权转移。
+HandoffTool - Context-passing specialist delegation with control transfer.
+Handoff 工具——上下文传递式专家委派与控制权转移。
 
 When the LLM calls this tool, a SpecialistAgent takes over with the caller's
 context briefing and runs to completion; its FULL output becomes the final
@@ -45,7 +45,8 @@ class HandoffTool(BaseTool):
         interactive: bool = False,
         max_calls_per_task: int | None = None,
         timeout: int | None = None,
-        parent_name: str = "OrchestratorAgent",  # ReActEngine overrides via set_caller()
+        max_iterations: int | None = None,
+        parent_name: str = "AgentRuntime",
     ):
         self._llm_client = llm_client
         self._available_tools = available_tools
@@ -55,6 +56,7 @@ class HandoffTool(BaseTool):
         self._interactive = interactive
         self._max_calls = max_calls_per_task or config.HANDOFF_MAX_CALLS_PER_TASK
         self._timeout = timeout or config.HANDOFF_TIMEOUT
+        self._max_iterations = max_iterations or config.HANDOFF_MAX_ITERATIONS
         self._parent_name = parent_name
         self._call_count = 0
 
@@ -153,6 +155,7 @@ class HandoffTool(BaseTool):
                 allow_ask_user=self._allow_ask_user,
                 interactive=self._interactive,
                 parent_name=local_parent,
+                max_iterations=self._max_iterations,
             )
             output = await asyncio.wait_for(
                 agent.run(task=task, context=context),
@@ -182,7 +185,7 @@ class HandoffTool(BaseTool):
         return output or "(specialist returned no output)"
 
     def reset_task_state(self) -> None:
-        """Reset per-task call counter (called by OrchestratorAgent.run())."""
+        """Reset the call counter before a new runtime task."""
         logger.debug("[HandoffTool] Resetting task state: call_count=%d→0", self._call_count)
         self._call_count = 0
         self._last_ok = False

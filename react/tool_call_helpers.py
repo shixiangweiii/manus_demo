@@ -2,15 +2,9 @@
 Shared helpers for ReAct-style tool execution.
 ReAct 风格工具执行的共享辅助函数。
 
-Three independent ReAct loops live in the codebase:
-  - react.engine.ReActEngine._exec_one (canonical)
-  - agents.goal_driven_planner.GoalDrivenPlannerAgent._execute_todo_goal_guided
-  - agents.emergent_planner.EmergentPlannerAgent._execute_todo (legacy path)
-
-Without these helpers, fixes that target the canonical loop tend to drift away
-from the others. CLAUDE.md #21 documents the v12/v13 examples (set_caller,
-TOOL_RESULT_TRUNCATION_LIMIT, rate_limited three-state semantics). This module
-makes the shared behavior a single, importable contract.
+The ReAct and reasoning executors share these functions for caller attribution,
+result classification, rate-limit handling, and output truncation. Deterministic
+workflow and direct Subagent dispatch reuse the relevant pure helpers.
 
 三套独立 ReAct 循环若不共享 helper,后续修复极易"漏改"。本模块把"调用者归因 /
 错误三态分类 / 输出截断"统一为纯函数,改一次三处生效。
@@ -86,7 +80,7 @@ def classify_result(
     """
     if exc is not None:
         return True, False
-    if isinstance(result, str) and result.startswith("Error:"):
+    if isinstance(result, str) and result.lstrip().lower().startswith("error"):
         return True, any(marker.lower() in result.lower() for marker in RATE_LIMITED_RESULT_MARKERS)
     return False, False
 

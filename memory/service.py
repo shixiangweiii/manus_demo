@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 import config
-from schema import MemoryEntry
+from memory.legacy_models import MemoryEntry
 
 from memory.agentic_store import AgenticMemoryStore
 from memory.models import (
@@ -32,7 +32,7 @@ class AgenticMemoryService:
 
     def __init__(self, store: AgenticMemoryStore | None = None, llm_client: Any = None):
         self._store = store or AgenticMemoryStore()
-        # Optional LLMClient for LLM-assisted consolidation (v15.x).
+        # Optional LLMClient for LLM-assisted consolidation.
         # None → deterministic consolidation only. / 无 client 时仅走确定性巩固。
         self._llm = llm_client
 

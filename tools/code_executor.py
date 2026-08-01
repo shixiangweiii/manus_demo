@@ -28,13 +28,19 @@ class CodeExecutorTool(BaseTool):
     在带超时保护的子进程中执行 Python 代码。
     """
 
-    _concurrency_sem: asyncio.Semaphore | None = None
-
-    @classmethod
-    def _get_sem(cls) -> asyncio.Semaphore:
-        if cls._concurrency_sem is None:
-            cls._concurrency_sem = asyncio.Semaphore(config.CODE_MAX_CONCURRENT)
-        return cls._concurrency_sem
+    def __init__(
+        self,
+        sandbox_dir: str | None = None,
+        timeout: int | None = None,
+        max_output_bytes: int | None = None,
+        ssl_verify: bool | None = None,
+        max_concurrent: int | None = None,
+    ) -> None:
+        self._sandbox_dir = sandbox_dir or config.SANDBOX_DIR
+        self._timeout = timeout or config.CODE_EXEC_TIMEOUT
+        self._max_output_bytes = max_output_bytes or config.SUBPROCESS_MAX_OUTPUT_BYTES
+        self._ssl_verify = config.LOCATION_SSL_VERIFY if ssl_verify is None else ssl_verify
+        self._concurrency_sem = asyncio.Semaphore(max_concurrent or config.CODE_MAX_CONCURRENT)
 
     @property
     def name(self) -> str:
@@ -68,21 +74,20 @@ class CodeExecutorTool(BaseTool):
 
         logger.info("Executing Python code (%d chars)", len(code))
 
-        async with self._get_sem():
+        async with self._concurrency_sem:
             try:
                 return await self._run_code(code)
             except asyncio.TimeoutError:
-                return f"Error: Code execution timed out after {config.CODE_EXEC_TIMEOUT}s."
+                return f"Error: Code execution timed out after {self._timeout}s."
             except Exception as exc:
-                return f"Error executing code: {exc}"
+                return f"Error: executing code failed: {exc}"
 
-    @staticmethod
-    async def _run_code(code: str) -> str:
+    async def _run_code(self, code: str) -> str:
         # When LOCATION_SSL_VERIFY=false, monkeypatch ssl so all HTTPS
         # requests in the subprocess skip certificate verification.
         # 当 LOCATION_SSL_VERIFY=false 时，注入 SSL monkeypatch 让子进程中
         # 所有 HTTPS 请求跳过证书验证。
-        if not config.LOCATION_SSL_VERIFY:
+        if not self._ssl_verify:
             code = (
                 "import ssl as _manus_ssl;"
                 " _manus_ssl._create_default_https_context"
@@ -91,10 +96,10 @@ class CodeExecutorTool(BaseTool):
 
         result = await run_with_limits(
             cmd=[sys.executable, "-c", code],
-            timeout=config.CODE_EXEC_TIMEOUT,
-            cwd=config.SANDBOX_DIR,
-            env=build_safe_env(),
-            max_output_bytes=config.SUBPROCESS_MAX_OUTPUT_BYTES,
+            timeout=self._timeout,
+            cwd=self._sandbox_dir,
+            env=build_safe_env(ssl_verify=self._ssl_verify),
+            max_output_bytes=self._max_output_bytes,
         )
 
         output_parts = []
@@ -103,10 +108,10 @@ class CodeExecutorTool(BaseTool):
         if result.stderr:
             output_parts.append(f"Errors:\n{result.stderr.strip()}")
         if result.returncode != 0:
-            output_parts.append(f"Exit code: {result.returncode}")
+            output_parts.insert(0, f"Error: process exited with code {result.returncode}")
 
         if not output_parts:
             output_parts.append("Code executed successfully (no output).")
 
-        output_parts.append(f"[Working directory: {config.SANDBOX_DIR}]")
+        output_parts.append(f"[Working directory: {self._sandbox_dir}]")
         return "\n".join(output_parts)

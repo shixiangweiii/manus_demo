@@ -12,8 +12,7 @@ Key differences from ReActEngine:
 3. assistant_msg separates thinking from response content
 4. thinking_content written to message dict for context-aware splitting
 
-Feature-flagged via config.ENABLE_REASONING_ENGINE (default: false).
-通过 config.ENABLE_REASONING_ENGINE 灰度切换（默认关闭）。
+Selection is explicit through the unified executor policy.
 """
 
 from __future__ import annotations
@@ -21,11 +20,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-import config
 from llm.client import _extract_thinking_content, _strip_thinking_from_content
 from react.engine import ReActEngine
 from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
-from schema import ReasoningEffort, StepResult, ToolCallRecord
+from execution.models import ReasoningEffort, StepResult, ToolCallRecord
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +40,16 @@ class ReasoningEngine(ReActEngine):
     - Temperature: MEDIUM uses REASONING_TEMPERATURE instead of REACT_TEMPERATURE
     """
 
-    def __init__(self, *args: Any, max_thinking_tokens: int | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        *args: Any,
+        max_thinking_tokens: int | None = None,
+        max_thinking_rounds: int = 5,
+        **kwargs: Any,
+    ):
         super().__init__(*args, **kwargs)
-        self.max_thinking_tokens = max_thinking_tokens or config.MAX_THINKING_TOKENS
+        self.max_thinking_tokens = max_thinking_tokens or 10000
+        self.max_thinking_rounds = max_thinking_rounds
 
     def _apply_effort(self, effort: ReasoningEffort) -> tuple[float, int]:
         """Override: MEDIUM uses REASONING_TEMPERATURE instead of REACT_TEMPERATURE."""
@@ -52,7 +57,7 @@ class ReasoningEngine(ReActEngine):
             return 0.3, max(3, self.max_iterations // 2)
         elif effort == ReasoningEffort.HIGH:
             return 0.7, self.max_iterations
-        return config.REASONING_TEMPERATURE, self.max_iterations
+        return self.temperature, self.max_iterations
 
     async def execute(
         self,
@@ -74,7 +79,10 @@ class ReasoningEngine(ReActEngine):
         step_id = node_id or "default"
         effective_effort = effort or ReasoningEffort.MEDIUM
         effective_temp, effective_max_iter = self._apply_effort(effective_effort)
-        effective_policy = ToolExecutionPolicy.for_effort(effective_effort)
+        effective_policy = ToolExecutionPolicy.for_effort(
+            effective_effort,
+            self.result_truncation_limit,
+        )
 
         # ReasoningEngine: LOW effort caps thinking budget
         effective_thinking_budget = self.max_thinking_tokens
@@ -224,18 +232,18 @@ class ReasoningEngine(ReActEngine):
             else:
                 # Pure thinking round — don't increment iteration
                 thinking_rounds += 1
-                logger.debug("[ReasoningEngine] Thinking round %d/%d (tokens: %d/%d)", thinking_rounds, config.MAX_THINKING_ROUNDS, total_thinking_tokens, effective_thinking_budget)
+                logger.debug("[ReasoningEngine] Thinking round %d/%d (tokens: %d/%d)", thinking_rounds, self.max_thinking_rounds, total_thinking_tokens, effective_thinking_budget)
 
                 # Hard stop: consecutive thinking rounds cap (independent of token tracking)
-                if thinking_rounds > config.MAX_THINKING_ROUNDS:
-                    logger.warning("[ReasoningEngine] Max thinking rounds exceeded (%d > %d), forcing exit", thinking_rounds, config.MAX_THINKING_ROUNDS)
+                if thinking_rounds > self.max_thinking_rounds:
+                    logger.warning("[ReasoningEngine] Max thinking rounds exceeded (%d > %d), forcing exit", thinking_rounds, self.max_thinking_rounds)
                     iteration += 1
                     if on_iteration:
                         on_iteration(iteration, tool_calls_log)
                     return StepResult(
                         step_id=step_id,
                         success=False,
-                        output=f"Max consecutive thinking rounds exceeded ({thinking_rounds} > {config.MAX_THINKING_ROUNDS}). "
+                        output=f"Max consecutive thinking rounds exceeded ({thinking_rounds} > {self.max_thinking_rounds}). "
                                f"Tools executed: [{', '.join(tc.tool_name for tc in tool_calls_log) if tool_calls_log else 'none'}].",
                         tool_calls_log=tool_calls_log,
                         iterations_completed=iteration,
@@ -265,7 +273,7 @@ class ReasoningEngine(ReActEngine):
                 # Continue to next LLM call without incrementing iteration
                 continue
 
-            # --- Tool execution (same logic as ReActEngine, Batch 4.1 DRY) ---
+            # Tool execution shares the same helper as ReActEngine.
             tool_messages = await execute_tool_calls(
                 response_msg.tool_calls,
                 self.tools,
@@ -276,10 +284,12 @@ class ReasoningEngine(ReActEngine):
                 tool_calls_log=tool_calls_log,
                 log_prefix="ReasoningEngine",
                 policy=effective_policy,
+                guardrail=self.guardrail,
+                on_event=self._on_event,
             )
             messages.extend(tool_messages)
 
-            # v18.2 Handoff control transfer (shared with ReActEngine; #20 drift fix)
+            # Handoff control transfer shared with the standard action loop.
             transfer = self._check_handoff_transfer(
                 response_msg, step_id, tool_calls_log, iteration, on_iteration,
             )

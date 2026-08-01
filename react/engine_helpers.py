@@ -2,19 +2,18 @@
 Shared tool execution logic for all ReAct-style loops.
 所有 ReAct 风格循环共享的工具执行逻辑。
 
-Batch 4.1 DRY refactor: extracts ~70 lines duplicated across four sites:
+Extracts tool-call behavior shared across ReAct-style executors:
   - react.engine.ReActEngine.execute
   - react.reasoning_engine.ReasoningEngine.execute
   - agents.emergent_planner.EmergentPlannerAgent._execute_todo
   - agents.goal_driven_planner.GoalDrivenPlannerAgent._execute_todo_goal_guided
 
-Batch 4.1 DRY 重构：从四处重复代码中提取的共享模块。
+将多个 ReAct 路径重复的工具调用行为收敛为共享模块。
 """
 
 from __future__ import annotations
 
 import asyncio
-import config as config_module
 import json
 import logging
 from dataclasses import dataclass
@@ -25,7 +24,8 @@ from react.tool_call_helpers import (
     classify_result,
     truncate_for_llm,
 )
-from schema import ReasoningEffort, ToolCallRecord
+from execution.models import ReasoningEffort, ToolCallRecord
+from tools.base import BaseTool
 from tools.router import ToolRouter
 
 logger = logging.getLogger(__name__)
@@ -50,16 +50,15 @@ class ToolExecutionPolicy:
 
     @staticmethod
     def default() -> ToolExecutionPolicy:
-        return ToolExecutionPolicy(truncation_limit=config_module.TOOL_RESULT_TRUNCATION_LIMIT)
+        return ToolExecutionPolicy()
 
     @staticmethod
-    def for_effort(effort: ReasoningEffort) -> ToolExecutionPolicy:
-        base = config_module.TOOL_RESULT_TRUNCATION_LIMIT
+    def for_effort(effort: ReasoningEffort, base: int = 2000) -> ToolExecutionPolicy:
         if effort == ReasoningEffort.LOW:
             return ToolExecutionPolicy(truncation_limit=max(500, base // 2))
         elif effort == ReasoningEffort.HIGH:
             return ToolExecutionPolicy(truncation_limit=base * 2)
-        return ToolExecutionPolicy.default()
+        return ToolExecutionPolicy(truncation_limit=base)
 
 
 async def execute_tool_calls(
@@ -74,6 +73,8 @@ async def execute_tool_calls(
     log_prefix: str = "",
     policy: ToolExecutionPolicy | None = None,
     parse_args: Callable[[str], dict] | None = None,
+    guardrail: Any | None = None,
+    on_event: Callable[[str, Any], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute tool calls concurrently, classify results, account to router.
 
@@ -85,7 +86,7 @@ async def execute_tool_calls(
 
     When *policy* is provided it overrides *truncation_limit* and controls
     error message formatting. When *policy* is None (default), the function
-    uses *truncation_limit* directly — backward compatible with Batch 4.1
+    uses *truncation_limit* directly
     call sites.
 
     并行执行工具调用、分类结果、记账到 ToolRouter。
@@ -95,36 +96,63 @@ async def execute_tool_calls(
     effective_truncation = effective_policy.truncation_limit
     prefix = log_prefix or "ReAct"
 
-    # v19: resolve the guardrail once (None when GUARDRAILS_ENABLED is off → zero
-    # overhead; reads live config so eval variants that flip the flag are honored).
-    # v19：解析护栏一次（关闭时为 None，零开销；读实时 config 兼容评测 variant 翻转）。
-    guardrail = None
     _GAction = None
-    if config_module.GUARDRAILS_ENABLED:
+    if guardrail is not None:
         try:
-            from guardrails.engine import current_guardrail
             from guardrails.models import GuardrailAction as _GAction
-            guardrail = current_guardrail()
-        except Exception:
-            logger.debug("[%s] guardrail resolution failed; continuing without", prefix, exc_info=True)
-            guardrail = None
+        except Exception as exc:
+            raise RuntimeError("Guardrail is configured but unavailable") from exc
 
     async def _exec_one(tc: Any) -> tuple[Any, str, dict, str, bool, bool]:
         fn_name = tc.function.name
         _parser = parse_args or json.loads
+        argument_error = ""
         try:
             fn_args = _parser(tc.function.arguments)
             if not isinstance(fn_args, dict):
+                argument_error = "tool arguments must be a JSON object"
                 fn_args = {}
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            argument_error = f"invalid tool arguments: {exc}"
             fn_args = {}
         logger.info("[%s] Tool call: %s(%s)", prefix, fn_name, fn_args)
+        event_args = BaseTool._sanitize_params(fn_args)
+        if on_event is not None:
+            on_event(
+                "tool_started",
+                {
+                    "tool": fn_name,
+                    "parameters": event_args,
+                    "action_id": node_id,
+                    "call_id": str(tc.id),
+                },
+            )
+
+        def finish(res: str, is_err: bool, rate_limited: bool):
+            if on_event is not None:
+                on_event(
+                    "tool_completed",
+                    {
+                        "tool": fn_name,
+                        "success": not is_err,
+                        "result": str(res)[:1000],
+                        "action_id": node_id,
+                        "call_id": str(tc.id),
+                    },
+                )
+            return tc, fn_name, fn_args, res, is_err, rate_limited
+
+        if argument_error:
+            res = f"Error: {argument_error}"
+            is_err, rl = classify_result(res, None)
+            return finish(res, is_err, rl)
+
         t = tools.get(fn_name)
         if t is None:
             res = f"Error: Unknown tool '{fn_name}'"
             is_err, rl = classify_result(res, None)
-            return tc, fn_name, fn_args, res, is_err, rl
-        # v19.1: tool-input guardrail — block dangerous calls / write-op gating
+            return finish(res, is_err, rl)
+        # Tool-input guardrail: block dangerous calls and gated writes.
         # BEFORE execution. The engine resolves CONFIRM internally → ALLOW/BLOCK.
         if guardrail is not None:
             try:
@@ -132,26 +160,31 @@ async def execute_tool_calls(
                 if decision.action == _GAction.BLOCK:
                     res = f"Error: [GUARDRAIL BLOCKED] {decision.reason}"
                     is_err, rl = classify_result(res, None)
-                    return tc, fn_name, fn_args, res, is_err, rl
-            except Exception:
-                logger.debug("[%s] tool-input guardrail error (allowing)", prefix, exc_info=True)
+                    return finish(res, is_err, rl)
+            except Exception as exc:
+                logger.error("[%s] tool-input guardrail failed", prefix, exc_info=True)
+                res = f"Error: guardrail input check failed: {exc}"
+                is_err, rl = classify_result(res, None)
+                return finish(res, is_err, rl)
         attribute_caller(t, agent_name)
         try:
             res = await t.traced_execute(**fn_args)
             is_err, rl = classify_result(res, None)
-            # v19.2: tool-output guardrail — neutralize injection in untrusted output.
+            # Tool-output guardrail: neutralize injection in untrusted output.
             if guardrail is not None and not is_err:
                 try:
                     out = guardrail.scan_tool_output(fn_name, res)
                     if out.transformed_text is not None:
                         res = out.transformed_text
-                except Exception:
-                    logger.debug("[%s] tool-output guardrail error (passthrough)", prefix, exc_info=True)
-            return tc, fn_name, fn_args, res, is_err, rl
+                except Exception as exc:
+                    logger.error("[%s] tool-output guardrail failed", prefix, exc_info=True)
+                    res = f"Error: guardrail output check failed: {exc}"
+                    is_err, rl = classify_result(res, None)
+            return finish(res, is_err, rl)
         except Exception as exc:
             res = f"Error: Tool execution error: {exc}"
             is_err, rl = classify_result(None, exc)
-            return tc, fn_name, fn_args, res, is_err, rl
+            return finish(res, is_err, rl)
 
     executions = await asyncio.gather(*(_exec_one(tc) for tc in tool_calls))
 
@@ -169,7 +202,7 @@ async def execute_tool_calls(
 
         tool_calls_log.append(ToolCallRecord(
             tool_name=func_name,
-            parameters=func_args,
+            parameters=BaseTool._sanitize_params(func_args),
             result=record_result,
         ))
 

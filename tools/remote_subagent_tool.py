@@ -1,11 +1,11 @@
 """
-RemoteSubAgentTool (v18.3) - Delegate a subtask to a remote agent over MCP/A2A.
-远端子智能体工具（v18.3）—— 通过 MCP/A2A 把子任务委派给远端 agent server。
+RemoteSubAgentTool - Delegate a subtask to a remote agent over MCP/A2A.
+远端子智能体工具——通过 MCP/A2A 把子任务委派给远端 agent server。
 
-Unlike the in-process SubAgent (v9), this delegates across a (configurable)
+Unlike the in-process SubAgent, this delegates across a configurable
 transport to a separate MCP-hosted agent — for cross-process isolation and
 long-task stability. The result is returned to the parent loop (NOT control
-transfer). Built on the v16 MCPClientManager + v18.4 A2AClient.
+transfer). It uses the shared MCP client and A2A protocol adapters.
 与进程内 SubAgent 不同，本工具通过可配传输把任务委派给独立的 MCP agent server
 （跨进程隔离 / 长任务稳定性）；结果回灌父循环（非控制权转移）。
 """
@@ -25,8 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_remote_server_config(server_json: str):
-    """Parse REMOTE_AGENT_SERVER_JSON into an MCPServerConfig (or None if invalid).
-    把 REMOTE_AGENT_SERVER_JSON 解析为 MCPServerConfig（无效返回 None）。"""
+    """Parse structured remote-agent JSON into a validated MCPServerConfig."""
     from tools.mcp.config import _parse_server_entry
 
     raw = (server_json or "").strip()
@@ -35,10 +34,9 @@ def build_remote_server_config(server_json: str):
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        logger.warning("[RemoteSubAgentTool] REMOTE_AGENT_SERVER_JSON parse error: %s", exc)
-        return None
+        raise ValueError(f"Invalid remote agent server JSON: {exc}") from exc
     if not isinstance(data, dict):
-        return None
+        raise ValueError("Remote agent server configuration must be a JSON object")
     name = data.get("name", "remote_agent")
     return _parse_server_entry(name, data)
 
@@ -52,7 +50,7 @@ class RemoteSubAgentTool(BaseTool):
         on_event: Callable[[str, Any], None] | None = None,
         max_calls_per_task: int | None = None,
         timeout: int | None = None,
-        parent_name: str = "OrchestratorAgent",
+        parent_name: str = "AgentRuntime",
         fetch_card: bool | None = None,
     ):
         from a2a.client import A2AClient
@@ -125,7 +123,7 @@ class RemoteSubAgentTool(BaseTool):
             "task": task[:120],
         })
 
-        # v18.4: optional capability discovery (read the AgentCard first).
+        # Optional capability discovery reads the AgentCard first.
         if self._fetch_card:
             try:
                 card = await self._client.fetch_agent_card()
@@ -167,7 +165,7 @@ class RemoteSubAgentTool(BaseTool):
         return msg
 
     def reset_task_state(self) -> None:
-        """Reset per-task call counter (called by OrchestratorAgent.run())."""
+        """Reset the call counter before a new runtime task."""
         logger.debug("[RemoteSubAgentTool] Resetting task state: call_count=%d→0", self._call_count)
         self._call_count = 0
 

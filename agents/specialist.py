@@ -1,6 +1,6 @@
 """
-SpecialistAgent + registry (v18.2) - Context-passing specialist for Handoff.
-专家智能体与注册表（v18.2）—— 用于 Handoff 的上下文传递式专家。
+SpecialistAgent and registry - Context-passing specialist for Handoff.
+专家智能体与注册表——用于 Handoff 的上下文传递式专家。
 
 Unlike SubAgent (isolated, summary-only, no parent context), a SpecialistAgent:
   - receives the caller's context briefing (NOT context="")
@@ -24,7 +24,7 @@ from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from llm.client import LLMClient
 from react.engine import ReActEngine
-from schema import ReasoningEffort
+from execution.models import ReasoningEffort
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -44,8 +44,8 @@ class SpecialistSpec:
     default_tools: list[str] = field(default_factory=list)
 
 
-# Built-in specialist registry (v1 code-level; configurable later)
-# 内置专家注册表（v1 代码级，后续可配置化）
+# Built-in specialist registry
+# 内置专家注册表
 SPECIALIST_REGISTRY: dict[str, SpecialistSpec] = {
     "researcher": SpecialistSpec(
         name="researcher",

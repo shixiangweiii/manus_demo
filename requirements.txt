@@ -1,33 +1,27 @@
+pydantic>=2.0
 openai
-pydantic
 rich
 python-dotenv
-pyyaml>=6.0          # v20: SKILL.md frontmatter parsing / 技能 frontmatter 解析
+pyyaml>=6.0
 
-# Tracing (v7)
+# Tracing
 opentelemetry-api>=1.27.0
 opentelemetry-sdk>=1.27.0
 opentelemetry-exporter-otlp>=1.27.0
 
-# Tracing Web Viewer
+# Local web services
 fastapi>=0.100.0
 uvicorn[standard]>=0.20.0
 jinja2>=3.1.0
 
-# Web Search (v10)
+# Web and MCP tools
 ddgs>=8.0.0
-
-# Bailian MCP Client (v11)
 httpx>=0.24.0
 mcp>=1.0.0
 trafilatura
 beautifulsoup4
 markdownify
 
-# AgentBay SDK examples
+# Optional AgentBay tools
 wuying-agentbay-sdk==0.21.0
 playwright==1.60.0
-
-# Testing (optional)
-pytest
-pytest-asyncio

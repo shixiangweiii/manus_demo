@@ -8,7 +8,7 @@ printing resource URLs and auth codes by default.
 from __future__ import annotations
 
 import asyncio
-import os
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,15 +27,18 @@ class AgentBaySessionHandle:
 
 def get_agentbay_sdk() -> tuple[Any, Any, Any, Any]:
     """Return SDK classes: AgentBay, CreateSessionParams, LifecyclePolicy, BrowserOption."""
-    os.environ.setdefault("AGENTBAY_LOG_LEVEL", getattr(config, "AGENTBAY_LOG_LEVEL", "WARNING"))
+    level_name = str(getattr(config, "AGENTBAY_LOG_LEVEL", "WARNING"))
+    level = getattr(logging, level_name, logging.WARNING)
+    logging.getLogger("agentbay").setLevel(level)
+    logging.getLogger("wuying_agentbay_sdk").setLevel(level)
     from agentbay import AgentBay, BrowserOption, CreateSessionParams, LifecyclePolicy
 
     return AgentBay, CreateSessionParams, LifecyclePolicy, BrowserOption
 
 
 def get_api_key() -> str:
-    """Read the AgentBay API key from live env first, then config."""
-    return (os.getenv("AGENTBAY_API_KEY") or getattr(config, "AGENTBAY_API_KEY", "") or "").strip()
+    """Read the key loaded by the centralized secret loader."""
+    return (getattr(config, "AGENTBAY_API_KEY", "") or "").strip()
 
 
 def concurrency_sem() -> asyncio.Semaphore:

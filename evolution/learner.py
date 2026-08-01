@@ -1,10 +1,10 @@
 """
-ExperienceLearner (v17.1 + v17.2) - Distill experience / failure lessons and
+ExperienceLearner - Distill experience / failure lessons and
 inject avoidance hints into future tasks.
-经验学习器（v17.1 + v17.2）—— 从任务结果提炼经验/失败教训，并为后续相似任务注入避坑提示。
+经验学习器——从任务结果提炼经验/失败教训，并为后续相似任务注入避坑提示。
 
 设计原则（对齐路线图 §9 风险表）：
-  - 只写记忆，不改源码/不改路由；写入 v15 Agentic Memory。
+  - 只写 Agentic Memory，不改源码/不改路由。
   - 每条记忆 source="evolution"、带 task_id、confidence 受控、可 revoke（防 memory poisoning）。
   - LLM 提炼为 opt-in（SELF_EVOLUTION_LLM_EXTRACTION），默认走确定性提炼。
   - 学习失败不影响主流程（调用方包 try/except）。
@@ -26,7 +26,7 @@ from memory.models import (
 from memory.service import AgenticMemoryService
 from evolution.models import (
     EVOLUTION_SOURCE,
-    EVOLUTION_VERSION,
+    EVOLUTION_SCHEMA,
     EXPERIENCE_TAG,
     FAILURE_LESSON_TAG,
     USER_PREFERENCE_TAG,
@@ -158,7 +158,7 @@ class ExperienceLearner:
             importance=0.6,
             metadata={
                 "task_type": task_type,
-                "evolution_version": EVOLUTION_VERSION,
+                "evolution_schema": EVOLUTION_SCHEMA,
             },
         )
         self._memory.add_record(record)
@@ -227,7 +227,7 @@ class ExperienceLearner:
                 "task_type": task_type,
                 "failure_reason": failure_reason,
                 "correction": correction,
-                "evolution_version": EVOLUTION_VERSION,
+                "evolution_schema": EVOLUTION_SCHEMA,
             },
         )
         self._memory.add_record(record)
@@ -261,7 +261,7 @@ class ExperienceLearner:
         return False
 
     # ------------------------------------------------------------------
-    # Preference learning (v17.4) / 偏好学习
+    # Preference learning / 偏好学习
     # ------------------------------------------------------------------
 
     async def learn_preferences(
@@ -314,7 +314,7 @@ class ExperienceLearner:
                 metadata={
                     "question": preference,
                     "answer": value,
-                    "evolution_version": EVOLUTION_VERSION,
+                    "evolution_schema": EVOLUTION_SCHEMA,
                 },
             )
             self._memory.add_record(record)

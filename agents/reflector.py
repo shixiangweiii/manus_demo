@@ -14,10 +14,8 @@ After all plan steps have been executed, the reflector:
   3. 提供具体反馈和改进建议
   4. 决定是否需要触发重规划
 
-v2: Added validate_exit_criteria() for per-node validation in DAG mode,
-    and reflect_dag() for evaluating a full TaskDAG.
-v2: 新增 validate_exit_criteria() 用于 DAG 模式下的逐节点验证，
-    以及 reflect_dag() 用于评估完整 TaskDAG 执行结果。
+The same component supports per-node DAG validation, full DAG reflection,
+and sequential-plan reflection.
 """
 
 from __future__ import annotations
@@ -26,12 +24,13 @@ import logging
 import re
 from typing import Any
 
-import config
 from agents.base import BaseAgent
 from agents.prompt_utils import build_system_prompt
 from context.manager import ContextManager
 from llm.client import LLMClient
-from schema import Plan, Reflection, StepResult, TaskNode
+from dag.models import TaskNode
+from engines.sequential_models import Plan, Reflection
+from execution.models import StepResult
 
 logger = logging.getLogger(__name__)
 
@@ -97,16 +96,17 @@ class ReflectorAgent(BaseAgent):
     it returns passed=false with specific feedback, triggering re-planning.
     Reflector 充当质量门控：若结果不足，返回 passed=false 并附具体反馈，触发重规划。
 
-    v2 additions:
-      - validate_exit_criteria(): per-node LLM check (lightweight)
-      - reflect_dag(): full DAG evaluation
-
-    v2 新增：
+    DAG-specific operations:
       - validate_exit_criteria()：逐节点的轻量级 LLM 验证（yes/no 问题）
       - reflect_dag()：对完整 TaskDAG 执行结果进行全面评估
     """
 
-    def __init__(self, llm_client: LLMClient, context_manager: ContextManager | None = None):
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        context_manager: ContextManager | None = None,
+        temperature: float = 0.1,
+    ):
         system_prompt = build_system_prompt(
             REFLECTOR_SYSTEM_PROMPT,
             inject_location_guidance=False,
@@ -120,10 +120,11 @@ class ReflectorAgent(BaseAgent):
             llm_client=llm_client,
             context_manager=context_manager,
         )
+        self.temperature = temperature
 
     # ------------------------------------------------------------------
-    # Per-node exit criteria validation (v2 - DAG mode)
-    # 逐节点完成判据验证（v2 - DAG 模式）
+    # Per-node DAG exit-criteria validation
+    # DAG 逐节点完成判据验证
     # ------------------------------------------------------------------
 
     async def validate_exit_criteria(self, node: TaskNode, result: StepResult) -> bool:
@@ -152,7 +153,7 @@ class ReflectorAgent(BaseAgent):
         )
 
         try:
-            data = await self.think_json(prompt, temperature=config.REFLECTOR_TEMPERATURE)
+            data = await self.think_json(prompt, temperature=self.temperature)
             passed = data.get("passed", True)
             reason = data.get("reason", "")
             logger.info(
@@ -167,8 +168,8 @@ class ReflectorAgent(BaseAgent):
             return False
 
     # ------------------------------------------------------------------
-    # Full DAG reflection (v2)
-    # 完整 DAG 反思（v2）
+    # Full DAG reflection
+    # 完整 DAG 反思
     # ------------------------------------------------------------------
 
     async def reflect_dag(self, task: str, dag: Any, results: list[StepResult]) -> Reflection:
@@ -218,7 +219,7 @@ class ReflectorAgent(BaseAgent):
         logger.info("[Reflector] Evaluating DAG results for: %s", task[:80])
 
         try:
-            data = await self.think_json(prompt, temperature=config.REFLECTOR_TEMPERATURE)
+            data = await self.think_json(prompt, temperature=self.temperature)
             reflection = Reflection(
                 passed=data.get("passed", False),
                 score=float(data.get("score", 0.5)),
@@ -244,8 +245,8 @@ class ReflectorAgent(BaseAgent):
         return reflection
 
     # ------------------------------------------------------------------
-    # Legacy reflection (v1 - flat plan)
-    # 旧版反思（v1 - 扁平计划）
+    # Sequential-plan reflection
+    # 顺序计划反思
     # ------------------------------------------------------------------
 
     async def reflect(
@@ -256,7 +257,7 @@ class ReflectorAgent(BaseAgent):
     ) -> Reflection:
         """
         Evaluate the execution results against the original task.
-        评估执行结果是否满足原始任务要求（旧版 v1 接口，保留向后兼容）。
+        评估顺序计划的执行结果是否满足原始任务要求。
         """
         self.reset()
 
@@ -299,7 +300,7 @@ class ReflectorAgent(BaseAgent):
         logger.info("[Reflector] Evaluating results for: %s", task[:80])
 
         try:
-            data = await self.think_json(prompt, temperature=config.REFLECTOR_TEMPERATURE)
+            data = await self.think_json(prompt, temperature=self.temperature)
             reflection = Reflection(
                 passed=data.get("passed", False),
                 score=float(data.get("score", 0.5)),

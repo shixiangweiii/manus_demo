@@ -41,14 +41,13 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         event_bridge.start()
         yield
-        await event_bridge.stop()
-        # 尽力还原配置覆盖 / best-effort config restore
         await session_manager.shutdown()
+        await event_bridge.stop()
 
     app = FastAPI(
         title="Manus Demo WebUI",
         description="Local debugging web UI / 本地调试 Web 界面",
-        version="1.0",
+        version="local",
         lifespan=lifespan,
     )
     app.state.event_bridge = event_bridge

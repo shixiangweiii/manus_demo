@@ -1,5 +1,5 @@
 """
-CLI for v20.6 Skill optimization loop.
+CLI for the Skill optimization loop.
 
 Usage:
   python -m skills.optimize --skill .agents/skills/hello-world
@@ -72,7 +72,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Optimize an Agent Skill description/content (v20.6).")
+    parser = argparse.ArgumentParser(description="Optimize an Agent Skill description/content.")
     parser.add_argument("--skill", required=True, help="Skill name or path to skill directory containing SKILL.md")
     parser.add_argument("--results", default="", help="Optional evaluation JSON report with task results")
     parser.add_argument("--apply", action="store_true", help="Apply the proposed SKILL.md changes (default: diff only)")

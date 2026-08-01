@@ -1,7 +1,7 @@
 """
-SkillAutoDistiller (v20.5) — 从成功轨迹中自动蒸馏 SKILL.md 格式的技能文件。
+SkillAutoDistiller — 从成功轨迹中自动蒸馏 SKILL.md 格式的技能文件。
 
-设计原则（对齐 roadmap v20.5 + v17 "禁止静默自改" 原则）：
+设计原则：
   - 基于记忆的计数：通过 AgenticMemory 检索同类成功经验，计数 >= N 则触发蒸馏
   - 蒸馏结果写入 .agents/skills/auto-{name}/SKILL.md（用户级目录，半可信）
   - 不自动设置 allowed-tools — 蒸馏的 skill 只提供指令，不预授权工具
@@ -377,14 +377,14 @@ class SkillAutoDistiller:
         skill_md_path = os.path.join(skill_dir, "SKILL.md")
         # Render frontmatter as safe YAML so colons/quotes/newlines in the
         # distilled description or task pattern cannot produce invalid YAML
-        # (which the v20 YAML reader would reject). / 以安全 YAML 渲染 frontmatter，
+        # (which a strict YAML reader would reject). / 以安全 YAML 渲染 frontmatter，
         # 使蒸馏 description / task_pattern 中的冒号、引号、换行不会产生非法 YAML。
         frontmatter = {
             "name": name,
             "description": skill_data["description"],
             "metadata": {
                 "author": "auto-distilled",
-                "version": "1.0",
+                "schema": "skill-v1",
                 "source": "self-evolution",
                 "distilled_from": skill_data.get("task_pattern", task[:_TASK_TRUNCATE]),
             },
@@ -408,10 +408,9 @@ class SkillAutoDistiller:
             name=name,
             description=skill_data["description"],
             license="user",  # 半可信级别 / semi-trusted
-            compatibility=">=20.0",
             metadata={
                 "author": "auto-distilled",
-                "version": "1.0",
+                "schema": "skill-v1",
                 "source": "self-evolution",
                 "distilled_from": skill_data.get("task_pattern", ""),
             },
@@ -444,7 +443,7 @@ class SkillAutoDistiller:
             metadata={
                 "skill_name": skill_name,
                 "task_pattern": task[:_TASK_TRUNCATE],
-                "distilled_at": "v20.5",
+                "distillation_schema": "skill-distillation-v1",
             },
         )
         try:

@@ -1,5 +1,5 @@
 """
-SkillOptimizer (v20.6) — 轻量版 skill 优化闭环。
+SkillOptimizer — 轻量版 skill 优化闭环。
 
 参考 SkillOpt 思路，但保持本项目的安全原则：
   - 默认只生成 diff 报告，不写入文件（禁止静默自改）
@@ -267,7 +267,7 @@ class SkillOptimizer:
 
         if "## Optimization Notes" not in content:
             content += "\n\n## Optimization Notes\n"
-        content += f"\n<!-- v20.6 optimization diagnosis:\n{diagnosis}\n-->\n"
+        content += f"\n<!-- optimization diagnosis:\n{diagnosis}\n-->\n"
         return content
 
     async def _llm_revise(

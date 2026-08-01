@@ -1,15 +1,19 @@
-"""Task checkpoint and resume subsystem (v14.5).
-任务 checkpoint / resume 子系统。"""
+"""Semantic checkpoint support for the unified runtime."""
 
 from checkpoint.models import (
-    CheckpointError,
     CheckpointCorruptedError,
-    CheckpointValidationError,
-    SimplePathState,
-    DAGPathState,
-    EmergentPathState,
-    GoalDrivenPathState,
-    TaskCheckpoint,
-    TaskCheckpointSummary,
+    CheckpointError,
+    CheckpointStatus,
+    RuntimeCheckpoint,
+    RuntimeCheckpointSummary,
 )
-from checkpoint.store import TaskStateStore
+from checkpoint.store import RuntimeCheckpointStore
+
+__all__ = [
+    "CheckpointCorruptedError",
+    "CheckpointError",
+    "CheckpointStatus",
+    "RuntimeCheckpoint",
+    "RuntimeCheckpointStore",
+    "RuntimeCheckpointSummary",
+]

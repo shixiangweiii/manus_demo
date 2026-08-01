@@ -1,3 +1,0 @@
-variant_id,mode,task_id,success,score,total_tokens,prompt_tokens,completion_tokens,reasoning_tokens,llm_call_count,total_wall_time_ms,planning_time_ms,execution_time_ms,reflection_time_ms,failure_category
-react_auto_baseline,simple,resume_001,False,0.4334,0,0,0,0,0,0.0,0.0,0.0,141.1879062652588,tool_execution_error
-reasoning_auto,simple,resume_001,False,0.4334,0,0,0,0,0,0.0,0.0,0.0,127.87914276123047,tool_execution_error

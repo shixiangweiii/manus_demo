@@ -2,8 +2,7 @@
 Fetch URL Tool — retrieve full page content from a URL via local WebParser.
 URL 页面抓取工具 —— 通过本地 WebParser 获取完整网页内容。
 
-v11: 新增工具，直接解决 web_search 循环重试的核心根因（缺少 URL 页面内容抓取能力）。
-v13: 默认改为本地 httpx + trafilatura 解析，百炼 WebParser 仅作为可选 fallback。
+默认使用本地 httpx + trafilatura 解析，百炼 WebParser 仅作为可选 fallback。
 - LLM 在搜索结果中看到 URL 后，可调用 fetch_url 获取完整页面内容
 - 返回内容超过 FETCH_URL_MAX_CONTENT_LENGTH 时截断，防止上下文膨胀
 - 错误透传：失败时返回以 "Error:" 开头的字符串
@@ -15,7 +14,7 @@ import asyncio
 import logging
 from typing import Any
 
-import config
+from core.settings import ToolSettings, get_settings
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -28,6 +27,9 @@ class FetchUrlTool(BaseTool):
 
     Use after web_search to access specific pages found in search results.
     """
+
+    def __init__(self, settings: ToolSettings | None = None) -> None:
+        self._settings = settings or get_settings().tools
 
     @property
     def name(self) -> str:
@@ -70,11 +72,11 @@ class FetchUrlTool(BaseTool):
 
         format_type = kwargs.get("format", "markdown")
 
-        if config.LOCAL_WEBPARSER_ENABLED:
+        if self._settings.local_webparser_enabled:
             local_result = await self._execute_local(url, format_type)
             if not local_result.startswith("Error:"):
                 return local_result
-            if not config.LOCAL_WEBPARSER_FALLBACK_TO_BAILIAN:
+            if not self._settings.local_webparser_fallback_to_bailian:
                 return local_result
 
             bailian_result = await self._execute_bailian(url, format_type)
@@ -92,7 +94,7 @@ class FetchUrlTool(BaseTool):
         try:
             from tools.local_web_parser import LocalWebParser
 
-            parser = LocalWebParser()
+            parser = LocalWebParser(self._settings)
             result = await parser.fetch(url, format_type=format_type)
             content = parser.format_result(result)
             content = parser.add_short_content_warning(content, measured_content=result.content)
@@ -106,7 +108,7 @@ class FetchUrlTool(BaseTool):
             )
             return content
         except asyncio.TimeoutError:
-            return f"Error: fetch_url failed locally: timed out after {config.LOCAL_WEBPARSER_TIMEOUT}s for URL='{url}'."
+            return f"Error: fetch_url failed locally: timed out after {self._settings.local_webparser_timeout}s for URL='{url}'."
         except ValueError as exc:
             return f"Error: {exc}"
         except Exception as exc:
@@ -116,14 +118,14 @@ class FetchUrlTool(BaseTool):
             return f"Error: fetch_url failed locally: {exc_name}: {exc}"
 
     async def _execute_bailian(self, url: str, format_type: str) -> str:
-        if not config.DASHSCOPE_API_KEY:
+        if not self._settings.dashscope_api_key:
             return "Error: fetch_url requires DASHSCOPE_API_KEY to use Bailian WebParser fallback. Use local WebParser or web_search for snippet-level results."
 
         try:
             from tools.mcp_client import BailianMCPClient
 
-            client = BailianMCPClient()
-            fetch_timeout = config.WEB_SEARCH_TIMEOUT * 2
+            client = BailianMCPClient(self._settings)
+            fetch_timeout = self._settings.web_search_timeout_seconds * 2
             result = await asyncio.wait_for(
                 client.call_tool(
                     server_name="WebParser",
@@ -140,7 +142,7 @@ class FetchUrlTool(BaseTool):
             return result
 
         except asyncio.TimeoutError:
-            return f"Error: fetch_url timed out after {config.WEB_SEARCH_TIMEOUT * 2}s for URL='{url}'."
+            return f"Error: fetch_url timed out after {self._settings.web_search_timeout_seconds * 2}s for URL='{url}'."
         except ValueError as exc:
             return f"Error: {exc}"
         except Exception as exc:
@@ -149,9 +151,8 @@ class FetchUrlTool(BaseTool):
                 return f"Error: fetch_url timed out for URL='{url}': {exc_name}: {exc}"
             return f"Error: fetch_url failed: {exc_name}: {exc}"
 
-    @staticmethod
-    def _add_mcp_short_content_warning(result: str) -> str:
-        short_len = max(0, config.FETCH_URL_SHORT_CONTENT_WARNING_LENGTH)
+    def _add_mcp_short_content_warning(self, result: str) -> str:
+        short_len = max(0, self._settings.fetch_url_short_warning_length)
         if short_len and 0 < len(result.strip()) < short_len:
             return (
                 f"{result}\n\n"
@@ -160,9 +161,8 @@ class FetchUrlTool(BaseTool):
             )
         return result
 
-    @staticmethod
-    def _truncate(result: str) -> str:
-        max_len = config.FETCH_URL_MAX_CONTENT_LENGTH
+    def _truncate(self, result: str) -> str:
+        max_len = self._settings.fetch_url_max_content_length
         if len(result) > max_len:
             return result[:max_len] + f"\n\n[Content truncated at {max_len} characters]"
         return result

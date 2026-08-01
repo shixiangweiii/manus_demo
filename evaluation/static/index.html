@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manus Demo Evaluation</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 32px auto; padding: 0 20px; color: #172033; }
+    section { border: 1px solid #d8deea; border-radius: 12px; padding: 18px; margin: 16px 0; }
+    textarea, input, select { width: 100%; box-sizing: border-box; margin: 6px 0 12px; padding: 8px; }
+    button { padding: 8px 14px; cursor: pointer; }
+    pre { background: #f5f7fb; padding: 12px; overflow: auto; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  </style>
+</head>
+<body>
+  <h1>统一评测平台</h1>
+  <p>上传材料、生成评测集，并按 engine × executor × effort 直接运行。</p>
+  <section>
+    <h2>1. 上传文本</h2>
+    <input id="filename" value="document.md">
+    <textarea id="content" rows="8" placeholder="粘贴本地学习材料"></textarea>
+    <button onclick="upload()">上传</button>
+  </section>
+  <section>
+    <h2>2. 生成评测集</h2>
+    <div class="grid"><input id="docId" placeholder="doc_id"><input id="setName" value="learning-set"><input id="numTasks" type="number" value="6"></div>
+    <button onclick="generateSet()">生成</button>
+  </section>
+  <section>
+    <h2>3. 运行</h2>
+    <input id="evalsetId" placeholder="evalset_id">
+    <div class="grid">
+      <input id="engines" value="auto,sequential,dag,todo,goal" aria-label="engines">
+      <input id="executors" value="react,thinking" aria-label="executors">
+      <input id="efforts" value="low,medium,high" aria-label="efforts">
+    </div>
+    <button onclick="runSet()">开始运行</button>
+  </section>
+  <section><h2>状态</h2><button onclick="refresh()">刷新</button><pre id="output">尚未加载</pre></section>
+  <script>
+    const api = async (path, options = {}) => {
+      const response = await fetch('/api/evaluation' + path, {headers: {'Content-Type': 'application/json'}, ...options});
+      return response.json();
+    };
+    const split = id => document.getElementById(id).value.split(',').map(x => x.trim()).filter(Boolean);
+    async function upload() {
+      const result = await api('/documents', {method:'POST', body:JSON.stringify({filename:filename.value, content:content.value})});
+      docId.value = result.doc_id || ''; await refresh();
+    }
+    async function generateSet() {
+      const result = await api('/evalsets', {method:'POST', body:JSON.stringify({doc_id:docId.value, name:setName.value, num_tasks:Number(numTasks.value)})});
+      evalsetId.value = result.evalset_id || ''; await refresh();
+    }
+    async function runSet() {
+      await api('/runs', {method:'POST', body:JSON.stringify({evalset_id:evalsetId.value, engines:split('engines'), executors:split('executors'), efforts:split('efforts')})});
+      await refresh();
+    }
+    async function refresh() { output.textContent = JSON.stringify(await api('/overview'), null, 2); }
+    refresh();
+  </script>
+</body>
+</html>

@@ -6,8 +6,8 @@ Provides:
 - @traced(span_name, attributes): General-purpose method tracing
 - _truncate / _is_sensitive_key / _safe_set_attribute: Shared helpers
 
-LLM and tool call tracing is handled inline by LLMClient._start_llm_span / _end_llm_span
-and BaseTool.traced_execute respectively, using these shared helpers for attribute handling.
+LLM spans are created by ``LLMClient``. Runtime, action, and tool spans are
+derived from structured ``EventBus`` events by ``TracingBridge``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode, Span
 
 from tracing import config as tracing_config
-from tracing.spans import SpanName, AttrKey
+from tracing.spans import AttrKey
 
 logger = logging.getLogger(__name__)
 

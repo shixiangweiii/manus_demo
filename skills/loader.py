@@ -1,6 +1,6 @@
 """
-Skill Loader (v20.1) - Discovers and parses skill packages from the filesystem.
-技能加载器（v20.1）—— 从文件系统发现并解析技能包。
+Skill Loader - Discovers and parses skill packages from the filesystem.
+技能加载器——从文件系统发现并解析技能包。
 
 A skill package is a directory containing a SKILL.md file with YAML frontmatter.
 The frontmatter provides SkillMeta fields (name, description, allowed_tools, etc.);
@@ -406,9 +406,15 @@ class SkillLoader:
             # Infer from skill_dir: project dir → "project", user dir → "user", else → "third_party"
             # 从 skill_dir 推断：项目目录→"project"，用户目录→"user"，其他→"third_party"
             abs_dir = os.path.abspath(skill_dir)
-            if config.SKILLS_PROJECT_DIR and abs_dir.startswith(os.path.abspath(config.SKILLS_PROJECT_DIR)):
+            if config.SKILLS_PROJECT_DIR and SkillLoader._is_within(
+                abs_dir,
+                config.SKILLS_PROJECT_DIR,
+            ):
                 license_val = "project"
-            elif config.SKILLS_USER_DIR and abs_dir.startswith(os.path.abspath(config.SKILLS_USER_DIR)):
+            elif config.SKILLS_USER_DIR and SkillLoader._is_within(
+                abs_dir,
+                config.SKILLS_USER_DIR,
+            ):
                 license_val = "user"
             else:
                 license_val = "third_party"
@@ -417,7 +423,6 @@ class SkillLoader:
             name=str(name),
             description=str(description),
             license=license_val,
-            compatibility=str(fm.get("compatibility", ">=20.0")),
             metadata=fm.get("metadata", {}) if isinstance(fm.get("metadata"), dict) else {},
             allowed_tools=list(allowed_tools_raw) if isinstance(allowed_tools_raw, list) else [],
         )
@@ -437,6 +442,16 @@ class SkillLoader:
             references=references,
             assets=assets,
         )
+
+    @staticmethod
+    def _is_within(path: str, directory: str) -> bool:
+        """Return true only when path is directory itself or a real descendant."""
+        try:
+            resolved_path = os.path.realpath(path)
+            resolved_directory = os.path.realpath(directory)
+            return os.path.commonpath([resolved_path, resolved_directory]) == resolved_directory
+        except ValueError:
+            return False
 
     @staticmethod
     def _classify_assets(skill_dir: str) -> tuple[list[str], list[str], list[str]]:

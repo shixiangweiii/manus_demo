@@ -1,7 +1,18 @@
-from .orchestrator import OrchestratorAgent
-from .planner import PlannerAgent
-from .executor import ExecutorAgent
-from .reflector import ReflectorAgent
-from .subagent import SubAgent
+"""Retained planner and peripheral agent implementations."""
 
-__all__ = ["OrchestratorAgent", "PlannerAgent", "ExecutorAgent", "ReflectorAgent", "SubAgent"]
+from importlib import import_module
+
+_EXPORTS = {
+    "PlannerAgent": ("agents.planner", "PlannerAgent"),
+    "ReflectorAgent": ("agents.reflector", "ReflectorAgent"),
+    "SubAgent": ("agents.subagent", "SubAgent"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    module_name, attribute = _EXPORTS[name]
+    return getattr(import_module(module_name), attribute)

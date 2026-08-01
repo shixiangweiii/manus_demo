@@ -29,7 +29,8 @@ from context.manager import ContextManager
 from llm.client import LLMClient
 from pydantic import ValidationError
 from react.engine import ReActEngine
-from schema import SubAgentResult, SubAgentStatus, SubAgentSummary, ToolCallRecord
+from agents.subagent_models import SubAgentResult, SubAgentStatus, SubAgentSummary
+from execution.models import ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -126,6 +127,7 @@ class SubAgent:
         on_event: Callable[[str, Any], None] | None = None,
         parent_agent_name: str = "",
         sandbox_subdir: str = "",
+        summary_max_length: int | None = None,
     ):
         self.name = name
         self.task_description = task_description
@@ -135,13 +137,14 @@ class SubAgent:
         self._on_event = on_event or (lambda *_: None)
         self.parent_agent_name = parent_agent_name
         self.sandbox_subdir = sandbox_subdir
+        self.summary_max_length = summary_max_length or config.SUBAGENT_SUMMARY_MAX_LENGTH
 
-        # Build system prompt with v12 context injection (date/time) + optional sandbox isolation.
+        # Build the system prompt with current date/time context and sandbox isolation.
         # inject_subagent_guidance=False because depth=1 — SubAgent cannot spawn further SubAgents.
-        # Wave-2 (M1): inject_hitl_guidance=False because SubAgentTool.execute() structurally
+        # inject_hitl_guidance=False because SubAgentTool.execute() structurally
         # excludes the ask_user tool from the SubAgent's whitelist; injecting the
         # guidance would have the LLM call a tool that isn't there, wasting iterations.
-        # 用 build_system_prompt 注入 v12 日期/时间上下文；depth=1 不附加 SubAgent 引导;
+        # 用 build_system_prompt 注入日期/时间上下文；depth=1 不附加 SubAgent 引导；
         # ask_user 工具被结构性排除,故引导也关掉,避免 LLM 调用不存在的工具。
         system_prompt = build_system_prompt(
             SUBAGENT_SYSTEM_PROMPT,
@@ -152,7 +155,7 @@ class SubAgent:
         if sandbox_subdir:
             system_prompt += f"\n9. Your working directory is {sandbox_subdir}. All file operations must be within this directory.\n   你的工作目录是 {sandbox_subdir}，所有文件操作应在此目录下进行。"
 
-        # Build tool infrastructure (same pattern as ExecutorAgent)
+        # Build isolated tool infrastructure for this subagent.
         self.tools = {t.name: t for t in tools}
         tool_router = ToolRouter(available_tools=list(self.tools.keys()))
 
@@ -163,7 +166,7 @@ class SubAgent:
             max_iterations=max_iterations or config.SUBAGENT_MAX_ITERATIONS,
             tool_router=tool_router,
             context_manager=context_manager or ContextManager(),
-            agent_name=name,  # Wave C #7: SubAgent's own name (e.g. "SubAgent-1") for tool attribution
+            agent_name=name,
         )
 
         # For summary generation
@@ -189,9 +192,9 @@ class SubAgent:
             logger.debug("[SubAgent] Event callback error for '%s'", event, exc_info=True)
 
     def _failure_tool_calls(self) -> list[ToolCallRecord]:
-        """Wave-3 M2: snapshot the most-up-to-date tool_calls_log on failure.
+        """Snapshot the most-up-to-date tool_calls_log on failure.
 
-        Prefers ReActEngine._current_log (Wave-3) over the on_iteration
+        Prefers ReActEngine._current_log over the on_iteration
         snapshot. The live log captures tool calls written mid-iteration —
         on_iteration only fires at iteration boundaries, so a timeout/budget
         cancel during iteration N+1 would otherwise lose any calls already
@@ -199,7 +202,7 @@ class SubAgent:
 
         Returns a fresh list copy (caller can mutate safely).
 
-        Wave-3 M2: 失败路径取 ReActEngine._current_log 实时快照,而非
+        失败路径取 ReActEngine._current_log 实时快照,而非
         on_iteration 在迭代末尾的副本——后者在中途取消时会丢最后一轮调用。
         """
         live = getattr(self._react_engine, "_current_log", None)
@@ -239,7 +242,7 @@ class SubAgent:
         self._iterations_so_far = iteration
         self._accumulated_tool_calls = list(tool_calls)
 
-        # Wave C #12: emit progress event so UI/Tracing/Eval can observe
+        # Emit progress so UI, tracing, and evaluation can observe
         # SubAgent's internal ReAct iterations rather than seeing only
         # start/complete bookends.
         # 发出迭代进度事件，让观察者看到 SubAgent 内部 ReAct 进展。
@@ -379,7 +382,7 @@ class SubAgent:
             logger.warning("[SubAgent] %s token budget exceeded: %d >= %d (iterations=%d, duration=%.0fms)",
                            self.name, tokens_used, self.max_tokens, self._iterations_so_far, elapsed_ms)
 
-            # Wave-3 M2: read live log so the last in-progress iteration's
+            # Read the live log so the last in-progress iteration's
             # tool calls aren't lost.
             tool_log = self._failure_tool_calls()
             budget_summary = SubAgentSummary(
@@ -422,7 +425,7 @@ class SubAgent:
             logger.warning("[SubAgent] %s timed out after %ds (iterations=%d, tokens=%d)",
                            self.name, self.timeout, self._iterations_so_far, tokens_used)
 
-            # Wave-3 M2: live log captures last-iteration calls
+            # The live log captures last-iteration calls.
             tool_log = self._failure_tool_calls()
             timeout_summary = SubAgentSummary(
                 accomplished="",
@@ -465,7 +468,7 @@ class SubAgent:
             logger.error("[SubAgent] %s unexpected error: %s (iterations=%d, duration=%.0fms)",
                          self.name, error_msg[:200], self._iterations_so_far, elapsed_ms, exc_info=True)
 
-            # Wave-3 M2: live log captures last-iteration calls
+            # The live log captures last-iteration calls.
             tool_log = self._failure_tool_calls()
             error_summary = SubAgentSummary(
                 accomplished="",
@@ -530,7 +533,7 @@ class SubAgent:
             logger.debug("[SubAgent] Generating LLM summary: output_truncated=%d chars sent",
                          min(len(output), 8000))
 
-            # Wave-6: tag this summary call so it lands in the SubAgent's bucket
+            # Tag this summary call so it lands in the SubAgent's bucket
             # rather than the parent's (the SubAgent already paid for its ReAct
             # loop tokens — this final summary call should also be SubAgent's).
             response = await self.llm_client.chat_json(
@@ -538,7 +541,7 @@ class SubAgent:
                 caller_tag=self.name,
             )
 
-            # Wave-3 M6: pydantic accepts arbitrary dicts because every
+            # Pydantic accepts arbitrary dicts because every
             # SubAgentSummary field has a default — so a fully-irrelevant
             # response like {"foo": "bar"} validates as an EMPTY summary
             # without raising. We must explicitly check whether the LLM
@@ -583,7 +586,7 @@ class SubAgent:
         except Exception:
             logger.debug("[SubAgent] Summary generation failed, truncating (output_len=%d)", len(output), exc_info=True)
             return SubAgentSummary(
-                accomplished=output[:config.SUBAGENT_SUMMARY_MAX_LENGTH],
+                accomplished=output[:self.summary_max_length],
                 findings="",
                 issues="Summary generation failed; output truncated",
                 artifacts=artifacts,

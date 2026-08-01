@@ -144,23 +144,24 @@ def serialize_event(event: str, data: Any) -> tuple[Any, bool]:
 
 
 # =====================================================================
-# 事件目录：main.py on_event 处理的全部事件 + 控制台目前丢弃的事件族。
+# 事件目录：统一运行时及外围适配层发布的事件。
 # 仅供前端渲染器测试与文档参考；未知事件照样透传（前端 raw 兜底卡）。
-# Event catalog: all events handled by main.py on_event + families the
-# console currently drops. For renderer tests/docs only; unknown events
+# Event catalog for renderer documentation; unknown events
 # still pass through (frontend raw fallback card).
 # =====================================================================
 
 KNOWN_EVENTS: frozenset[str] = frozenset({
     # lifecycle / 生命周期
-    "task_start", "phase", "task_complexity", "task_complete", "token_usage_summary",
+    "task_started", "engine_started", "engine_completed", "task_completed", "task_failed",
+    "action_started", "action_completed", "action_failed", "tool_started", "tool_completed",
+    "task_start", "phase", "task_complete", "token_usage_summary",
     # plan / 计划
-    "plan", "plan_adaptation", "step_start", "step_complete", "step_failed",
+    "plan", "plan_created", "plan_adaptation", "step_start", "step_complete", "step_failed",
     "step_skipped", "reflection",
     # DAG
     "dag_created", "superstep", "node_running", "node_completed", "node_failed",
     "node_rollback", "node_transition", "condition_evaluated", "execution_error",
-    # TODO / emergent（控制台未渲染 / console-dropped）
+    # TODO planning（控制台未渲染 / console-dropped）
     "todo_list_initialized", "todo_start", "todo_complete", "todo_blocked",
     "todo_failed", "todo_list_update",
     # goal-driven（控制台未渲染 / console-dropped）

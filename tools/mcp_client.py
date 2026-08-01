@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Any
 
-import config
+from core.settings import ToolSettings, get_settings
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.session import ClientSession
 from mcp.types import CallToolResult, TextContent
@@ -55,12 +55,6 @@ def _is_retryable(text: str) -> bool:
 class _RateLimited(Exception):
     """Internal sentinel: a transient/rate-limited failure that should be retried."""
 
-# Server name → MCP endpoint URL mapping
-_SERVER_URLS: dict[str, str] = {
-    "WebSearch": config.BAILIAN_WEBSEARCH_MCP_URL,
-    "WebParser": config.BAILIAN_WEBPARSER_MCP_URL,
-}
-
 # Server name → transport. The two Bailian MCP servers differ:
 #   - WebSearch supports Streamable HTTP (POST /mcp → 200)
 #   - WebParser ONLY supports SSE (POST /mcp → 405 "current mcp not support
@@ -91,11 +85,14 @@ class BailianMCPClient:
     _webparser_lock_loop: asyncio.AbstractEventLoop | None = None
     _webparser_last_call_at: float = 0.0
 
+    def __init__(self, settings: ToolSettings | None = None) -> None:
+        self._settings = settings or get_settings().tools
+
     @classmethod
-    def _get_webparser_sem(cls) -> asyncio.Semaphore:
+    def _get_webparser_sem(cls, max_concurrent: int) -> asyncio.Semaphore:
         loop = asyncio.get_running_loop()
         if cls._webparser_sem is None or cls._webparser_sem_loop is not loop:
-            cls._webparser_sem = asyncio.Semaphore(max(1, config.BAILIAN_WEBPARSER_MAX_CONCURRENT))
+            cls._webparser_sem = asyncio.Semaphore(max(1, max_concurrent))
             cls._webparser_sem_loop = loop
         return cls._webparser_sem
 
@@ -108,8 +105,8 @@ class BailianMCPClient:
         return cls._webparser_lock
 
     @classmethod
-    async def _throttle_webparser(cls) -> None:
-        min_interval = max(0.0, float(config.BAILIAN_WEBPARSER_MIN_INTERVAL_SECONDS))
+    async def _throttle_webparser(cls, min_interval_seconds: float) -> None:
+        min_interval = max(0.0, float(min_interval_seconds))
         if min_interval <= 0:
             return
         async with cls._get_webparser_lock():
@@ -142,18 +139,24 @@ class BailianMCPClient:
             ValueError: If server_name is unknown or DASHSCOPE_API_KEY is missing.
             Exception: On MCP connection or tool call failure.
         """
-        if not config.DASHSCOPE_API_KEY:
+        if not self._settings.dashscope_api_key:
             raise ValueError("DASHSCOPE_API_KEY is required for Bailian MCP calls")
 
-        url = _SERVER_URLS.get(server_name)
+        server_urls = {
+            "WebSearch": self._settings.bailian_websearch_url,
+            "WebParser": self._settings.bailian_webparser_url,
+        }
+        url = server_urls.get(server_name)
         if url is None:
-            raise ValueError(f"Unknown MCP server: {server_name}. Available: {list(_SERVER_URLS.keys())}")
+            raise ValueError(
+                f"Unknown MCP server: {server_name}. Available: {list(server_urls.keys())}"
+            )
 
-        headers = {"Authorization": f"Bearer {config.DASHSCOPE_API_KEY}"}
+        headers = {"Authorization": f"Bearer {self._settings.dashscope_api_key}"}
         # Inner streamablehttp timeout is generous so the outer asyncio.wait_for
         # at the caller side is the single source of truth. Avoids inner-timeout
         # raising ExceptionGroup before the outer wait_for can fire cleanly.
-        effective_timeout = timeout or float(config.WEB_SEARCH_TIMEOUT)
+        effective_timeout = timeout or float(self._settings.web_search_timeout_seconds)
         inner_timeout = effective_timeout * 4 + 30
 
         transport = _SERVER_TRANSPORT.get(server_name, "streamable_http")
@@ -164,14 +167,16 @@ class BailianMCPClient:
         # (web_search=WEB_SEARCH_TIMEOUT, fetch_url=2×); a backoff that would
         # exceed it is simply cancelled (WebSearch then falls back to DDGS).
         # 429/瞬时错误指数退避重试；总时长受调用方 wait_for 限制，超出会被取消。
-        max_retries = config.BAILIAN_MCP_MAX_RETRIES
-        base_delay = config.BAILIAN_MCP_RETRY_BASE_DELAY
+        max_retries = self._settings.bailian_max_retries
+        base_delay = self._settings.bailian_retry_base_delay
 
         async def _call_with_retries() -> str:
             for attempt in range(max_retries + 1):
                 try:
                     if server_name == "WebParser":
-                        await self._throttle_webparser()
+                        await self._throttle_webparser(
+                            self._settings.bailian_webparser_min_interval
+                        )
                     return await self._call_once(
                         transport=transport, url=url, headers=headers,
                         inner_timeout=inner_timeout, server_name=server_name,
@@ -196,7 +201,9 @@ class BailianMCPClient:
             raise RuntimeError(f"MCP {server_name}.{tool_name} failed unexpectedly")
 
         if server_name == "WebParser":
-            async with self._get_webparser_sem():
+            async with self._get_webparser_sem(
+                self._settings.bailian_webparser_max_concurrent
+            ):
                 return await _call_with_retries()
         return await _call_with_retries()
 

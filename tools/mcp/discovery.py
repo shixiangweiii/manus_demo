@@ -9,7 +9,7 @@ Emits evaluation/observability events through an optional `on_event` sink:
   - mcp_tool_executed    (emitted by MCPBridgeTool.execute, not here)
 
 抽出此模块前，发现逻辑只在 main.py 内、且不发任何事件，导致评测 probe 的
-mcp_* 指标恒为 0（无法证明 v16 收益）。
+mcp_* 指标恒为 0 时无法证明桥接能力收益。
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 async def discover_mcp_bridge_tools(
     on_event: Callable[[str, Any], None] | None = None,
+    settings: Any | None = None,
 ) -> list:
     """
     Discover and instantiate MCPBridgeTool instances from configured servers.
@@ -43,7 +44,7 @@ async def discover_mcp_bridge_tools(
         except Exception:
             logger.debug("[MCPDiscovery] event callback failed for '%s'", event, exc_info=True)
 
-    bridge_config = load_mcp_bridge_config()
+    bridge_config = load_mcp_bridge_config(settings)
     if not bridge_config.servers:
         logger.warning("[MCPDiscovery] MCP_BRIDGE_ENABLED but no servers configured")
         _emit("mcp_tools_discovered", {"count": 0})

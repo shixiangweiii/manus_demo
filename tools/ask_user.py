@@ -1,6 +1,6 @@
 """
 AskUserTool - Human-in-the-Loop tool for the ReAct engine.
-人机交互工具 —— ReAct 引擎中的 HITL 工具（v13 新增）。
+人机交互工具——动作执行循环中的 HITL 工具。
 
 When the LLM encounters ambiguous or incomplete information, it can
 call this tool to ask the user for clarification. The tool suspends
@@ -180,7 +180,7 @@ class AskUserTool(BaseTool):
                 )
 
     def reset_task_state(self) -> None:
-        """Reset per-task state for a new task. Called by OrchestratorAgent.run()."""
+        """Reset state before a new runtime task."""
         logger.debug(
             "[AskUserTool] Resetting task state: prompt_count=%d -> 0",
             self._prompt_count,

@@ -14,7 +14,6 @@ Provides:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -35,12 +34,17 @@ app = FastAPI(
 # Templates directory (relative to this file)
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+_traces_dir = Path("traces")
+
+
+def configure_traces_dir(path: str | Path) -> None:
+    """Configure the local trace directory before serving requests."""
+    global _traces_dir
+    _traces_dir = Path(path).expanduser().resolve()
 
 
 def _get_traces_dir() -> Path:
-    """Get the traces directory from environment variable or default."""
-    dir_path = os.environ.get("_TRACING_VIEWER_DIR", "traces")
-    return Path(dir_path)
+    return _traces_dir
 
 
 # ---------------------------------------------------------------------------
@@ -71,14 +75,28 @@ def _load_all_traces() -> list[dict[str, Any]]:
     if not traces_dir.exists():
         return []
 
-    results = []
-    for filepath in sorted(traces_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    candidates: list[tuple[float, Path]] = []
+    for path in traces_dir.glob("*.json"):
         try:
+            candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+
+    results = []
+    for _mtime, filepath in sorted(candidates, key=lambda item: item[0], reverse=True):
+        try:
+            # Do not follow a trace-directory symlink to a file outside the
+            # configured storage root. The detail endpoint applies the same
+            # boundary check.
+            if not filepath.resolve().is_relative_to(traces_dir.resolve()):
+                continue
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict) or not isinstance(data.get("spans", []), list):
+                continue
 
-            spans = data.get("spans", [])
-            trace_id = data.get("trace_id", filepath.stem)
+            spans = [span for span in data.get("spans", []) if isinstance(span, dict)]
+            trace_id = str(data.get("trace_id", filepath.stem))
 
             # Find root span (no parent_span_id)
             root_span = None
@@ -123,7 +141,7 @@ def _load_all_traces() -> list[dict[str, Any]]:
                 "status": status,
                 "file_size_kb": round(filepath.stat().st_size / 1024, 1),
             })
-        except (json.JSONDecodeError, OSError, KeyError):
+        except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError, AttributeError):
             continue
 
     return results
@@ -151,6 +169,9 @@ def _load_trace(file_id: str) -> dict[str, Any] | None:
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("spans", []), list):
+            return None
+        data["spans"] = [span for span in data.get("spans", []) if isinstance(span, dict)]
         return data
     except (json.JSONDecodeError, OSError):
         return None

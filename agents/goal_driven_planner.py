@@ -9,18 +9,17 @@ goal drift in long-horizon tasks.
 受 ReflAct（EMNLP 2025）目标状态反思和逆向规划启发，
 该引擎在执行过程中维护持久化目标文档，防止长流程任务中的目标漂移。
 
-Key differences from v5 EmergentPlanner:
-与 v5 EmergentPlanner 的关键区别：
+Key differences from the dynamic TODO engine:
   - GoalDocument persists across all iterations (goal is never lost)
   - Backward planning derives milestones from end state, not task description
   - GoalReflection (ReflAct-style) before each action compares current vs goal
-  - Bounded message context (not v5's unbounded flat history)
+  - Bounded message context instead of an unbounded flat history
   - Proactive TODO refresh driven by reflection, not just on failure
 
   - GoalDocument 跨迭代持久化（目标永不丢失）
   - 逆向规划从终态推导里程碑，而非从任务描述正向规划
   - 每次行动前进行目标反思（ReflAct 风格），对比当前状态与目标
-  - 有界消息上下文（非 v5 的无界扁平历史）
+  - 使用有界消息上下文
   - 反思驱动的主动 TODO 刷新，而非仅失败时被动刷新
 
 Core loop:
@@ -44,33 +43,27 @@ import logging
 import time
 from typing import Any, Callable
 
-import config as config_module
 from agents.base import BaseAgent
 from context.manager import ContextManager
 from llm.client import LLMClient
-from schema import (
+from engines.goal_models import (
     GoalAction,
     GoalDocument,
     GoalReflection,
     GoalReanchorResult,
     Milestone,
     MilestonePlan,
-    ReasoningEffort,
-    StepResult,
-    TodoItem,
-    TodoList,
-    TodoStatus,
-    ToolCallRecord,
 )
+from engines.todo_models import TodoItem, TodoList, TodoStatus
+from execution.models import ReasoningEffort, StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
 from agents.prompt_utils import build_convergence_hint, build_system_prompt
-from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
 
 logger = logging.getLogger(__name__)
 
-_V8_BASE_PROMPT = """\
+_GOAL_EXECUTION_PROMPT = """\
 You are an autonomous task execution agent with a "begin with the end in mind" philosophy.
 
 ## Your Guiding Principle
@@ -92,7 +85,7 @@ For each iteration you follow this sequence:
 - Prefer actions that directly contribute to the current milestone.
 """
 
-# Wave-2: prompt built per-instance in __init__ (see ExecutorAgent for rationale).
+# Build the prompt per instance so runtime guidance stays current.
 
 # JSON prompt templates for structured LLM calls
 # 结构化 LLM 调用的 JSON 提示模板
@@ -237,29 +230,55 @@ class GoalDrivenPlannerAgent(BaseAgent):
         max_iterations: int | None = None,
         context_manager: ContextManager | None = None,
         tool_router: ToolRouter | None = None,
+        action_executor: Any | None = None,
         on_event: Callable[[str, Any], None] | None = None,
+        max_outer_iterations: int = 60,
+        reanchor_interval: int = 5,
+        reflection_interval: int = 1,
+        stagnation_window: int = 3,
+        node_timeout: int = 300,
+        max_retries: int = 3,
+        max_todo_items: int = 20,
     ):
-        # Wave-2: build prompt per-instance, fresh date + HITL gating respected
+        # Build the prompt per instance so date and interaction guidance are current.
         super().__init__(
             name="GoalDrivenPlanner",
-            system_prompt=build_system_prompt(_V8_BASE_PROMPT),
+            system_prompt=build_system_prompt(_GOAL_EXECUTION_PROMPT),
             llm_client=llm_client,
             context_manager=context_manager,
         )
         self.tools = {t.name: t for t in tools}
         self.tool_schemas = [t.to_openai_tool() for t in tools]
-        self.max_iterations = max_iterations or config_module.MAX_REACT_ITERATIONS
-        self.max_outer_iterations = config_module.MAX_GOAL_DRIVEN_ITERATIONS
-        self.reanchor_interval = config_module.GOAL_REANCHOR_INTERVAL
-        self.reflection_interval = config_module.GOAL_REFLECTION_INTERVAL
-        self.stagnation_window = config_module.GOAL_DRIVEN_STAGNATION_WINDOW
+        self.max_iterations = max_iterations or 10
+        self.max_outer_iterations = max_outer_iterations
+        self.reanchor_interval = reanchor_interval
+        self.reflection_interval = reflection_interval
+        self.stagnation_window = stagnation_window
+        self.node_timeout = node_timeout
+        self.max_retries = max_retries
+        self.max_todo_items = max_todo_items
         self.tool_router = tool_router or ToolRouter(available_tools=list(self.tools.keys()))
         self._on_event = on_event or (lambda *_: None)
+        if action_executor is None:
+            from core.events import EventBus
+            from core.settings import get_settings
+            from execution.react import ReactActionExecutor
+
+            action_executor = ReactActionExecutor(
+                llm_client=llm_client,
+                tools=list(self.tools.values()),
+                settings=get_settings(),
+                events=EventBus(),
+                context_manager=self.context_manager,
+            )
+        self.action_executor = action_executor
 
         self._goal_doc: GoalDocument | None = None
         self._todo_list: TodoList | None = None
         self._reanchor_counter: int = 0
         self._current_effort: ReasoningEffort = ReasoningEffort.MEDIUM
+        self.last_results: list[StepResult] = []
+        self.goal_satisfied: bool = False
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -289,6 +308,8 @@ class GoalDrivenPlannerAgent(BaseAgent):
         self._reanchor_counter = 0
         self._goal_doc = None
         self._todo_list = None
+        self.last_results = []
+        self.goal_satisfied = False
         self._current_effort = effort or ReasoningEffort.MEDIUM
 
         logger.info("[GoalDrivenPlanner] Starting execution: %s", task[:100])
@@ -315,7 +336,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
             task=task,
             goal_doc=goal_doc,
             iteration=0,
-            all_results=[],
+            all_results=self.last_results,
             last_reflection=None,
             completed_count_at_last_check=0,
             stagnation_rounds=0,
@@ -335,11 +356,13 @@ class GoalDrivenPlannerAgent(BaseAgent):
         last_reflection: GoalReflection | None = None,
         on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
-        """Resume goal-driven planning from a restored state (v14.5).
+        """Resume goal-driven planning from a restored semantic state.
         从恢复的状态继续目标驱动规划。"""
         self._current_effort = effort
         self._goal_doc = goal_doc
         self._todo_list = todo_list
+        self.last_results = all_results
+        self.goal_satisfied = False
         completed_count_at_last_check = stagnation_state.get("prev_completed", 0)
         stagnation_rounds = stagnation_state.get("stagnation_rounds", 0)
 
@@ -402,6 +425,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
 
                 if last_reflection.suggested_action == GoalAction.COMPLETE or last_reflection.progress_pct >= 100:
                     logger.info("[GoalDrivenPlanner] Goal reflection indicates completion")
+                    self.goal_satisfied = True
                     break
 
             # Step B: Select next TODO guided by reflection
@@ -415,13 +439,13 @@ class GoalDrivenPlannerAgent(BaseAgent):
             try:
                 result = await asyncio.wait_for(
                     self._execute_todo_goal_guided(current_todo, goal_doc, last_reflection),
-                    timeout=config_module.NODE_EXECUTION_TIMEOUT,
+                    timeout=self.node_timeout,
                 )
             except asyncio.TimeoutError:
                 result = StepResult(
                     step_id=str(current_todo.id),
                     success=False,
-                    output=f"TODO timed out after {config_module.NODE_EXECUTION_TIMEOUT}s",
+                    output=f"TODO timed out after {self.node_timeout}s",
                 )
             except Exception as exc:
                 result = StepResult(
@@ -438,7 +462,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
                 self._emit("todo_complete", {"todo": current_todo, "result": result})
             else:
                 current_todo.retry_count += 1
-                if current_todo.retry_count >= config_module.MAX_TODO_RETRIES:
+                if current_todo.retry_count >= self.max_retries:
                     self._todo_list.mark_blocked(current_todo.id)
                     self._emit("todo_blocked", {"todo": current_todo, "result": result})
                 else:
@@ -692,17 +716,11 @@ class GoalDrivenPlannerAgent(BaseAgent):
         reflection: GoalReflection,
     ) -> StepResult:
         """
-        Execute a single TODO using a bounded ReAct loop with goal injection.
-        使用有界 ReAct 循环（注入目标文档）执行单个 TODO。
-
-        Unlike v5's unbounded flat history, this manages its own messages list.
-        与 v5 的无界扁平历史不同，此方法管理自己的消息列表。
+        Execute a single TODO through the selected action executor.
+        通过当前选择的动作执行器执行单个 TODO。
         """
         todo.status = TodoStatus.IN_PROGRESS
         step_id = str(todo.id)
-
-        # Reset tool router for this TODO
-        self.tool_router.reset_node(step_id)
 
         # Build dependency context
         dep_context = ""
@@ -715,126 +733,22 @@ class GoalDrivenPlannerAgent(BaseAgent):
             if dep_results:
                 dep_context = "\n".join(dep_results)
 
-        # Initialize bounded message list with system prompt
-        # Wave-2: use the per-instance prompt that was built in __init__
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
-        ]
-        tool_calls_log: list[ToolCallRecord] = []
-
         goal_injection = self._format_goal_for_prompt(goal_doc)
+        prompt = f"{goal_injection}\n\nCurrent TODO: {todo.description}"
+        if reflection.reasoning:
+            prompt += f"\n\nWhy this is next: {reflection.reasoning}"
 
-        iteration = 0
-        while iteration < self.max_iterations:
-            iteration += 1
+        from core.models import Action, Effort
 
-            # Build goal-aware prompt
-            if iteration == 1:
-                user_msg = f"{goal_injection}\n\nCurrent TODO: {todo.description}"
-                if dep_context:
-                    user_msg += f"\n\n{dep_context}"
-                if reflection.reasoning:
-                    user_msg += f"\n\nReasoning for this TODO: {reflection.reasoning}"
-            else:
-                user_msg = f"Continue.\n\n{goal_injection}\n\nFocus: {goal_doc.current_focus or todo.description}"
-                router_hint = self.tool_router.get_hint(step_id)
-                if router_hint:
-                    user_msg += f"\n\nIMPORTANT: {router_hint}"
-                # Wave-1 N2: convergence hint, parity with ReActEngine.
-                # 收敛提示,与 ReActEngine 行为对齐。
-                tool_call_counts: dict[str, int] = {}
-                for tc in tool_calls_log:
-                    tool_call_counts[tc.tool_name] = tool_call_counts.get(tc.tool_name, 0) + 1
-                user_msg += build_convergence_hint(tool_call_counts)
-
-            messages.append({"role": "user", "content": user_msg})
-
-            # Sliding window: keep system msgs + last ~20 messages, preserving tool_calls pairing
-            if len(messages) > 24:
-                system_msgs = [m for m in messages if m.get("role") == "system"]
-                non_system = [m for m in messages if m.get("role") != "system"]
-                kept = non_system[-20:]
-                # Protect tool_calls pairing: if first kept msg is a tool response
-                # whose parent assistant(tool_calls) was trimmed, include that assistant
-                if kept and kept[0].get("role") == "tool":
-                    for i in range(len(non_system) - 20 - 1, -1, -1):
-                        if non_system[i].get("role") == "assistant" and non_system[i].get("tool_calls"):
-                            kept = non_system[i:]
-                            if len(kept) > 24:
-                                kept = kept[-22:]
-                            break
-                messages = system_msgs + kept
-
-            # Call LLM with tools
-            # Wave-6: caller_tag groups these LLM calls under "GoalDrivenPlanner"
-            # in the by_caller token view.
-            try:
-                response_msg = await self.llm_client.chat_with_tools(
-                    messages,
-                    tools=self.tool_schemas,
-                    temperature=0.3 if self._current_effort == ReasoningEffort.LOW
-                    else 0.7 if self._current_effort == ReasoningEffort.HIGH
-                    else config_module.REACT_TEMPERATURE,
-                    caller_tag="GoalDrivenPlanner",
-                )
-            except Exception as exc:
-                logger.error("[GoalDrivenPlanner] LLM call failed: %s", exc)
-                return StepResult(
-                    step_id=step_id,
-                    success=False,
-                    output=f"LLM call failed: {exc}",
-                    tool_calls_log=tool_calls_log,
-                )
-
-            # Record assistant response
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": response_msg.content or "",
-            }
-            if response_msg.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in response_msg.tool_calls
-                ]
-            messages.append(assistant_msg)
-
-            # No tool calls = TODO is done
-            if not response_msg.tool_calls:
-                return StepResult(
-                    step_id=step_id,
-                    success=True,
-                    output=response_msg.content or "TODO completed.",
-                    tool_calls_log=tool_calls_log,
-                )
-
-            # Batch 4.1 DRY: shared execute_tool_calls replaces inline block.
-            tool_messages = await execute_tool_calls(
-                response_msg.tool_calls,
-                self.tools,
-                self.tool_router,
-                node_id=step_id,
-                agent_name=self.name,
-                truncation_limit=config_module.TOOL_RESULT_TRUNCATION_LIMIT,
-                tool_calls_log=tool_calls_log,
-                log_prefix="GoalDrivenPlanner",
-                policy=ToolExecutionPolicy.for_effort(self._current_effort),
-            )
-            messages.extend(tool_messages)
-
-        # Max iterations reached
-        logger.warning("[GoalDrivenPlanner] Hit max iterations (%d) for TODO %s", self.max_iterations, step_id)
-        return StepResult(
-            step_id=step_id,
-            success=False,
-            output=f"TODO did not complete within {self.max_iterations} iterations.",
-            tool_calls_log=tool_calls_log,
+        effort_value = getattr(self._current_effort, "value", self._current_effort)
+        return await self.action_executor.execute_legacy(
+            Action(
+                id=step_id,
+                description=prompt,
+                success_criteria=goal_doc.success_criteria,
+            ),
+            context=dep_context,
+            effort=Effort(effort_value),
         )
 
     # ------------------------------------------------------------------
@@ -929,7 +843,7 @@ class GoalDrivenPlannerAgent(BaseAgent):
 
         # Add new TODOs (using add_todo to preserve cycle detection)
         for new_todo_data in data.get("new_todos", []):
-            if len(todo_list.todos) >= config_module.MAX_TODO_ITEMS:
+            if len(todo_list.todos) >= self.max_todo_items:
                 break
             deps = new_todo_data.get("dependencies", [])
             valid_deps = [d for d in deps if d in todo_list.todos]

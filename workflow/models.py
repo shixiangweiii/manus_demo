@@ -1,6 +1,6 @@
 """
-Workflow models (v18.1) - Declarative deterministic tool-workflow specs.
-工作流模型（v18.1）—— 声明式确定性工具工作流定义。
+Workflow models - Declarative deterministic tool-workflow specs.
+工作流模型——声明式确定性工具工作流定义。
 
 A WorkflowSpec is a DAG of tool steps executed deterministically WITHOUT any
 per-step LLM reasoning — this is the "workflow" half of the explicit
@@ -37,6 +37,7 @@ class WorkflowResult(BaseModel):
     """Outcome of a workflow run. / 工作流执行结果。"""
     success: bool = False
     step_results: dict[str, str] = Field(default_factory=dict)
+    step_parameters: dict[str, dict[str, Any]] = Field(default_factory=dict)
     final_output: str = ""
     failed_step: str = ""
     error: str = ""

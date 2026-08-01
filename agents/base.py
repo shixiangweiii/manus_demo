@@ -92,7 +92,7 @@ class BaseAgent:
         将 user_input 连同完整对话上下文发送给 LLM，返回文本响应。
         若消息总量超过 Token 上限，自动触发上下文压缩。
 
-        Wave-6: caller_tag defaults to self.name (e.g. "PlannerAgent",
+        caller_tag defaults to self.name (e.g. "PlannerAgent",
         "Reflector", "SubAgent-1"). Callers may override by passing caller_tag
         explicitly in kwargs.
         """
@@ -115,7 +115,7 @@ class BaseAgent:
         发送 user_input，要求 LLM 返回 JSON 格式的响应。
         用于 Planner 生成结构化计划、Reflector 生成评估结果等场景。
 
-        Wave-6: caller_tag defaults to self.name; override via kwargs.
+        caller_tag defaults to self.name; override via kwargs.
         """
         self.add_message("user", user_input)
 
@@ -142,7 +142,7 @@ class BaseAgent:
         调用方需自行检查 response.tool_calls 来决定后续执行哪个工具。
         这是 ReAct 循环的核心：LLM 选择并调用工具。
 
-        Wave-6: caller_tag defaults to self.name; override via kwargs.
+        caller_tag defaults to self.name; override via kwargs.
         """
         self.add_message("user", user_input)
 

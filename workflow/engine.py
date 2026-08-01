@@ -1,14 +1,4 @@
-"""
-WorkflowEngine (v18.1) - Deterministic tool-workflow executor (no per-step LLM).
-工作流引擎（v18.1）—— 确定性工具工作流执行器（每步无 LLM 推理）。
-
-This is the deterministic engine of the explicit dual-engine architecture:
-  - OrchestratorAgent.run(task)          → autonomous agentic loop (LLM-driven)
-  - WorkflowEngine.execute(spec)         → deterministic tool DAG (this module)
-
-确定性双引擎中的"确定性"一侧：拓扑序执行工具步骤，支持 ${step_id} 参数模板，
-工具失败即 fail-fast，全程不调用 LLM。
-"""
+"""Deterministic tool-workflow implementation with no per-step LLM call."""
 
 from __future__ import annotations
 
@@ -16,8 +6,8 @@ import logging
 import re
 from typing import Any, Callable
 
-import config
 from tools.base import BaseTool
+from react.tool_call_helpers import classify_result
 from workflow.models import WorkflowResult, WorkflowSpec, WorkflowStep
 
 logger = logging.getLogger(__name__)
@@ -36,12 +26,14 @@ class WorkflowEngine:
         self,
         tools: dict[str, BaseTool] | list[BaseTool],
         on_event: Callable[[str, Any], None] | None = None,
+        guardrail: Any | None = None,
     ):
         if isinstance(tools, dict):
             self.tools = tools
         else:
             self.tools = {t.name: t for t in tools}
         self._on_event = on_event or (lambda *_: None)
+        self._guardrail = guardrail
 
     def _emit(self, event: str, data: Any = None) -> None:
         try:
@@ -66,80 +58,103 @@ class WorkflowEngine:
             self._emit("workflow_failed", {"name": spec.name, "error": str(exc)})
             return result
 
-        # v19: resolve the guardrail once (None when GUARDRAILS_ENABLED is off →
-        # zero overhead; reads live config so eval variants are honored). Workflow
-        # steps are now gated by tool-input/output guardrails, same as ReAct loops.
-        # v19：解析护栏一次（关闭时 None，零开销）。确定性 workflow 步骤现与 ReAct
-        # 路径一样受 tool-input/output 护栏保护。
-        guardrail = None
+        guardrail = self._guardrail
         _GAction = None
-        if config.GUARDRAILS_ENABLED:
+        if guardrail is not None:
             try:
-                from guardrails.engine import current_guardrail
                 from guardrails.models import GuardrailAction as _GAction
-                guardrail = current_guardrail()
-            except Exception:
-                logger.debug("[WorkflowEngine] guardrail resolution failed; continuing without", exc_info=True)
-                guardrail = None
+            except Exception as exc:
+                raise RuntimeError("Guardrail is configured but unavailable") from exc
 
         step_results: dict[str, str] = {}
         last_output = ""
         for step in order:
             self._emit("workflow_step_start", {"id": step.id, "tool": step.tool})
+            call_id = f"workflow:{step.id}"
+            self._emit(
+                "tool_started",
+                {
+                    "tool": step.tool,
+                    "parameters": BaseTool._sanitize_params(step.params),
+                    "action_id": step.id,
+                    "call_id": call_id,
+                },
+            )
 
             tool = self.tools.get(step.tool)
             if tool is None:
-                msg = f"Unknown tool '{step.tool}' in step '{step.id}'"
+                msg = f"Error: unknown tool '{step.tool}' in step '{step.id}'"
                 logger.warning("[WorkflowEngine] %s", msg)
+                step_results[step.id] = msg
+                result.step_parameters[step.id] = BaseTool._sanitize_params(step.params)
                 result.failed_step = step.id
                 result.error = msg
                 result.step_results = step_results
+                self._emit("tool_completed", {
+                    "tool": step.tool, "success": False, "result": msg,
+                    "action_id": step.id, "call_id": call_id,
+                })
                 self._emit("workflow_step_failed", {"id": step.id, "error": msg})
                 self._emit("workflow_failed", {"name": spec.name, "error": msg})
                 return result
 
             try:
                 resolved = self._resolve_params(step.params, step_results)
-                # v19.1: tool-input guardrail — block dangerous params / write-op
+                result.step_parameters[step.id] = BaseTool._sanitize_params(resolved)
+                # Tool-input guardrail: block dangerous parameters and gated writes
                 # gating BEFORE execution (CONFIRM resolved internally → ALLOW/BLOCK).
                 if guardrail is not None:
                     try:
                         decision = await guardrail.check_tool_input(step.tool, resolved)
-                    except Exception:
-                        logger.debug("[WorkflowEngine] tool-input guardrail error (allowing)", exc_info=True)
-                        decision = None
+                    except Exception as exc:
+                        raise RuntimeError(f"guardrail input check failed: {exc}") from exc
                     if decision is not None and decision.action == _GAction.BLOCK:
                         msg = f"Error: [GUARDRAIL BLOCKED] {decision.reason}"
                         logger.warning("[WorkflowEngine] step '%s' blocked: %s", step.id, decision.reason)
                         result.failed_step = step.id
                         result.error = msg
+                        step_results[step.id] = msg
                         result.step_results = step_results
+                        self._emit("tool_completed", {
+                            "tool": step.tool, "success": False, "result": msg,
+                            "action_id": step.id, "call_id": call_id,
+                        })
                         self._emit("workflow_step_failed", {"id": step.id, "error": msg})
                         self._emit("workflow_failed", {"name": spec.name, "error": msg})
                         return result
                 output = await tool.traced_execute(**resolved)
             except Exception as exc:  # tool raised
-                msg = f"Tool '{step.tool}' raised: {exc}"
+                msg = f"Error: tool '{step.tool}' raised: {exc}"
                 logger.error("[WorkflowEngine] step '%s' %s", step.id, msg, exc_info=True)
                 result.failed_step = step.id
                 result.error = msg
+                step_results[step.id] = msg
                 result.step_results = step_results
+                self._emit("tool_completed", {
+                    "tool": step.tool, "success": False, "result": msg,
+                    "action_id": step.id, "call_id": call_id,
+                })
                 self._emit("workflow_step_failed", {"id": step.id, "error": msg})
                 self._emit("workflow_failed", {"name": spec.name, "error": msg})
                 return result
 
             step_results[step.id] = output
             # fail-fast on Error:-prefixed tool result (BaseTool error convention)
-            if isinstance(output, str) and output.startswith("Error:"):
+            is_error, _ = classify_result(output)
+            if is_error:
                 logger.warning("[WorkflowEngine] step '%s' returned error: %s", step.id, output[:200])
                 result.failed_step = step.id
                 result.error = output
                 result.step_results = step_results
+                self._emit("tool_completed", {
+                    "tool": step.tool, "success": False, "result": output[:1000],
+                    "action_id": step.id, "call_id": call_id,
+                })
                 self._emit("workflow_step_failed", {"id": step.id, "error": output[:300]})
                 self._emit("workflow_failed", {"name": spec.name, "error": output[:300]})
                 return result
 
-            # v19.2: tool-output guardrail — neutralize injection in untrusted output
+            # Tool-output guardrail: neutralize injection in untrusted output
             # BEFORE it flows into downstream ${step_id} templating / final output.
             if guardrail is not None:
                 try:
@@ -147,14 +162,30 @@ class WorkflowEngine:
                     if scan.transformed_text is not None:
                         output = scan.transformed_text
                         step_results[step.id] = output
-                except Exception:
-                    logger.debug("[WorkflowEngine] tool-output guardrail error (passthrough)", exc_info=True)
+                except Exception as exc:
+                    msg = f"Error: guardrail output check failed: {exc}"
+                    result.failed_step = step.id
+                    result.error = msg
+                    step_results[step.id] = msg
+                    result.step_results = step_results
+                    self._emit("tool_completed", {
+                        "tool": step.tool, "success": False, "result": msg,
+                        "action_id": step.id, "call_id": call_id,
+                    })
+                    self._emit("workflow_step_failed", {"id": step.id, "error": msg})
+                    self._emit("workflow_failed", {"name": spec.name, "error": msg})
+                    return result
 
             last_output = output
+            self._emit("tool_completed", {
+                "tool": step.tool, "success": True, "result": str(output)[:1000],
+                "action_id": step.id, "call_id": call_id,
+            })
             self._emit("workflow_step_complete", {"id": step.id, "output_preview": str(output)[:200]})
 
-        # Final output: explicit final_step if set & present, else last step output
-        if spec.final_step and spec.final_step in step_results:
+        # The specification was validated before execution, so an explicit
+        # final step is guaranteed to exist.
+        if spec.final_step:
             final_output = step_results[spec.final_step]
         else:
             final_output = last_output
@@ -170,27 +201,48 @@ class WorkflowEngine:
     # ------------------------------------------------------------------
 
     def _resolve_params(self, params: dict[str, Any], step_results: dict[str, str]) -> dict[str, Any]:
-        """Substitute ${step_id} in string param values with prior step outputs.
-        把字符串参数值里的 ${step_id} 替换为前序步骤输出；非字符串原样保留。"""
-        resolved: dict[str, Any] = {}
-        for key, value in params.items():
-            if isinstance(value, str):
-                resolved[key] = _TEMPLATE_RE.sub(
-                    lambda m: step_results.get(m.group(1), m.group(0)), value
-                )
-            else:
-                resolved[key] = value
-        return resolved
+        """Recursively resolve templates and reject unavailable step results."""
+
+        def resolve(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: resolve(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [resolve(item) for item in value]
+            if not isinstance(value, str):
+                return value
+
+            missing = [
+                match.group(1)
+                for match in _TEMPLATE_RE.finditer(value)
+                if match.group(1) not in step_results
+            ]
+            if missing:
+                names = ", ".join(sorted(set(missing)))
+                raise ValueError(f"unresolved workflow result(s): {names}")
+            return _TEMPLATE_RE.sub(
+                lambda match: step_results[match.group(1)],
+                value,
+            )
+
+        return resolve(params)
 
     @staticmethod
     def _topo_order(spec: WorkflowSpec) -> list[WorkflowStep]:
         """Kahn topological sort over depends_on; raises ValueError on missing dep / cycle.
         基于 depends_on 的 Kahn 拓扑排序；缺失依赖或存在环时抛 ValueError。"""
+        if not spec.steps:
+            raise ValueError("Workflow must contain at least one step")
+
         by_id: dict[str, WorkflowStep] = {}
         for s in spec.steps:
+            if not s.id.strip():
+                raise ValueError("Workflow step id must not be empty")
             if s.id in by_id:
                 raise ValueError(f"Duplicate step id '{s.id}'")
             by_id[s.id] = s
+
+        if spec.final_step and spec.final_step not in by_id:
+            raise ValueError(f"Workflow final_step '{spec.final_step}' does not exist")
 
         # validate deps exist
         indegree: dict[str, int] = {s.id: 0 for s in spec.steps}
@@ -201,6 +253,35 @@ class WorkflowEngine:
                     raise ValueError(f"Step '{s.id}' depends on unknown step '{dep}'")
                 adjacency[dep].append(s.id)
                 indegree[s.id] += 1
+
+        def template_refs(value: Any) -> set[str]:
+            if isinstance(value, dict):
+                return set().union(*(template_refs(item) for item in value.values()))
+            if isinstance(value, list):
+                return set().union(*(template_refs(item) for item in value))
+            if isinstance(value, str):
+                return {match.group(1) for match in _TEMPLATE_RE.finditer(value)}
+            return set()
+
+        def depends_transitively(step_id: str, target: str, seen: set[str]) -> bool:
+            if step_id in seen:
+                return False
+            seen.add(step_id)
+            direct = by_id[step_id].depends_on
+            return target in direct or any(
+                depends_transitively(dep, target, seen) for dep in direct
+            )
+
+        for step in spec.steps:
+            for ref in template_refs(step.params):
+                if ref not in by_id:
+                    raise ValueError(
+                        f"Step '{step.id}' references unknown result '{ref}'"
+                    )
+                if not depends_transitively(step.id, ref, set()):
+                    raise ValueError(
+                        f"Step '{step.id}' must depend on referenced result '{ref}'"
+                    )
 
         # Kahn — preserve declaration order among ready nodes for determinism
         ready = [s.id for s in spec.steps if indegree[s.id] == 0]

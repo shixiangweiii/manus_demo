@@ -6,8 +6,8 @@ from datetime import datetime
 
 import config
 
-# SubAgent tool usage guidance (appended to system prompts when SUBAGENT_ENABLED=true)
-# 子智能体工具使用引导（SUBAGENT_ENABLED=true 时追加到系统提示词）
+# Subagent guidance is controlled by the current runtime capability settings.
+# 子智能体引导由当前运行时的 capability 配置控制。
 _SUBAGENT_GUIDANCE = """
 
 ## Tool Selection: When to Use the "subagent" Tool
@@ -26,21 +26,32 @@ DO NOT use the "subagent" tool for:
 When in doubt, use basic tools directly. The subagent tool trades context visibility for isolation.
 """
 
+_SUBAGENT_RUNTIME_OVERRIDE: bool | None = None
+
+
+def set_subagent_runtime_enabled(enabled: bool | None) -> None:
+    global _SUBAGENT_RUNTIME_OVERRIDE
+    _SUBAGENT_RUNTIME_OVERRIDE = enabled
+
 
 def get_subagent_guidance() -> str:
-    """Return subagent guidance string if enabled, empty string otherwise.
-    SUBAGENT_ENABLED=true 时返回引导文本，否则返回空字符串。"""
-    if config.SUBAGENT_ENABLED:
+    """Return subagent guidance when the current runtime enables it."""
+    enabled = (
+        _SUBAGENT_RUNTIME_OVERRIDE
+        if _SUBAGENT_RUNTIME_OVERRIDE is not None
+        else config.SUBAGENT_ENABLED
+    )
+    if enabled:
         return _SUBAGENT_GUIDANCE
     return ""
 
 
-# Emergent parallel dispatch guidance (emergent path only; appended to its base
-# prompt when EMERGENT_PARALLEL_TODOS=true AND SUBAGENT_ENABLED=true). Unlike the
+# TODO parallel dispatch guidance is appended only when both TODO parallelism
+# and subagents are enabled. Unlike the
 # generic _SUBAGENT_GUIDANCE (which ends with "when in doubt, use basic tools"),
 # this actively encourages keeping independent subjects as separate dependency-free
 # TODOs so the scheduler can fan them out to isolated sub-agents in parallel.
-# 隐式规划并行派发引导（仅 emergent 路径，EMERGENT_PARALLEL_TODOS + SUBAGENT_ENABLED 时注入）。
+# TODO 并行派发引导由运行时 capability 配置注入。
 _EMERGENT_PARALLEL_GUIDANCE = """
 
 ## Parallel Execution of Independent TODOs
@@ -60,10 +71,15 @@ fully-specified unit of work.
 """
 
 
-def get_emergent_parallel_guidance() -> str:
+def get_emergent_parallel_guidance(
+    parallel_todos: bool | None = None,
+    subagent_enabled: bool | None = None,
+) -> str:
     """Return emergent parallel-dispatch guidance, or empty string when disabled.
     EMERGENT_PARALLEL_TODOS 且 SUBAGENT_ENABLED 同时为 true 时返回引导，否则空串。"""
-    if config.EMERGENT_PARALLEL_TODOS and config.SUBAGENT_ENABLED:
+    parallel = config.EMERGENT_PARALLEL_TODOS if parallel_todos is None else parallel_todos
+    subagent = config.SUBAGENT_ENABLED if subagent_enabled is None else subagent_enabled
+    if parallel and subagent:
         return _EMERGENT_PARALLEL_GUIDANCE
     return ""
 
@@ -127,7 +143,7 @@ def get_search_guidance() -> str:
 # HITL tool usage guidance (injected when HITL is active)
 # 人机交互工具使用引导（HITL 激活时追加到系统提示词）
 #
-# Activation gating uses a runtime override (set by OrchestratorAgent based on
+# Activation gating uses a runtime override based on
 # interactive mode) with fallback to config.HITL_ENABLED. This avoids injecting
 # the guidance in non-interactive single-task mode where ask_user would only
 # return Error: anyway — preventing wasted LLM calls on a tool the LLM cannot
@@ -140,10 +156,10 @@ _HITL_RUNTIME_OVERRIDE: bool | None = None
 def set_hitl_runtime_enabled(enabled: bool | None) -> None:
     """Runtime override for HITL guidance injection.
 
-    Set by OrchestratorAgent.__init__ based on interactive mode + config.
+    Set by the runtime based on interactive mode and structured settings.
     Pass None (or never call) to fall back to config.HITL_ENABLED.
 
-    OrchestratorAgent 在 __init__ 中根据 interactive 模式 + config 设置此开关。
+    由运行时根据 interactive 模式与结构化配置设置此开关。
     None 表示回退到 config.HITL_ENABLED。"""
     global _HITL_RUNTIME_OVERRIDE
     _HITL_RUNTIME_OVERRIDE = enabled
@@ -211,28 +227,37 @@ def get_hitl_unavailable_guidance() -> str:
     return ""
 
 
-# v20 Skill activation guidance (injected when SKILLS_ENABLED=true AND skills exist)
-# v20 技能激活引导（SKILLS_ENABLED=true 且存在技能时追加到系统提示词）
+# Skill activation guidance (injected when skills are enabled and discovered)
+# 技能激活引导（技能启用且已发现时追加到系统提示词）
 #
 # Uses the same module-level variable pattern as HITL's _HITL_RUNTIME_OVERRIDE:
-# OrchestratorAgent calls set_skill_descriptions() after discovery, and
+# The runtime calls set_skill_descriptions() after discovery, and
 # get_skill_guidance() reads it at system prompt build time. This avoids
-# changing ExecutorAgent/EmergentPlannerAgent constructor signatures.
+# changing planner constructor signatures.
 # 使用与 HITL _HITL_RUNTIME_OVERRIDE 相同的模块级变量模式：
-# OrchestratorAgent 在发现技能后调用 set_skill_descriptions()，
+# 运行时在发现技能后调用 set_skill_descriptions()，
 # get_skill_guidance() 在系统提示词构建时读取。避免修改各 Agent 构造函数签名。
 _SKILL_DESCRIPTIONS: str = ""
+_SKILLS_RUNTIME_ENABLED: bool | None = None
+_SKILLS_RUNTIME_MAX_ACTIVATIONS: int | None = None
 
 
-def set_skill_descriptions(descriptions: str) -> None:
+def set_skill_descriptions(
+    descriptions: str,
+    *,
+    enabled: bool | None = None,
+    max_activations: int | None = None,
+) -> None:
     """Set the formatted skill descriptions for guidance injection.
     设置格式化的技能描述供引导注入。
 
-    Called by OrchestratorAgent.__init__ after SkillLoader.discover() completes.
+    Called by the runtime after SkillLoader.discover() completes.
     Only when SKILLS_ENABLED=true; otherwise should not be called.
     """
-    global _SKILL_DESCRIPTIONS
+    global _SKILL_DESCRIPTIONS, _SKILLS_RUNTIME_ENABLED, _SKILLS_RUNTIME_MAX_ACTIVATIONS
     _SKILL_DESCRIPTIONS = descriptions
+    _SKILLS_RUNTIME_ENABLED = enabled
+    _SKILLS_RUNTIME_MAX_ACTIVATIONS = max_activations
 
 
 _SKILL_GUIDANCE_TEMPLATE = """
@@ -269,12 +294,21 @@ def get_skill_guidance() -> str:
     This prevents injecting the guidance when no skills are available,
     which would confuse the LLM into trying to activate non-existent skills.
     """
-    if not config.SKILLS_ENABLED:
+    enabled = (
+        _SKILLS_RUNTIME_ENABLED
+        if _SKILLS_RUNTIME_ENABLED is not None
+        else config.SKILLS_ENABLED
+    )
+    if not enabled:
         return ""
     if not _SKILL_DESCRIPTIONS:
         return ""
     return _SKILL_GUIDANCE_TEMPLATE.format(
-        max_activations=config.SKILLS_MAX_ACTIVATIONS_PER_TASK
+        max_activations=(
+            _SKILLS_RUNTIME_MAX_ACTIVATIONS
+            if _SKILLS_RUNTIME_MAX_ACTIVATIONS is not None
+            else config.SKILLS_MAX_ACTIVATIONS_PER_TASK
+        )
     )
 
 
@@ -298,7 +332,7 @@ def build_context_injection() -> str:
         "\n\n## Current Context (auto-injected, treat as ground truth)\n"
         f"- Today's date: {now.strftime('%Y-%m-%d')} ({weekday_en} / {weekday_zh})\n"
         f"- Current time: {now.strftime('%H:%M')} (local timezone)\n"
-        f"- Python command for shell/pytest commands: `{config.PYTHON_COMMAND}`. "
+        f"- Python command for shell tasks: `{config.PYTHON_COMMAND}`. "
         "Use this command instead of bare `python` when invoking Python from shell.\n"
         "Use these values directly when composing search queries or reasoning "
         "about \"today\" / \"tomorrow\" / \"yesterday\". Do NOT ask tools for the "
@@ -383,7 +417,7 @@ def build_convergence_hint(tool_call_counts: dict[str, int]) -> str:
 
     search_count = tool_call_counts.get("web_search", 0)
     if search_count >= threshold:
-        if search_count >= threshold * config.CONVERGENCE_ESCALATION_MULTIPLIER:
+        if search_count >= threshold * 2:
             hint_parts.append(
                 f"\n\nCRITICAL: You have called web_search {search_count} times. "
                 "Either use fetch_url to access specific pages from results, "

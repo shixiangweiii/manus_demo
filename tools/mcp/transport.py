@@ -43,7 +43,7 @@ async def open_transport(
     elif config.transport == "streamable_http":
         from mcp.client.streamable_http import streamablehttp_client
 
-        # Fix-18: Cap inner timeout to prevent runaway waits; outer asyncio.wait_for is authoritative
+        # Cap the inner timeout; the outer asyncio.wait_for is authoritative.
         inner_timeout = min(config.timeout * 4 + 30, 300)
         logger.info("[MCPTransport] Opening HTTP transport: %s", config.url)
         async with streamablehttp_client(

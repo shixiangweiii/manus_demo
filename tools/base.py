@@ -26,10 +26,10 @@ class BaseTool(ABC):
     所有具体工具（web_search、execute_python、file_ops、execute_shell 等）都继承自此类。
     """
 
-    # v18.2: tools that transfer control on success (Handoff). When True and the
+    # Tools that transfer control on success (Handoff). When True and the
     # tool succeeds, ReActEngine ends the loop and uses the tool's output as the
     # final answer. Default False — normal tools never transfer control.
-    # v18.2：标记"控制权转移"类工具（Handoff）。为 True 且成功时，ReActEngine
+    # 标记“控制权转移”类工具（Handoff）。为 True 且成功时，ReActEngine
     # 终止循环并以该工具输出作为最终答案。默认 False，普通工具不转移控制权。
     is_handoff: bool = False
 
@@ -65,81 +65,8 @@ class BaseTool(ABC):
         """
 
     async def traced_execute(self, **kwargs: Any) -> str:
-        """
-        Execute the tool with tracing instrumentation (v7).
-        带追踪埋点的工具执行方法（v7 新增）。
-
-        This is the preferred entry point when tracing is enabled.
-        When TRACING_ENABLED=false, delegates directly to execute() with zero overhead.
-
-        Callers (ExecutorAgent, ReActEngine) should call traced_execute()
-        instead of execute() to get automatic tracing.
-
-        当 TRACING_ENABLED=true 时，创建 tool.execute.{name} Span 包装执行。
-        当 TRACING_ENABLED=false 时，直接委托给 execute()，零开销。
-        """
-        import config as _config
-        if not _config.TRACING_ENABLED:
-            return await self.execute(**kwargs)
-
-        # Tracing-enabled path
-        import time
-        try:
-            from opentelemetry import trace
-            from opentelemetry.trace import StatusCode
-
-            tracer = trace.get_tracer("manus_demo.tool")
-            span_name = f"tool.execute.{self.name}"
-
-            with tracer.start_as_current_span(span_name) as span:
-                start = time.perf_counter()
-                span.set_attribute("tool.name", self.name)
-
-                # Record parameters (sanitized and truncated)
-                import json
-                if kwargs:
-                    try:
-                        sanitized = self._sanitize_params(kwargs)
-                        params_str = json.dumps(sanitized, ensure_ascii=False, default=str)
-                        max_len = _config.TRACING_MAX_ATTRIBUTE_LENGTH
-                        if len(params_str) > max_len:
-                            params_str = params_str[:max_len] + "...[truncated]"
-                        span.set_attribute("tool.parameters", params_str)
-                    except (TypeError, ValueError):
-                        span.set_attribute("tool.parameters", str(kwargs)[:500])
-
-                try:
-                    result = await self.execute(**kwargs)
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    span.set_attribute("latency_ms", round(elapsed_ms, 2))
-
-                    # Detect Error:-prefixed string returns (tools that swallow
-                    # exceptions and return error strings). Reflect failure in
-                    # the span so dashboards/traces are not misled.
-                    is_error_str = isinstance(result, str) and result.startswith("Error:")
-
-                    if isinstance(result, str):
-                        span.set_attribute("tool.result_size", len(result))
-
-                    if is_error_str:
-                        span.set_attribute("tool.success", False)
-                        span.set_attribute("tool.error", str(result)[:500])
-                        span.set_status(StatusCode.ERROR, str(result)[:200])
-                    else:
-                        span.set_attribute("tool.success", True)
-                        span.set_status(StatusCode.OK)
-                    return result
-                except Exception as exc:
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    span.set_attribute("latency_ms", round(elapsed_ms, 2))
-                    span.set_attribute("tool.success", False)
-                    span.set_attribute("tool.error", str(exc)[:500])
-                    span.set_status(StatusCode.ERROR, str(exc)[:200])
-                    span.record_exception(exc)
-                    raise
-        except ImportError:
-            # OpenTelemetry not installed, fallback to direct execution
-            return await self.execute(**kwargs)
+        """Compatibility entry point; runtime events own tracing instrumentation."""
+        return await self.execute(**kwargs)
 
     @staticmethod
     def _sanitize_params(params: dict) -> dict:

@@ -2,14 +2,14 @@
 Emergent Planner Agent - Claude Code-style implicit planning via while(tool_use) loop.
 Emergent Planner 智能体 —— 通过 while(tool_use) 主循环实现隐式涌现规划。
 
-Unlike the explicit DAG planner (v2) that generates a complete plan upfront,
+Unlike a dependency-graph planner that generates a complete plan upfront,
 this agent follows Claude Code's philosophy:
   - No independent planning phase
   - Planning emerges naturally through TODO list management
   - Single flat message history (all tool calls and results in one context)
   - Dynamic TODO creation, update, and completion during execution
 
-与 v2 显式 DAG 规划器（预先完整规划）不同，
+与预先生成完整依赖图的规划器不同，
 该智能体遵循 Claude Code 的设计哲学：
   - 无独立规划阶段
   - 规划通过 TODO 列表管理自然涌现
@@ -27,9 +27,6 @@ Core loop:
      - Stagnation detection: break if no TODOs complete for 3+ rounds
   3. Compile final answer from completed TODO results
 
-v6.0: Optional ReActEngine integration via Feature Flag.
-      Set ENABLE_REACT_ENGINE_V2=true to use the unified engine.
-      Default: false (backward compatible).
 """
 
 from __future__ import annotations
@@ -39,11 +36,11 @@ import logging
 import time
 from typing import Any, Callable
 
-import config as config_module
 from agents.base import BaseAgent
 from context.manager import ContextManager
 from llm.client import LLMClient
-from schema import ReasoningEffort, StepResult, TodoItem, TodoList, TodoStatus, ToolCallRecord
+from engines.todo_models import TodoItem, TodoList, TodoStatus
+from execution.models import ReasoningEffort, StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -52,7 +49,6 @@ from agents.prompt_utils import (
     build_convergence_hint,
     get_emergent_parallel_guidance,
 )
-from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
 from react.tool_call_helpers import attribute_caller, classify_result
 
 logger = logging.getLogger(__name__)
@@ -76,7 +72,7 @@ list. You can suggest new TODOs, modifications, or mark items as blocked
 through your responses. Focus on executing each TODO with the tools available.
 """
 
-# Wave-2: prompt built per-instance in __init__ (see ExecutorAgent for rationale).
+# Build the prompt per instance so runtime guidance stays current.
 
 
 class EmergentPlannerAgent(BaseAgent):
@@ -105,45 +101,55 @@ class EmergentPlannerAgent(BaseAgent):
         max_outer_iterations: int | None = None,
         context_manager: ContextManager | None = None,
         tool_router: ToolRouter | None = None,
-        use_react_engine: bool | None = None,
+        action_executor: Any | None = None,
         on_event: Callable[[str, Any], None] | None = None,
+        max_retries: int = 3,
+        max_todo_items: int = 20,
+        node_timeout: int = 300,
+        parallel_todos: bool = False,
+        subagent_enabled: bool = False,
     ):
-        # Wave-2: build prompt per-instance, fresh date + HITL gating respected.
+        # Build the prompt per instance so date and interaction guidance are current.
         # Append emergent parallel-dispatch guidance to the base prompt (no-op
         # unless EMERGENT_PARALLEL_TODOS + SUBAGENT_ENABLED) so independent
         # subjects stay as dependency-free TODOs the scheduler can fan out.
         super().__init__(
             name="EmergentPlanner",
             system_prompt=build_system_prompt(
-                _EMERGENT_BASE_PROMPT + get_emergent_parallel_guidance()
+                _EMERGENT_BASE_PROMPT
+                + get_emergent_parallel_guidance(parallel_todos, subagent_enabled)
             ),
             llm_client=llm_client,
             context_manager=context_manager,
         )
         self.tools = {t.name: t for t in tools}
         self.tool_schemas = [t.to_openai_tool() for t in tools]
-        self.max_iterations = max_iterations or config_module.MAX_REACT_ITERATIONS
-        self.max_outer_iterations = max_outer_iterations or config_module.MAX_EMERGENT_OUTER_ITERATIONS
+        self.max_iterations = max_iterations or 10
+        self.max_outer_iterations = max_outer_iterations or 60
+        self.max_retries = max_retries
+        self.max_todo_items = max_todo_items
+        self.node_timeout = node_timeout
+        self.parallel_todos = parallel_todos
+        self.subagent_enabled = subagent_enabled
         self.tool_router = tool_router or ToolRouter(available_tools=list(self.tools.keys()))
         self._on_event = on_event or (lambda *_: None)
         self._todo_list: TodoList | None = None
+        self.last_results: list[StepResult] = []
         self._current_effort: ReasoningEffort = ReasoningEffort.MEDIUM
 
-        use_engine = use_react_engine if use_react_engine is not None else config_module.ENABLE_REACT_ENGINE_V2
-        self._react_engine = None
-        if use_engine:
-            from react.engine import ReActEngine
-            self._react_engine = ReActEngine(
+        if action_executor is None:
+            from core.events import EventBus
+            from core.settings import get_settings
+            from execution.react import ReactActionExecutor
+
+            action_executor = ReactActionExecutor(
                 llm_client=llm_client,
-                tools=self.tools,
-                max_iterations=self.max_iterations,
-                tool_router=self.tool_router,
+                tools=list(self.tools.values()),
+                settings=get_settings(),
+                events=EventBus(),
                 context_manager=self.context_manager,
-                agent_name="EmergentPlannerAgent",  # Wave C #7: dynamic SubAgent parent attribution
             )
-            logger.info("[EmergentPlanner] Using unified ReActEngine (v6.0)")
-        else:
-            logger.info("[EmergentPlanner] Using legacy _execute_todo implementation")
+        self.action_executor = action_executor
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -187,10 +193,11 @@ class EmergentPlannerAgent(BaseAgent):
         self._todo_list = TodoList(task=task)
         await self._init_todo_list(task, context)
 
+        self.last_results = []
         return await self._run_emergent_loop(
             task=task,
             iteration=0,
-            all_results=[],
+            all_results=self.last_results,
             prev_completed=0,
             stagnation=0,
             on_checkpoint=on_checkpoint,
@@ -207,10 +214,11 @@ class EmergentPlannerAgent(BaseAgent):
         stagnation_state: dict,
         on_checkpoint: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
-        """Resume emergent planning from a restored state (v14.5).
+        """Resume emergent planning from a restored semantic state.
         从恢复的状态继续隐式规划。"""
         self._current_effort = effort
         self._todo_list = todo_list
+        self.last_results = all_results
         prev_completed = stagnation_state.get("prev_completed", 0)
         stagnation = stagnation_state.get("stagnation_rounds", 0)
 
@@ -279,7 +287,7 @@ class EmergentPlannerAgent(BaseAgent):
             # Decide this round: a PARALLEL WAVE (fan out independent ready TODOs to
             # isolated sub-agents) vs a single serial TODO (default / fallback).
             parallel_eligible = (
-                config_module.EMERGENT_PARALLEL_TODOS
+                self.parallel_todos
                 and "subagent" in self.tools
                 and len(ready_todos) >= 2
             )
@@ -307,7 +315,7 @@ class EmergentPlannerAgent(BaseAgent):
                     self._emit("todo_complete", {"todo": todo, "result": result})
                 else:
                     todo.retry_count += 1
-                    max_retries = config_module.MAX_TODO_RETRIES
+                    max_retries = self.max_retries
                     if todo.retry_count >= max_retries:
                         logger.warning(
                             "[EmergentPlanner] TODO %d failed %d times, marking as BLOCKED: %s",
@@ -417,7 +425,7 @@ class EmergentPlannerAgent(BaseAgent):
         # dependency-free TODOs so the scheduler can fan them out to sub-agents.
         # 并行派发开启时，引导把独立主题拆成无依赖 TODO，供调度层并发委派。
         parallel_rule = ""
-        if config_module.EMERGENT_PARALLEL_TODOS and config_module.SUBAGENT_ENABLED:
+        if self.parallel_todos and self.subagent_enabled:
             parallel_rule = (
                 "5. PARALLELISM: If the task contains MULTIPLE INDEPENDENT "
                 "subjects/subtasks (e.g. researching several distinct topics), "
@@ -512,7 +520,7 @@ class EmergentPlannerAgent(BaseAgent):
         if not self._todo_list.todos:
             logger.warning("[EmergentPlanner] TODO init empty after retries; using single-TODO fallback.")
             fallback = self._todo_list.add_todo(description=f"Complete task: {task}")
-            fallback.retry_count = config_module.MAX_TODO_RETRIES - 1  # 兜底 TODO 仅重试 1 次
+            fallback.retry_count = self.max_retries - 1  # 兜底 TODO 仅重试 1 次
 
         logger.info("[EmergentPlanner] Initialized TODO list with %d items", len(self._todo_list.todos))
         self._emit("todo_list_initialized", self._get_todo_summary())
@@ -610,7 +618,7 @@ class EmergentPlannerAgent(BaseAgent):
                 if new_todos:
                     # 检查 TODO 数量限制
                     current_count = len(self._todo_list.todos)
-                    max_todos = config_module.MAX_TODO_ITEMS
+                    max_todos = self.max_todo_items
 
                     for todo_data in new_todos:
                         if current_count >= max_todos:
@@ -681,18 +689,15 @@ class EmergentPlannerAgent(BaseAgent):
         Execute a single TODO using the ReAct loop.
         使用 ReAct 循环执行单个 TODO。
 
-        This is similar in structure to ExecutorAgent's ReAct loop, but differs:
+        This is similar in structure to the standard action loop, but differs:
         (1) does NOT call self.reset() to preserve flat message history,
         (2) retry logic is handled at the TODO scheduling level.
-        这与 ExecutorAgent 的 ReAct 循环结构类似，但有以下差异：
+        这与标准动作执行循环结构类似，但有以下差异：
         (1) 不调用 self.reset()，保留扁平消息历史；
         (2) 重试逻辑在 TODO 调度层处理。
 
-        v6.0: If ENABLE_REACT_ENGINE_V2=true, delegates to unified ReActEngine.
+        Action execution is delegated to the selected ActionExecutor.
         """
-        if todo.retry_count == 0:
-            self.tool_router.reset_node(str(todo.id))
-
         separator = (
             f"--- Switching to TODO {todo.id}: {todo.description} ---\n\n"
             if todo.retry_count == 0 else ""
@@ -710,89 +715,15 @@ class EmergentPlannerAgent(BaseAgent):
 
         logger.info("[EmergentPlanner] Executing TODO %d: %s", todo.id, todo.description[:100])
         self._todo_list.mark_in_progress(todo.id)
+        from core.models import Action, Effort
 
-        if self._react_engine:
-            # KNOWN LIMITATION: ReActEngine creates a fresh messages list for each
-            # _execute_todo call, so cross-TODO context is lost. The legacy path
-            # preserves flat message history across TODOs by NOT calling self.reset().
-            # A future fix could populate the `context` parameter with prior TODO
-            # results before calling ReActEngine.execute().
-            result = await self._react_engine.execute(
-                prompt=prompt,
-                context="",
-                node_id=str(todo.id),
-                system_hint=self.system_prompt,
-                effort=self._current_effort,
-            )
-            return result
-
-        tool_calls_log: list[ToolCallRecord] = []
-        iteration = 0
-
-        while iteration < self.max_iterations:
-            iteration += 1
-
-            try:
-                continue_msg = "Continue executing the TODO based on the tool results above."
-                router_hint = self.tool_router.get_hint(str(todo.id))
-                if router_hint:
-                    continue_msg += f"\n\nIMPORTANT: {router_hint}"
-
-                # v11: Dynamic convergence guidance based on tool call frequency
-                tool_call_counts: dict[str, int] = {}
-                for tc in tool_calls_log:
-                    tool_call_counts[tc.tool_name] = tool_call_counts.get(tc.tool_name, 0) + 1
-
-                continue_msg += build_convergence_hint(tool_call_counts)
-
-                response_msg = await self.think_with_tools(
-                    prompt if iteration == 1 else continue_msg,
-                    tools=self.tool_schemas,
-                    temperature=0.3 if self._current_effort == ReasoningEffort.LOW
-                    else 0.7 if self._current_effort == ReasoningEffort.HIGH
-                    else config_module.REACT_TEMPERATURE,
-                )
-            except Exception as exc:
-                logger.error("[EmergentPlanner] LLM call failed: %s", exc)
-                return StepResult(
-                    step_id=todo.id,
-                    success=False,
-                    output=f"LLM call failed: {exc}",
-                    tool_calls_log=tool_calls_log,
-                )
-
-            if not response_msg.tool_calls:
-                final_output = response_msg.content or "TODO completed (no output)."
-                logger.info("[EmergentPlanner] TODO %d completed in %d iterations", todo.id, iteration)
-                return StepResult(
-                    step_id=todo.id,
-                    success=True,
-                    output=final_output,
-                    tool_calls_log=tool_calls_log,
-                )
-
-            # Batch 4.1 DRY: shared execute_tool_calls replaces inline block.
-            tool_messages = await execute_tool_calls(
-                response_msg.tool_calls,
-                self.tools,
-                self.tool_router,
-                node_id=str(todo.id),
-                agent_name=self.name,
-                truncation_limit=config_module.TOOL_RESULT_TRUNCATION_LIMIT,
-                tool_calls_log=tool_calls_log,
-                log_prefix="EmergentPlanner",
-                policy=ToolExecutionPolicy.for_effort(self._current_effort),
-                parse_args=self._parse_json_for_tool_args,
-            )
-            for msg in tool_messages:
-                self.add_tool_result(msg["tool_call_id"], msg["content"])
-
-        logger.warning("[EmergentPlanner] TODO %d hit max iterations (%d)", todo.id, self.max_iterations)
-        return StepResult(
-            step_id=todo.id,
-            success=False,
-            output=f"TODO did not complete within {self.max_iterations} iterations.",
-            tool_calls_log=tool_calls_log,
+        effort_value = getattr(self._current_effort, "value", self._current_effort)
+        action = Action(id=str(todo.id), description=prompt)
+        dependency_context = "\n\n".join(dep_results) if todo.dependencies else ""
+        return await self.action_executor.execute_legacy(
+            action,
+            context=dependency_context,
+            effort=Effort(effort_value),
         )
 
     async def _execute_todo_guarded(self, todo: TodoItem) -> StepResult:
@@ -801,16 +732,16 @@ class EmergentPlannerAgent(BaseAgent):
         try:
             return await asyncio.wait_for(
                 self._execute_todo(todo),
-                timeout=config_module.NODE_EXECUTION_TIMEOUT,
+                timeout=self.node_timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "[EmergentPlanner] TODO %d timed out after %ds",
-                todo.id, config_module.NODE_EXECUTION_TIMEOUT,
+                todo.id, self.node_timeout,
             )
             return StepResult(
                 step_id=todo.id, success=False,
-                output=f"TODO timed out after {config_module.NODE_EXECUTION_TIMEOUT}s",
+                output=f"TODO timed out after {self.node_timeout}s",
                 tool_calls_log=[],
             )
         except Exception as exc:
@@ -924,29 +855,46 @@ class EmergentPlannerAgent(BaseAgent):
         # attribution ourselves (no await between this and traced_execute) — keeps
         # the SubAgent's parent_agent = this planner for tracing/eval, consistent
         # with the serial path (execute_tool_calls(agent_name=self.name)) instead
-        # of the SubAgentTool constructor default "OrchestratorAgent".
+        # of the SubAgentTool constructor default.
         # 直接派发绕过了 execute_tool_calls，需自行设置归因（与 traced_execute 间无 await），
         # 让 SubAgent.parent_agent 落到本规划器，和串行路径一致。
         subagent_tool = self.tools["subagent"]
         attribute_caller(subagent_tool, self.name)
+        call_id = f"todo:{todo.id}:subagent"
+        self._emit("tool_started", {
+            "tool": "subagent",
+            "parameters": {"task_description": task_description},
+            "action_id": str(todo.id),
+            "call_id": call_id,
+        })
         try:
             summary = await asyncio.wait_for(
                 subagent_tool.traced_execute(task_description=task_description),
-                timeout=config_module.NODE_EXECUTION_TIMEOUT,
+                timeout=self.node_timeout,
             )
         except asyncio.TimeoutError:
             logger.warning(
                 "[EmergentPlanner] SubAgent for TODO %d timed out after %ds",
-                todo.id, config_module.NODE_EXECUTION_TIMEOUT,
+                todo.id, self.node_timeout,
             )
+            self._emit("tool_completed", {
+                "tool": "subagent", "success": False,
+                "result": f"Timed out after {self.node_timeout}s",
+                "action_id": str(todo.id), "call_id": call_id,
+            })
             return StepResult(
                 step_id=todo.id, success=False,
-                output=f"Sub-agent timed out after {config_module.NODE_EXECUTION_TIMEOUT}s",
+                output=f"Sub-agent timed out after {self.node_timeout}s",
                 tool_calls_log=[],
             )
 
         summary_text = str(summary)
         is_error, _ = classify_result(summary_text)
+        self._emit("tool_completed", {
+            "tool": "subagent", "success": not is_error,
+            "result": summary_text[:1000],
+            "action_id": str(todo.id), "call_id": call_id,
+        })
         if is_error:
             logger.warning(
                 "[EmergentPlanner] <- SubAgent dispatch FAILED for TODO %d: %s",

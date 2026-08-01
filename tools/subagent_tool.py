@@ -2,8 +2,7 @@
 SubAgentTool - Meta-tool that spawns SubAgents for complex subtasks.
 子智能体工具 —— 为复杂子任务派生子智能体的元工具。
 
-This tool allows any tool-using agent (ExecutorAgent, EmergentPlannerAgent,
-GoalDrivenPlannerAgent) to delegate complex subtasks to an isolated SubAgent
+This tool allows any action executor to delegate complex subtasks to an isolated SubAgent
 via the standard ReAct tool-calling interface.
 
 Anti-pattern defenses:
@@ -24,7 +23,7 @@ from typing import Any, Callable
 import config
 from context.manager import ContextManager
 from llm.client import LLMClient
-from schema import SubAgentResult, SubAgentStatus
+from agents.subagent_models import SubAgentResult, SubAgentStatus
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,12 @@ class SubAgentTool(BaseTool):
         subagent_timeout: int | None = None,
         max_calls_per_task: int | None = None,
         max_tokens_per_call: int | None = None,
-        parent_name: str = "OrchestratorAgent",  # Default; ReActEngine overrides via set_caller() per-call
+        max_concurrent: int | None = None,
+        default_tool_whitelist: str | None = None,
+        max_task_description_length: int | None = None,
+        summary_max_length: int | None = None,
+        sandbox_dir: str | None = None,
+        parent_name: str = "AgentRuntime",
     ):
         self._llm_client = llm_client
         self._available_tools = available_tools
@@ -58,12 +62,24 @@ class SubAgentTool(BaseTool):
         self._timeout = subagent_timeout or config.SUBAGENT_TIMEOUT
         self._max_calls = max_calls_per_task or config.SUBAGENT_MAX_CALLS_PER_TASK
         self._max_tokens = max_tokens_per_call or config.SUBAGENT_MAX_TOKENS_PER_CALL
+        self._default_whitelist = (
+            config.SUBAGENT_DEFAULT_TOOL_WHITELIST
+            if default_tool_whitelist is None
+            else default_tool_whitelist
+        )
+        self._max_task_description_length = (
+            config.SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH
+            if max_task_description_length is None
+            else max_task_description_length
+        )
+        self._summary_max_length = summary_max_length or config.SUBAGENT_SUMMARY_MAX_LENGTH
+        self._sandbox_dir = sandbox_dir or config.SANDBOX_DIR
         self._parent_name = parent_name
         self._subagent_counter = 0
         self._call_count = 0
-        # Wave B #5: limit concurrent SubAgent runs (was declared in config but never enforced)
-        # 实施 SUBAGENT_MAX_CONCURRENT 信号量限流（v9 配置存在但未启用）
-        self._semaphore = asyncio.Semaphore(config.SUBAGENT_MAX_CONCURRENT)
+        # Limit concurrent SubAgent runs.
+        # 限制并发 SubAgent 数量。
+        self._semaphore = asyncio.Semaphore(max_concurrent or config.SUBAGENT_MAX_CONCURRENT)
 
     @property
     def name(self) -> str:
@@ -84,7 +100,7 @@ class SubAgentTool(BaseTool):
         available_names = [n for n in self._available_tools.keys() if n != "subagent"]
         # Support configurable default whitelist
         default_hint = "all available tools"
-        default_whitelist = getattr(config, 'SUBAGENT_DEFAULT_TOOL_WHITELIST', '')
+        default_whitelist = self._default_whitelist
         if default_whitelist:
             default_hint = f"defaults to: {default_whitelist}"
         return {
@@ -113,9 +129,8 @@ class SubAgentTool(BaseTool):
         Spawn a SubAgent, run its ReAct loop, and return a structured summary.
         派生子智能体，运行其 ReAct 循环，返回结构化摘要。
         """
-        # Wave-1 N5: capture _parent_name into a local immediately, before any
-        # await. Wave-4 M4 introduced exactly such an await later in this
-        # function (`await asyncio.to_thread(os.makedirs, ...)`), so this
+        # Capture _parent_name into a local immediately, before any await.
+        # This function later calls `await asyncio.to_thread(os.makedirs, ...)`, so the
         # local snapshot is now actively load-bearing rather than purely
         # defensive: while we await on makedirs, another task on a shared
         # SubAgentTool instance could call set_caller(...) and overwrite
@@ -123,7 +138,7 @@ class SubAgentTool(BaseTool):
         # await, so the SubAgent we eventually construct is attributed to
         # the agent that actually invoked us, not to whoever happened to
         # write self._parent_name last.
-        # 立即拷贝到局部,Wave-4 引入的 makedirs await 期间不被并发 set_caller 覆盖。
+        # 立即拷贝到局部，makedirs await 期间不被并发 set_caller 覆盖。
         local_parent = self._parent_name
 
         # Anti-pattern #3/8: Call count limit
@@ -140,12 +155,12 @@ class SubAgentTool(BaseTool):
         if not task_description:
             return "Error: task_description is required for subagent tool."
 
-        # Wave-4 L2: bound task_description length so an over-eager parent LLM
+        # Bound task_description length so an over-eager parent LLM
         # cannot pass tens of thousands of characters and immediately blow up
         # the SubAgent's own context window. Truncate + log a warning rather
         # than rejecting outright — partial work is better than a hard fail.
         # 防止父 LLM 传超长任务描述把子 SubAgent 上下文撑满,直接截断 + 警告。
-        max_desc = getattr(config, "SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH", 2000)
+        max_desc = self._max_task_description_length
         if len(task_description) > max_desc:
             logger.warning(
                 "[SubAgentTool] task_description length %d exceeds limit %d; truncating",
@@ -153,7 +168,7 @@ class SubAgentTool(BaseTool):
             )
             task_description = task_description[:max_desc] + "\n\n[Description truncated due to SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH]"
 
-        # Wave B #4: reserve budget atomically BEFORE any await.
+        # Reserve budget atomically before any await.
         # In single-threaded asyncio, the (check + reserve) above is race-free
         # as long as no `await` sits between them. Failures DO NOT refund the
         # slot — repeated SubAgent crashes must not bypass the budget.
@@ -167,7 +182,7 @@ class SubAgentTool(BaseTool):
         requested_whitelist = list(tool_whitelist) if isinstance(tool_whitelist, list) else []
 
         # Validate and filter tool whitelist — always exclude blocked tools
-        # v15: also block memory_store/memory_revoke to prevent SubAgent from polluting global memory
+        # Also block memory mutation tools to protect the parent runtime's memory.
         _BLOCKED_TOOLS = ("subagent", "ask_user", "memory_store", "memory_revoke", "handoff", "remote_subagent")
         validated_whitelist = []
         for name in tool_whitelist:
@@ -180,7 +195,7 @@ class SubAgentTool(BaseTool):
 
         # If whitelist is empty, use config default or fall back to all available tools
         if not validated_whitelist:
-            default_whitelist = getattr(config, 'SUBAGENT_DEFAULT_TOOL_WHITELIST', '')
+            default_whitelist = self._default_whitelist
             if default_whitelist:
                 for name in default_whitelist.split(","):
                     name = name.strip()
@@ -215,14 +230,14 @@ class SubAgentTool(BaseTool):
         subagent_name = f"SubAgent-{local_counter}"
 
         # Create isolated sandbox directory (anti-pattern #4)
-        # Wave-4 M4: makedirs runs in a thread to avoid blocking the asyncio
+        # makedirs runs in a thread to avoid blocking the asyncio
         # event loop on slow disks (NFS / network mounts). makedirs itself is
         # microseconds on local SSDs but can be 100ms+ on hostile mounts —
         # blocking would freeze concurrent DAG nodes / SubAgents.
         # makedirs 改异步,避免慢盘上阻塞事件循环冻结其它并行 Task。
         sandbox_subdir = ""
         try:
-            sandbox_base = config.SANDBOX_DIR
+            sandbox_base = self._sandbox_dir
             sandbox_subdir = os.path.join(sandbox_base, f"subagent_{local_counter}")
             await asyncio.to_thread(os.makedirs, sandbox_subdir, exist_ok=True)
             logger.debug("[SubAgentTool] Sandbox created: %s", sandbox_subdir)
@@ -245,9 +260,10 @@ class SubAgentTool(BaseTool):
                 on_event=self._on_event,
                 parent_agent_name=local_parent,
                 sandbox_subdir=sandbox_subdir,
+                summary_max_length=self._summary_max_length,
             )
 
-            # Wave B #5: only the expensive SubAgent.run() is gated by Semaphore;
+            # Only the expensive SubAgent.run() is gated by Semaphore;
             # whitelist validation / sandbox creation above already ran in parallel.
             # 信号量只 wrap 真正昂贵的 ReAct 循环；快路径不挤占并发槽。
             async with self._semaphore:
@@ -276,7 +292,7 @@ class SubAgentTool(BaseTool):
                 return f"Error: SubAgent {result.status.value} - {summary_text}"
             return summary_text
 
-        # Wave-4 M5: removed dead `except asyncio.TimeoutError` branch — there
+        # There is intentionally no `except asyncio.TimeoutError` branch — there
         # is no `wait_for` at this layer (SubAgent.run() owns the timeout) so
         # TimeoutError can never reach here. CancelledError IS possible though
         # (parent task being cancelled mid-await), so we honor it explicitly
@@ -288,7 +304,7 @@ class SubAgentTool(BaseTool):
             raise
 
         except Exception as exc:
-            # Wave B #4: budget already reserved at top — no refund on failure.
+            # Budget is already reserved at the top; failures do not refund it.
             logger.error("[SubAgentTool] SubAgent execution failed: %s", exc, exc_info=True)
             error_summary = {
                 "accomplished": "",
@@ -320,9 +336,9 @@ class SubAgentTool(BaseTool):
         return json.dumps(data, ensure_ascii=False)
 
     def reset_task_state(self) -> None:
-        """Reset per-task state for a new task (called by OrchestratorAgent.run()).
+        """Reset state before a new runtime task.
 
-        Wave-4 M3: also clean up `subagent_*` sandbox subdirectories from the
+        Also clean up `subagent_*` sandbox subdirectories from the
         previous task. Without this, files written by SubAgent-1 in task A
         would still be visible to a freshly-numbered SubAgent-1 in task B
         (since the counter resets to 1 each task). Previous-task leftovers
@@ -342,7 +358,7 @@ class SubAgentTool(BaseTool):
 
         # M3: clean up previous task's SubAgent sandbox subdirs
         try:
-            sandbox_base = config.SANDBOX_DIR
+            sandbox_base = self._sandbox_dir
             if os.path.isdir(sandbox_base):
                 pattern = re.compile(r"^subagent_\d+$")
                 for entry in os.listdir(sandbox_base):
@@ -355,14 +371,13 @@ class SubAgentTool(BaseTool):
             logger.debug("[SubAgentTool] Sandbox cleanup encountered OSError (non-fatal)", exc_info=True)
 
     def set_caller(self, name: str) -> None:
-        """Wave C #7: ReActEngine calls this immediately before traced_execute()
+        """The action loop calls this immediately before traced_execute()
         to inject the actual caller agent's name. asyncio single-threaded model
         guarantees no other task interleaves between set_caller and the
         synchronous prologue of execute() that captures self._parent_name into
         a local variable for the SubAgent constructor.
 
-        ReActEngine 在每次工具调用前同步注入实际 caller 的名称，
-        替换硬编码的 'OrchestratorAgent'，让 tracing/eval 准确归因。
+        动作循环在每次工具调用前同步注入实际 caller 名称，让 tracing/eval 准确归因。
         """
         if name:
             self._parent_name = name

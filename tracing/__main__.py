@@ -52,7 +52,7 @@ def main() -> None:
     traces_dir = Path(args.dir).resolve()
     if not traces_dir.exists():
         print(f"[Error] Traces directory does not exist: {traces_dir}")
-        print("  Hint: Run your agent with TRACING_ENABLED=true TRACING_BACKEND=file first.")
+        print("  Hint: set tracing.enabled=true and tracing.backend='file' in settings.toml.")
         sys.exit(1)
 
     # Check for trace files
@@ -91,12 +91,12 @@ def main() -> None:
         print("  pip install uvicorn[standard]")
         sys.exit(1)
 
-    # Set traces_dir as environment variable for the server to pick up
-    import os
-    os.environ["_TRACING_VIEWER_DIR"] = str(traces_dir)
+    from tracing.server import app, configure_traces_dir
+
+    configure_traces_dir(traces_dir)
 
     uvicorn.run(
-        "tracing.server:app",
+        app,
         host=args.host,
         port=args.port,
         log_level="warning",

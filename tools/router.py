@@ -2,11 +2,11 @@
 Tool Router - Intelligent tool selection and failure-based switching.
 工具路由器 —— 智能工具选择与基于失败的自动切换。
 
-v3 feature: When a tool fails consecutively, the router suggests
+When a tool fails consecutively, the router suggests
 alternative tools to the LLM, preventing it from being stuck in a
 tool-failure loop.
 
-v3 特性：当某工具连续失败时，路由器向 LLM 建议替代工具，
+当某工具连续失败时，路由器向 LLM 建议替代工具，
 避免陷入工具失败的死循环。
 
 The router tracks per-node tool usage statistics and provides:

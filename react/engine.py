@@ -2,8 +2,7 @@
 ReAct Engine - Unified ReAct (Reasoning + Acting) execution engine.
 ReAct 引擎 —— 统一的 ReAct（推理 + 行动）执行引擎。
 
-This module extracts the common ReAct loop logic from ExecutorAgent and
-EmergentPlannerAgent into a shared, maintainable engine.
+This module provides the shared action loop used by runtime executors.
 
 Features:
   - Standardized ReAct loop implementation
@@ -20,9 +19,8 @@ Usage:
   )
   result = await engine.execute(prompt, context)
 
-Agent classes (ExecutorAgent, EmergentPlannerAgent) can switch between
-their legacy _react_loop and this engine via the ENABLE_REACT_ENGINE_V2
-config flag.
+Runtime executors select this implementation explicitly through executor
+configuration.
 """
 
 from __future__ import annotations
@@ -32,7 +30,6 @@ import json
 import logging
 from typing import Any, Callable
 
-import config
 # NOTE: `build_convergence_hint` is imported lazily inside execute() to break a
 # latent circular import: react.engine -> agents.prompt_utils -> agents/__init__.py
 # (eager) -> agents.subagent -> react.engine. The top-level import worked under
@@ -42,7 +39,7 @@ import config
 from context.manager import ContextManager
 from llm.client import LLMClient, _extract_thinking_content, _strip_thinking_from_content
 from react.engine_helpers import ToolExecutionPolicy, execute_tool_calls
-from schema import ReasoningEffort, StepResult, ToolCallRecord
+from execution.models import ReasoningEffort, StepResult, ToolCallRecord
 from tools.base import BaseTool
 from tools.router import ToolRouter
 
@@ -78,26 +75,34 @@ class ReActEngine:
         tool_router: ToolRouter | None = None,
         context_manager: ContextManager | None = None,
         agent_name: str = "",
+        guardrail: Any | None = None,
+        temperature: float = 0.5,
+        result_truncation_limit: int = 2000,
+        on_event: Callable[[str, Any], None] | None = None,
     ):
         self.llm_client = llm_client
         self.context_manager = context_manager
-        self.max_iterations = max_iterations or getattr(config, 'MAX_REACT_ITERATIONS', 10)
-        # Wave C #7: name of the agent owning this engine — propagated to tools
+        self.max_iterations = max_iterations or 10
+        self.temperature = temperature
+        self.result_truncation_limit = result_truncation_limit
+        # Name of the runtime component owning this engine — propagated to tools
         # via tool.set_caller(name) right before each traced_execute call so that
         # SubAgentTool can correctly attribute parent_agent in tracing.
         # 拥有此引擎的 Agent 名称——在每次 tool 执行前通过 set_caller 注入，
-        # 用于 SubAgentTool 准确归因 parent_agent（替换原硬编码 OrchestratorAgent）。
+        # 用于 SubAgentTool 准确归因 parent_agent。
         self.agent_name = agent_name
+        self.guardrail = guardrail
+        self._on_event = on_event
 
         if isinstance(tools, dict):
             self.tools = tools
         else:
             self.tools = {t.name: t for t in tools}
 
-        # v20.2: backup of the full tool set before any skill-based filtering.
+        # Backup of the full tool set before any skill-based filtering.
         # When a skill with allowed_tools is activated, set_allowed_tools() narrows
         # self.tools; passing None restores the full set from this backup.
-        # v20.2：完整工具集备份，用于技能过滤后的恢复。
+        # 完整工具集备份，用于技能过滤后的恢复。
         # 激活含 allowed_tools 的技能时，set_allowed_tools() 收窄 self.tools；
         # 传 None 从此备份恢复完整集合。
         self._tools_full = dict(self.tools)
@@ -107,17 +112,17 @@ class ReActEngine:
         available_tool_names = list(self.tools.keys())
         self.tool_router = tool_router or ToolRouter(available_tools=available_tool_names)
 
-        # v18.2: tools that transfer control on success (Handoff). When such a
+        # Tools that transfer control on success (Handoff). When such a
         # tool succeeds, end the loop and use its FULL output as the final answer.
         # Empty set (the default for every engine without a handoff tool) makes
         # the check below a no-op — zero behavior change for existing loops.
-        # v18.2：控制权转移类工具集合（Handoff）。成功时终止循环、以其完整输出为答案。
+        # 控制权转移类工具集合（Handoff）。成功时终止循环、以其完整输出为答案。
         # 无 handoff 工具时为空集 → 下方检查零开销，现有循环行为不变。
         self._handoff_tool_names = {
             n for n, t in self.tools.items() if getattr(t, "is_handoff", False)
         }
 
-        # Wave-3 M2: tool_calls_log lifted to a member attribute so external
+        # Keep the current tool log on the instance so external
         # observers (notably SubAgent timeout/budget paths) can read the
         # in-progress log when execute() does not return its StepResult.
         # `on_iteration` only fires at iteration boundaries — if a timeout fires
@@ -136,7 +141,7 @@ class ReActEngine:
         elif effort == ReasoningEffort.HIGH:
             return 0.7, self.max_iterations
         else:  # MEDIUM
-            return config.REACT_TEMPERATURE, self.max_iterations
+            return self.temperature, self.max_iterations
 
     def _check_handoff_transfer(
         self,
@@ -146,7 +151,7 @@ class ReActEngine:
         iteration: int,
         on_iteration: Callable[[int, list[ToolCallRecord]], None] | None,
     ) -> StepResult | None:
-        """v18.2 Handoff control transfer (shared by ReActEngine + ReasoningEngine).
+        """Handle Handoff control transfer for both action-loop variants.
 
         If a handoff tool succeeded this iteration, return a terminal StepResult
         carrying the specialist's FULL output (read from the tool instance to
@@ -156,7 +161,7 @@ class ReActEngine:
 
         Extracted so both engine loops honor #20 — fixes drift where only
         ReActEngine.execute had the inline check (ReasoningEngine bypassed it).
-        v18.2 控制权转移：抽成共享方法，避免 ReasoningEngine 漏掉 handoff 终止（#20 漂移修复）。
+        此逻辑由两个执行循环共享，避免 Thinking 路径漏掉 handoff 终止。
         """
         if not self._handoff_tool_names or not getattr(response_msg, "tool_calls", None):
             return None
@@ -207,18 +212,20 @@ class ReActEngine:
         step_id = node_id or "default"
         effective_effort = effort or ReasoningEffort.MEDIUM
         effective_temp, effective_max_iter = self._apply_effort(effective_effort)
-        effective_policy = ToolExecutionPolicy.for_effort(effective_effort)
+        effective_policy = ToolExecutionPolicy.for_effort(
+            effective_effort,
+            self.result_truncation_limit,
+        )
         # Note: callers can access self.tool_router.reset_node() to clear
         # per-node failure counts between independent executions.
 
         if context:
             prompt = f"{prompt}\n\nContext from previous steps:\n{context}"
 
-        # Wave-3 M2 (concurrency-safe): create a FRESH local list and rebind
+        # Create a fresh local list per execution and rebind
         # self._current_log to it. Do NOT reuse + clear the previous list —
         # if the same ReActEngine instance is invoked concurrently (e.g.
-        # DAG_SERIAL_EXECUTION=false where ExecutorAgent.create_for_node()
-        # shares self._react_engine across parallel nodes), clearing would
+        # parallel DAG execution), clearing would
         # wipe a list that the other in-flight execute() is still appending
         # to. New list per call isolates lifetimes. Outsiders reading
         # self._current_log see whichever execute() rebound it last; the
@@ -351,7 +358,7 @@ class ReActEngine:
                 )
 
             # Execute tool calls. Independent calls run concurrently via
-            # Batch 4.1 DRY: shared execute_tool_calls replaces inline _exec_one
+            # Shared tool-call execution keeps all ReAct paths consistent.
             # + gather + result processing loop. Same behavior, single source.
             tool_messages = await execute_tool_calls(
                 response_msg.tool_calls,
@@ -363,10 +370,12 @@ class ReActEngine:
                 tool_calls_log=tool_calls_log,
                 log_prefix="ReActEngine",
                 policy=effective_policy,
+                guardrail=self.guardrail,
+                on_event=self._on_event,
             )
             messages.extend(tool_messages)
 
-            # v18.2 Handoff control transfer (shared check; honored by both engines)
+            # Handoff control transfer shared by both action-loop variants.
             transfer = self._check_handoff_transfer(
                 response_msg, step_id, tool_calls_log, iteration, on_iteration,
             )
@@ -390,8 +399,8 @@ class ReActEngine:
         return self.tool_router.get_node_summary(str(node_id))
 
     def set_allowed_tools(self, tool_names: list[str] | None) -> None:
-        """v20.2: Apply skill-based tool filter. None restores the full set.
-        v20.2：应用基于技能的工具过滤。None 恢复完整集合。
+        """Apply a skill-based tool filter. None restores the full set.
+        应用基于技能的工具过滤。None 恢复完整集合。
 
         When tool_names is a non-empty list, restricts self.tools and
         self.tool_schemas to only those named tools that exist in the

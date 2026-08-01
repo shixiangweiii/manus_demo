@@ -2,10 +2,7 @@
 MCP Bridge Configuration — server registry and bridge settings.
 
 MCP 桥接配置 —— 服务器注册表和桥接设置。
-支持三种配置源（优先级从高到低）：
-  1. MCP_BRIDGE_SERVERS_JSON 环境变量（内联 JSON）
-  2. MCP_BRIDGE_CONFIG_PATH 指向的 JSON 文件
-  3. 零配置（无服务器）
+连接定义来自 settings.toml 中的内联 JSON 或 JSON 文件路径。
 """
 
 from __future__ import annotations
@@ -15,6 +12,8 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
+
+from core.settings import CapabilitySettings, get_settings, validate_server_entry
 
 logger = logging.getLogger(__name__)
 
@@ -66,27 +65,17 @@ def _expand_dict_env_vars(d: dict[str, str]) -> dict[str, str]:
     return {k: _expand_env_vars(v) for k, v in d.items()}
 
 
-def _parse_server_entry(name: str, raw: dict[str, Any]) -> MCPServerConfig | None:
+def _parse_server_entry(name: str, raw: dict[str, Any]) -> MCPServerConfig:
     """Parse a single server entry from JSON config.
-    从 JSON 配置解析单个服务器条目。无效条目返回 None。"""
+    从 JSON 配置解析单个服务器条目。"""
+    if not isinstance(raw, dict):
+        raise ValueError(f"MCP server '{name}' must be an object")
     try:
+        validate_server_entry(raw, f"MCP server {name!r}")
         transport = raw.get("transport", "streamable_http")
-        if transport not in ("stdio", "streamable_http"):
-            logger.warning("[MCPConfig] Server '%s': unknown transport '%s', skipping", name, transport)
-            return None
-
-        # Fix-16: Validate input types
         args = raw.get("args", [])
-        if not isinstance(args, list):
-            logger.warning("[MCPConfig] Server '%s': 'args' must be a list, skipping", name)
-            return None
-
         raw_env = raw.get("env", {})
-        if not isinstance(raw_env, dict):
-            raw_env = {}
         raw_headers = raw.get("headers", {})
-        if not isinstance(raw_headers, dict):
-            raw_headers = {}
 
         cfg = MCPServerConfig(
             name=name,
@@ -97,23 +86,12 @@ def _parse_server_entry(name: str, raw: dict[str, Any]) -> MCPServerConfig | Non
             cwd=raw.get("cwd"),
             url=raw.get("url", ""),
             headers=_expand_dict_env_vars(raw_headers),
-            timeout=max(float(raw.get("timeout", 30)), 1.0),
+            timeout=float(raw.get("timeout", 30)),
             enabled=raw.get("enabled", True),
         )
-
-        # Validate required fields per transport
-        if transport == "stdio" and not cfg.command:
-            logger.warning("[MCPConfig] Server '%s': stdio requires 'command', skipping", name)
-            return None
-        if transport == "streamable_http" and not cfg.url:
-            logger.warning("[MCPConfig] Server '%s': streamable_http requires 'url', skipping", name)
-            return None
-
         return cfg
-    except Exception as exc:
-        # Fix-24: Include traceback for parse errors
-        logger.warning("[MCPConfig] Server '%s': parse error: %s", name, exc, exc_info=True)
-        return None
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid MCP server '{name}': {exc}") from exc
 
 
 def _load_json_config(json_str: str) -> MCPBridgeConfig:
@@ -130,8 +108,7 @@ def _load_json_config(json_str: str) -> MCPBridgeConfig:
     servers: dict[str, MCPServerConfig] = {}
     for name, raw in raw_servers.items():
         cfg = _parse_server_entry(name, raw)
-        if cfg is not None:
-            servers[name] = cfg
+        servers[name] = cfg
 
     return MCPBridgeConfig(
         servers=servers,
@@ -142,45 +119,47 @@ def _load_json_config(json_str: str) -> MCPBridgeConfig:
     )
 
 
-def load_mcp_bridge_config() -> MCPBridgeConfig:
+def load_mcp_bridge_config(
+    settings: CapabilitySettings | None = None,
+) -> MCPBridgeConfig:
     """
-    Load bridge config from env vars and optional JSON source.
-
-    Priority: MCP_BRIDGE_SERVERS_JSON > MCP_BRIDGE_CONFIG_PATH > env-only minimal config
-
-    从环境变量和可选 JSON 源加载桥接配置。
-    优先级：MCP_BRIDGE_SERVERS_JSON > MCP_BRIDGE_CONFIG_PATH > 环境变量最小配置。
+    Load bridge config from structured settings and an optional JSON file.
+    从结构化配置及可选 JSON 文件加载桥接配置。
     """
-    import config as _config
+    settings = settings or get_settings().capabilities
 
-    # Fix-17: Read via config module instead of raw os.getenv for consistency
-    inline_json = getattr(_config, "MCP_BRIDGE_SERVERS_JSON", "").strip()
+    inline_json = settings.mcp_bridge_servers_json.strip()
     if inline_json:
-        try:
-            bridge_cfg = _load_json_config(inline_json)
-            logger.info("[MCPConfig] Loaded %d servers from MCP_BRIDGE_SERVERS_JSON", len(bridge_cfg.servers))
-            return bridge_cfg
-        except json.JSONDecodeError as exc:
-            logger.error("[MCPConfig] MCP_BRIDGE_SERVERS_JSON parse error: %s", exc)
+        bridge_cfg = _load_json_config(inline_json)
+        logger.info("[MCPConfig] Loaded %d inline MCP servers", len(bridge_cfg.servers))
+        bridge_cfg.schema_mode = settings.mcp_bridge_schema_mode
+        bridge_cfg.tool_prefix = settings.mcp_bridge_tool_prefix
+        bridge_cfg.discovery_ttl_seconds = settings.mcp_bridge_discovery_ttl
+        bridge_cfg.call_timeout_seconds = settings.mcp_bridge_call_timeout
+        return bridge_cfg
 
     # Try JSON file
-    config_path = getattr(_config, "MCP_BRIDGE_CONFIG_PATH", "").strip()
-    if config_path and os.path.isfile(config_path):
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                file_json = f.read().strip()
-            if file_json:
-                bridge_cfg = _load_json_config(file_json)
-                logger.info("[MCPConfig] Loaded %d servers from %s", len(bridge_cfg.servers), config_path)
-                return bridge_cfg
-        except Exception as exc:
-            logger.error("[MCPConfig] Failed to read %s: %s", config_path, exc)
+    config_path = settings.mcp_bridge_config_path.strip()
+    if config_path:
+        if not os.path.isfile(config_path):
+            raise ValueError(f"MCP bridge config file does not exist: {config_path}")
+        with open(config_path, encoding="utf-8") as f:
+            file_json = f.read().strip()
+        if not file_json:
+            raise ValueError(f"MCP bridge config file is empty: {config_path}")
+        bridge_cfg = _load_json_config(file_json)
+        logger.info("[MCPConfig] Loaded %d servers from %s", len(bridge_cfg.servers), config_path)
+        bridge_cfg.schema_mode = settings.mcp_bridge_schema_mode
+        bridge_cfg.tool_prefix = settings.mcp_bridge_tool_prefix
+        bridge_cfg.discovery_ttl_seconds = settings.mcp_bridge_discovery_ttl
+        bridge_cfg.call_timeout_seconds = settings.mcp_bridge_call_timeout
+        return bridge_cfg
 
-    # Fallback: env-only config (tool_prefix, schema_mode, etc. from config.py)
+    # No server definitions; keep the remaining behavior settings.
     return MCPBridgeConfig(
         servers={},
-        schema_mode=getattr(_config, "MCP_BRIDGE_SCHEMA_MODE", "loose"),
-        tool_prefix=getattr(_config, "MCP_BRIDGE_TOOL_PREFIX", "mcp"),
-        discovery_ttl_seconds=getattr(_config, "MCP_BRIDGE_DISCOVERY_TTL", 300),
-        call_timeout_seconds=getattr(_config, "MCP_BRIDGE_CALL_TIMEOUT", 30),
+        schema_mode=settings.mcp_bridge_schema_mode,
+        tool_prefix=settings.mcp_bridge_tool_prefix,
+        discovery_ttl_seconds=settings.mcp_bridge_discovery_ttl,
+        call_timeout_seconds=settings.mcp_bridge_call_timeout,
     )

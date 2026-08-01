@@ -33,9 +33,8 @@ import logging
 from collections import Counter, deque
 from typing import Any
 
-import config
 from dag.state_machine import NodeStateMachine
-from schema import DAGState, EdgeType, NodeStatus, NodeType, TaskEdge, TaskNode
+from dag.models import DAGState, EdgeType, NodeStatus, NodeType, TaskEdge, TaskNode
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +60,13 @@ class TaskDAG:
         edges: list[TaskEdge],
         context: str = "",
         state_machine: NodeStateMachine | None = None,
+        max_checkpoints: int = 5,
     ):
         self.nodes = nodes    # 所有节点，key 为节点 ID
         self.edges = edges    # 所有边
         self.state = DAGState(task=task, context=context)  # 集中式共享状态
         self._sm = state_machine or NodeStateMachine()     # 节点状态机，统一管理所有状态转移
+        self.max_checkpoints = max(1, max_checkpoints)
 
         # 预构建 DEPENDENCY 边的邻接表，将 BFS/拓扑排序从 O(V*E) 优化到 O(V+E)
         self._dep_adjacency: dict[str, list[str]] = {}  # source -> [targets]
@@ -334,8 +335,8 @@ class TaskDAG:
         return recovered
 
     # ------------------------------------------------------------------
-    # Dynamic graph mutation (v3 - Adaptive Planning)
-    # 动态图变更（v3 - 自适应规划新增）
+    # Dynamic graph mutation for adaptive planning
+    # 自适应规划所需的动态图变更
     # ------------------------------------------------------------------
 
     def add_dynamic_node(self, node: TaskNode) -> bool:
@@ -532,9 +533,8 @@ class TaskDAG:
         """
         self._checkpoints.append(self.to_dict())
         # 限制内存中保留的 checkpoint 数量，防止长时间运行时内存泄漏
-        max_checkpoints = getattr(config, 'MAX_CHECKPOINTS', 10)
-        if len(self._checkpoints) > max_checkpoints:
-            self._checkpoints = self._checkpoints[-max_checkpoints:]
+        if len(self._checkpoints) > self.max_checkpoints:
+            self._checkpoints = self._checkpoints[-self.max_checkpoints:]
 
     @property
     def checkpoints(self) -> list[dict[str, Any]]:

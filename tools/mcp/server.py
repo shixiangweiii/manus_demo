@@ -20,7 +20,7 @@ from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
 
-# v18.3: tools a remote agent must never expose/use (prevents cross-process
+# Tools a remote agent must never expose/use (prevents cross-process
 # recursion + isolation breaks). / 远端 agent 永不暴露/使用的工具，防递归。
 _REMOTE_BLOCKED = ("remote_subagent", "handoff", "subagent", "ask_user")
 
@@ -65,7 +65,7 @@ class MCPServerWrapper:
         if memory_service:
             self._register_resources()
             self._register_prompts()
-        # v18.3/18.4: expose this project as a remote agent (AgentCard + task endpoint)
+        # Expose this project as a remote agent (AgentCard + task endpoint).
         if expose_agent and llm_client is not None:
             self._register_agent_endpoints()
         elif expose_agent and llm_client is None:
@@ -160,7 +160,7 @@ class MCPServerWrapper:
                 return service.format_context(results)
             except Exception as exc:
                 logger.warning("[MCPServer] Memory search failed: %s", exc)
-                return f"Error searching memory: {exc}"
+                return f"Error: searching memory failed: {exc}"
 
         logger.info("[MCPServer] Registered resource: memory://search/{query}")
 
@@ -185,7 +185,7 @@ class MCPServerWrapper:
         logger.info("[MCPServer] Registered prompt: plan_task")
 
     # ------------------------------------------------------------------
-    # v18.3/18.4 Agent endpoints — expose this project as a remote agent
+    # Agent endpoints — expose this project as a remote agent.
     # 将本项目暴露为远端 agent（AgentCard 能力广播 + A2A 任务端点）
     # ------------------------------------------------------------------
 
@@ -201,13 +201,12 @@ class MCPServerWrapper:
 
         def get_agent_card() -> str:
             """Return this agent's AgentCard (capabilities advertisement) as JSON."""
-            import config as _config
             from a2a.models import AgentCard, AgentSkill
             skills = [AgentSkill(name=t.name, description=t.description) for t in agent_tools]
             card = AgentCard(
                 name=server_name,
                 description="Manus Demo remote agent (depth=1 SubAgent executor)",
-                version=getattr(_config, "VERSION", ""),
+                version="local",
                 auth="local",
                 skills=skills,
                 endpoint={"transport": "streamable_http", "host": host, "port": port},
@@ -219,7 +218,7 @@ class MCPServerWrapper:
             import uuid as _uuid
             from a2a.models import A2ATaskResponse
             from agents.subagent import SubAgent
-            from schema import SubAgentStatus
+            from agents.subagent_models import SubAgentStatus
 
             tid = task_id or _uuid.uuid4().hex[:12]
             try:
@@ -289,7 +288,7 @@ class MCPServerWrapper:
     def get_registered_tool_names(self) -> list[str]:
         """Return names of all registered MCP tools (for testing).
         返回所有已注册 MCP tool 的名称（测试用）。
-        Fix-6: 使用 list_tools() 公开 API 替代直接访问私有属性。"""
+        优先使用 list_tools() 公开 API。"""
         try:
             # Use async-compatible approach: access tool manager's list
             tools_result = self._mcp._tool_manager.list_tools()

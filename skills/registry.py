@@ -1,12 +1,12 @@
 """
-Skill Registry (v20.1) - In-memory store for discovered skills.
-技能注册表（v20.1）—— 已发现技能的内存存储。
+Skill Registry - In-memory store for discovered skills.
+技能注册表——已发现技能的内存存储。
 
-Populated by SkillLoader.discover() during OrchestratorAgent.__init__.
+Populated by the runtime after SkillLoader discovery.
 Provides formatted descriptions for system prompt injection (progressive
 disclosure tier 1: name + description only, ~100 tokens per skill).
 
-在 OrchestratorAgent.__init__ 中由 SkillLoader.discover() 填充。
+由运行时调用 SkillLoader.discover() 后填充。
 提供格式化描述供系统提示词注入（渐进式披露第一层：仅名称+描述）。
 """
 
@@ -24,11 +24,10 @@ class SkillRegistry:
     """
     In-memory registry of discovered skills / 已发现技能的内存注册表。
 
-    Thread-safety note: this class is used within a single asyncio task
-    (OrchestratorAgent), so no explicit locking is needed.
+    Thread-safety note: this class is built before task execution and then read
+    from the runtime event loop, so no explicit locking is needed.
 
-    线程安全说明：此类在单个 asyncio 任务（OrchestratorAgent）中使用，
-    无需显式加锁。
+    线程安全说明：运行前完成构造，运行中只在事件循环内读取，无需显式加锁。
     """
 
     def __init__(self) -> None:

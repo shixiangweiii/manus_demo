@@ -23,7 +23,6 @@ import os
 import re
 from dataclasses import dataclass
 
-import config
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ _SENSITIVE_PATTERNS = [
 ]
 
 
-def build_safe_env() -> dict[str, str]:
+def build_safe_env(*, ssl_verify: bool = True) -> dict[str, str]:
     """
     Return a sanitized copy of os.environ with sensitive keys removed.
     返回清理后的环境变量副本，移除 API Key、密钥等敏感条目。
@@ -55,7 +54,7 @@ def build_safe_env() -> dict[str, str]:
     # When LOCATION_SSL_VERIFY=false, inject env vars so subprocess tools
     # (execute_shell, etc.) skip SSL certificate verification.
     # 当 LOCATION_SSL_VERIFY=false 时，注入环境变量让子进程工具跳过 SSL 证书验证。
-    if not config.LOCATION_SSL_VERIFY:
+    if not ssl_verify:
         env["CURL_CA_BUNDLE"] = ""                    # curl: skip cert verification
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"     # Node.js: skip TLS verification
 

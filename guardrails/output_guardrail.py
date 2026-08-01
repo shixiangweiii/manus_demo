@@ -1,6 +1,6 @@
 """
-OutputGuardrail (v19.3) - redact PII / credentials from the final answer.
-输出护栏（v19.3）—— 对最终答案中的 PII / 凭证脱敏。
+OutputGuardrail - redact PII / credentials from the final answer.
+输出护栏——对最终答案中的 PII / 凭证脱敏。
 
 Reuses the credential patterns and aligns with tracing.config.SENSITIVE_KEYS so
 redaction is consistent with span redaction policy.
@@ -9,7 +9,6 @@ redaction is consistent with span redaction policy.
 
 from __future__ import annotations
 
-import config
 from guardrails.models import GuardrailAction, GuardrailDecision, GuardrailLayer
 from guardrails.patterns import CREDENTIAL_PATTERNS
 
@@ -18,6 +17,9 @@ _PLACEHOLDER = "[REDACTED]"
 
 class OutputGuardrail:
     """Scan + redact sensitive content in the final answer. / 输出脱敏。"""
+
+    def __init__(self, mode: str = "redact") -> None:
+        self._mode = mode
 
     def scan(self, text: str) -> GuardrailDecision:
         if not isinstance(text, str) or not text:
@@ -37,7 +39,7 @@ class OutputGuardrail:
         if hit_count == 0:
             return GuardrailDecision(action=GuardrailAction.ALLOW, layer=GuardrailLayer.OUTPUT)
 
-        if config.GUARDRAIL_OUTPUT_MODE == "observe":
+        if self._mode == "observe":
             return GuardrailDecision(
                 action=GuardrailAction.ALLOW, layer=GuardrailLayer.OUTPUT,
                 reason=f"{hit_count} sensitive match(es) (observe only)", risk="ASI05",

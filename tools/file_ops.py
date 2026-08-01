@@ -26,8 +26,8 @@ class FileOpsTool(BaseTool):
     文件操作工具，所有操作限制在沙箱目录内。
     """
 
-    def __init__(self):
-        self._sandbox = config.SANDBOX_DIR  # 沙箱根目录
+    def __init__(self, sandbox_dir: str | None = None):
+        self._sandbox = sandbox_dir or config.SANDBOX_DIR
         os.makedirs(self._sandbox, exist_ok=True)  # 确保沙箱目录存在
 
     @property
@@ -107,7 +107,7 @@ class FileOpsTool(BaseTool):
                 return f"Sandbox directory is empty: {self._sandbox}"
             return f"Files in sandbox:\n" + "\n".join(f"  - {f}" for f in sorted(files))
         except Exception as exc:
-            return f"Error listing files: {exc}"
+            return f"Error: listing files failed: {exc}"
 
     def _read_file(self, filename: str) -> str:
         """读取沙箱内指定文件的内容。"""
@@ -122,7 +122,7 @@ class FileOpsTool(BaseTool):
             with open(path, "r", encoding="utf-8") as f:
                 return f"Content of {filename}:\n{f.read()}"
         except Exception as exc:
-            return f"Error reading file: {exc}"
+            return f"Error: reading file failed: {exc}"
 
     def _write_file(self, filename: str, content: str) -> str:
         """将内容写入沙箱内的指定文件（不存在则创建，存在则覆盖）。"""
@@ -138,4 +138,4 @@ class FileOpsTool(BaseTool):
                 f.write(content)
             return f"Successfully wrote {len(content)} characters to {filename}"
         except Exception as exc:
-            return f"Error writing file: {exc}"
+            return f"Error: writing file failed: {exc}"

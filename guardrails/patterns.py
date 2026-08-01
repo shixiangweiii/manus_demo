@@ -1,6 +1,6 @@
 """
-Guardrail detection patterns (v19) - compiled once at import (module constants).
-护栏检测模式（v19）—— 模块级编译一次，供三层复用，避免重复编译开销。
+Guardrail detection patterns compiled once at import.
+护栏检测模式在模块级编译，供各层复用。
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """
-Workflow (v18.1) - Deterministic tool-workflow engine.
-工作流（v18.1）—— 确定性工具工作流引擎。
+Workflow - Deterministic tool-workflow engine.
+工作流——确定性工具工作流引擎。
 """
 
 from workflow.engine import WorkflowEngine

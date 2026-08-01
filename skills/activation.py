@@ -1,6 +1,6 @@
 """
-Skill Activation Tool (v20.1) - Lets the LLM activate a skill at runtime.
-技能激活工具（v20.1）—— 让 LLM 在运行时激活技能。
+Skill Activation Tool - Lets the LLM activate a skill at runtime.
+技能激活工具——让 LLM 在运行时激活技能。
 
 When the LLM calls this tool, the full SKILL.md body is returned,
 providing the LLM with detailed instructions, constraints, and tool
@@ -9,11 +9,11 @@ guidance from the activated skill (progressive disclosure tier 2).
 LLM 调用此工具时，返回完整 SKILL.md 内容，提供激活技能的详细指令、
 约束和工具引导（渐进式披露第二层）。
 
-v20.2 extends this: after activation, the skill's allowed_tools list is
+After activation, the skill's allowed_tools list is
 applied as a tool filter on the current ReAct loop, and max activations
 per task are enforced.
 
-v20.2 扩展：激活后，技能的 allowed_tools 列表作为工具过滤应用于当前
+激活后，技能的 allowed_tools 列表作为工具过滤应用于当前
 ReAct 循环，并强制执行每任务最大激活次数。
 """
 
@@ -34,8 +34,7 @@ class SkillActivationTool(BaseTool):
     Tool that activates a skill and returns its full content.
     激活技能并返回其完整内容的工具。
 
-    v20.1: Returns SKILL.md full body.
-    v20.2: Also applies allowed-tools filter and enforces activation limits.
+    Returns the SKILL.md body, applies its tool filter, and enforces limits.
     """
 
     def __init__(
@@ -45,23 +44,25 @@ class SkillActivationTool(BaseTool):
         tool_filter_callback: Callable[[list[str]], None] | None = None,
         max_activations: int | None = None,
         max_content_tokens: int | None = None,
+        guardrail: Any | None = None,
     ):
         """
         Args:
             registry: SkillRegistry to look up skills from.
             on_event: Event callback for emitting skill events.
-            tool_filter_callback: v20.2 callback to apply allowed-tools filter.
+            tool_filter_callback: callback to apply the allowed-tools filter.
                 Called with the skill's allowed_tools list after activation.
             max_activations: Per-task activation limit. Defaults to config value.
             max_content_tokens: Max content tokens per activation. Defaults to config.
         """
         self._registry = registry
         self._on_event = on_event or (lambda *_: None)
-        self._tool_filter_callback = tool_filter_callback  # v20.2, set by OrchestratorAgent
+        self._tool_filter_callback = tool_filter_callback
         self._max_activations = max_activations if max_activations is not None else config.SKILLS_MAX_ACTIVATIONS_PER_TASK
         self._max_content_tokens = max_content_tokens if max_content_tokens is not None else config.SKILLS_MAX_CONTENT_TOKENS
         self._activation_count: int = 0
         self._active_skills: list[str] = []
+        self._guardrail = guardrail
 
     @property
     def name(self) -> str:
@@ -99,8 +100,8 @@ class SkillActivationTool(BaseTool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        """Activate a skill: return full content, apply tool filter (v20.2).
-        激活技能：返回完整内容，应用工具过滤（v20.2）。
+        """Activate a skill: return full content and apply its tool filter.
+        激活技能：返回完整内容并应用工具过滤。
         """
         skill_name = kwargs.get("skill_name", "").strip()
 
@@ -154,10 +155,33 @@ class SkillActivationTool(BaseTool):
             # 不应发生（刚检查过 get()），但保持防御性
             return f"Error: Failed to load content for skill '{skill_name}'"
 
-        # Track active skills / 跟踪已激活技能
-        self._active_skills.append(skill_name)
+        # Apply the skill-content guardrail based on trust level.
+        # 根据信任等级应用技能内容护栏。
+        if self._guardrail is not None:
+            try:
+                decision = self._guardrail.scan_skill_content(content, skill.meta.license)
+                if decision.transformed_text is not None:
+                    content = decision.transformed_text
+                    self._on_event("skill_content_guarded", {
+                        "name": skill_name,
+                        "trust_level": skill.meta.license,
+                        "action": decision.action.value,
+                        "reason": decision.reason,
+                    })
+            except Exception as exc:
+                logger.error(
+                    "[SkillActivationTool] Guardrail failed for skill '%s'",
+                    skill_name,
+                    exc_info=True,
+                )
+                self._on_event("skill_activation_failed", {
+                    "name": skill_name,
+                    "error": f"guardrail check failed: {exc}",
+                })
+                return f"Error: Skill guardrail check failed for '{skill_name}': {exc}"
 
-        # Emit activation event / 发出激活事件
+        # Only expose the skill as active after its content passes the guardrail.
+        self._active_skills.append(skill_name)
         self._on_event("skill_activated", {
             "name": skill_name,
             "activation_count": self._activation_count,
@@ -166,26 +190,7 @@ class SkillActivationTool(BaseTool):
             "trust_level": skill.meta.license,
         })
 
-        # v20.3: Apply skill content guardrail based on trust level
-        # v20.3：根据信任等级应用技能内容护栏
-        if config.GUARDRAILS_ENABLED:
-            try:
-                from guardrails.engine import current_guardrail
-                guardrail = current_guardrail()
-                if guardrail is not None:
-                    decision = guardrail._input.scan_skill_content(content, skill.meta.license)
-                    if decision.transformed_text is not None:
-                        content = decision.transformed_text
-                        self._on_event("skill_content_guarded", {
-                            "name": skill_name,
-                            "trust_level": skill.meta.license,
-                            "action": decision.action.value,
-                            "reason": decision.reason,
-                        })
-            except Exception:
-                pass  # Fail-open: guardrail errors never block skill activation
-
-        # v20.2: Apply tool filter if skill has allowed_tools / 应用工具过滤
+        # Apply the tool filter when the skill declares allowed_tools.
         if self._tool_filter_callback is not None and skill.meta.allowed_tools:
             self._tool_filter_callback(skill.meta.allowed_tools)
 
@@ -201,15 +206,15 @@ class SkillActivationTool(BaseTool):
         return f"{header}\n\n{content}"
 
     def reset_task_state(self) -> None:
-        """Reset per-task activation state (called by OrchestratorAgent.run()).
-        重置每任务激活状态（由 OrchestratorAgent.run() 调用）。
+        """Reset activation state before a new runtime task.
+        在新的运行时任务前重置激活状态。
         """
         self._activation_count = 0
         self._active_skills = []
 
     def set_tool_filter_callback(self, callback: Callable[[list[str]], None]) -> None:
-        """v20.2: Set the callback that filters available tools after skill activation.
-        v20.2：设置技能激活后过滤可用工具的回调。
+        """Set the callback that filters available tools after skill activation.
+        设置技能激活后过滤可用工具的回调。
         """
         self._tool_filter_callback = callback
 

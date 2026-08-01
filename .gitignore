@@ -1,9 +1,14 @@
 .idea
 .claude
+.env
 __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
 traces/
+*.log
+log.txt
+evaluation/results/
+evaluation/baselines/
 
 .agents

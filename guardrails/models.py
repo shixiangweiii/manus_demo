@@ -1,6 +1,6 @@
 """
-Guardrail models (v19) - decisions and actions for the security guardrail layers.
-护栏模型（v19）—— 安全护栏三层的决策与动作。
+Guardrail decisions and actions for the security layers.
+安全护栏的决策与动作。
 """
 
 from __future__ import annotations

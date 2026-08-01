@@ -2,7 +2,7 @@
 Web Search Tool - Real web search via Bailian MCP (primary) or DuckDuckGo (fallback).
 Web 搜索工具 —— 优先使用百炼 MCP 搜索，回退到 DuckDuckGo（DDGS）。
 
-v11: 替换 v10 的纯 DDGS 实现为 Bailian MCP 优先 + DDGS 回退。
+使用 Bailian MCP 优先、DDGS 回退的搜索策略。
 - Bailian MCP（阿里云百炼）提供更丰富的搜索结果（含摘要而非仅 snippet）
 - 需要 DASHSCOPE_API_KEY，为空时自动回退到 DDGS
 - DDGS 零密钥、零配置回退：保留原有搜索能力
@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Any
 
-import config
+from core.settings import ToolSettings, get_settings
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,9 @@ class WebSearchTool(BaseTool):
     Web search tool: Bailian MCP (primary) → DuckDuckGo (fallback).
     网络搜索工具：百炼 MCP（优先）→ DuckDuckGo（回退）。
     """
+
+    def __init__(self, settings: ToolSettings | None = None) -> None:
+        self._settings = settings or get_settings().tools
 
     @property
     def name(self) -> str:
@@ -64,7 +67,7 @@ class WebSearchTool(BaseTool):
                 "count": {
                     "type": "integer",
                     "description": "Number of results to return (default: 5)",
-                    "default": config.WEB_SEARCH_MAX_RESULTS,
+                    "default": self._settings.web_search_max_results,
                 },
             },
             "required": ["query"],
@@ -75,10 +78,10 @@ class WebSearchTool(BaseTool):
         if not query:
             return "Error: web_search requires a non-empty 'query' parameter."
 
-        count = kwargs.get("count") or config.WEB_SEARCH_MAX_RESULTS
+        count = kwargs.get("count") or self._settings.web_search_max_results
 
         # Try Bailian MCP first (requires DASHSCOPE_API_KEY)
-        if config.DASHSCOPE_API_KEY:
+        if self._settings.dashscope_api_key:
             try:
                 return await self._bailian_search(query, count)
             except Exception as exc:
@@ -95,14 +98,14 @@ class WebSearchTool(BaseTool):
         """Search via Bailian MCP WebSearch server."""
         from tools.mcp_client import BailianMCPClient
 
-        client = BailianMCPClient()
+        client = BailianMCPClient(self._settings)
         raw_result = await asyncio.wait_for(
             client.call_tool(
                 server_name="WebSearch",
                 tool_name="bailian_web_search",
                 arguments={"query": query, "count": count},
             ),
-            timeout=config.WEB_SEARCH_TIMEOUT,
+            timeout=self._settings.web_search_timeout_seconds,
         )
         logger.info("[WebSearchTool] Bailian MCP result for '%s': %d chars", query, len(raw_result))
         return self._format_bailian_results(query, raw_result)
@@ -198,7 +201,7 @@ class WebSearchTool(BaseTool):
         return raw_text
 
     # ------------------------------------------------------------------
-    # DDGS fallback backend (original v10 implementation)
+    # DDGS fallback backend
     # ------------------------------------------------------------------
 
     async def _ddgs_search_and_format(self, query: str, count: int) -> str:
@@ -208,11 +211,11 @@ class WebSearchTool(BaseTool):
         try:
             results = await asyncio.wait_for(
                 self._ddgs_search(query, count),
-                timeout=config.WEB_SEARCH_TIMEOUT,
+                timeout=self._settings.web_search_timeout_seconds,
             )
         except asyncio.TimeoutError:
             return (
-                f"Error: web_search timed out after {config.WEB_SEARCH_TIMEOUT}s "
+                f"Error: web_search timed out after {self._settings.web_search_timeout_seconds}s "
                 f"for query='{query}'."
             )
         except RatelimitException as exc:

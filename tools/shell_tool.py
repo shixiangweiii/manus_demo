@@ -54,17 +54,22 @@ class ShellTool(BaseTool):
         re.compile(r"\bexport\b.*API_KEY", re.IGNORECASE),
     ]
 
-    _concurrency_sem: asyncio.Semaphore | None = None
-
-    def __init__(self):
-        self._workdir = config.SANDBOX_DIR
+    def __init__(
+        self,
+        workdir: str | None = None,
+        timeout: int | None = None,
+        python_command: str | None = None,
+        max_output_bytes: int | None = None,
+        max_concurrent: int | None = None,
+        ssl_verify: bool = True,
+    ):
+        self._workdir = workdir or config.SANDBOX_DIR
+        self._timeout = timeout or config.SHELL_EXEC_TIMEOUT
+        self._python_command = python_command or config.PYTHON_COMMAND
+        self._max_output_bytes = max_output_bytes or config.SUBPROCESS_MAX_OUTPUT_BYTES
+        self._concurrency_sem = asyncio.Semaphore(max_concurrent or config.SHELL_MAX_CONCURRENT)
+        self._ssl_verify = ssl_verify
         os.makedirs(self._workdir, exist_ok=True)
-
-    @classmethod
-    def _get_sem(cls) -> asyncio.Semaphore:
-        if cls._concurrency_sem is None:
-            cls._concurrency_sem = asyncio.Semaphore(config.SHELL_MAX_CONCURRENT)
-        return cls._concurrency_sem
 
     @property
     def name(self) -> str:
@@ -77,7 +82,7 @@ class ShellTool(BaseTool):
             "The command runs in a subprocess with a timeout. "
             "Supports standard bash syntax. "
             "Working directory is the sandbox folder. "
-            f"When invoking Python or pytest, use `{config.PYTHON_COMMAND}` "
+            f"When invoking Python, use `{self._python_command}` "
             "instead of bare `python` in this environment."
         )
 
@@ -102,7 +107,7 @@ class ShellTool(BaseTool):
         command = kwargs.get("command", "")
         timeout = kwargs.get("timeout")
         if timeout is None:
-            timeout = config.SHELL_EXEC_TIMEOUT
+            timeout = self._timeout
 
         if not command.strip():
             return "Error: No command provided."
@@ -113,13 +118,13 @@ class ShellTool(BaseTool):
 
         logger.info("Executing shell command: %s", command[:100])
 
-        async with self._get_sem():
+        async with self._concurrency_sem:
             try:
                 return await self._run_shell(command, timeout)
             except asyncio.TimeoutError:
                 return f"Error: Shell command timed out after {timeout}s."
             except Exception as exc:
-                return f"Error executing shell command: {exc}"
+                return f"Error: executing shell command failed: {exc}"
 
     def _check_blocked(self, command: str) -> str | None:
         for pattern in self.BLOCKED_PATTERNS:
@@ -133,8 +138,8 @@ class ShellTool(BaseTool):
             cmd=["bash", "-c", command],
             timeout=timeout,
             cwd=self._workdir,
-            env=build_safe_env(),
-            max_output_bytes=config.SUBPROCESS_MAX_OUTPUT_BYTES,
+            env=build_safe_env(ssl_verify=self._ssl_verify),
+            max_output_bytes=self._max_output_bytes,
         )
 
         output_parts = []
@@ -143,11 +148,11 @@ class ShellTool(BaseTool):
         if result.stderr:
             output_parts.append(f"Errors:\n{result.stderr.strip()}")
         if result.returncode != 0:
-            output_parts.append(f"Exit code: {result.returncode}")
+            output_parts.insert(0, f"Error: process exited with code {result.returncode}")
             combined = f"{result.stdout}\n{result.stderr}".lower()
             if "python: command not found" in combined:
                 output_parts.append(
-                    f"Hint: use `{config.PYTHON_COMMAND}` instead of bare `python` in this environment."
+                    f"Hint: use `{self._python_command}` instead of bare `python` in this environment."
                 )
 
         if not output_parts:

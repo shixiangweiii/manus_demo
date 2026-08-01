@@ -1,6 +1,6 @@
 """
-Workflow spec loader (v18.1) - Load a WorkflowSpec from a JSON file.
-工作流定义加载器（v18.1）—— 从 JSON 文件加载 WorkflowSpec。
+Workflow spec loader - Load a WorkflowSpec from a JSON file.
+工作流定义加载器——从 JSON 文件加载 WorkflowSpec。
 """
 
 from __future__ import annotations

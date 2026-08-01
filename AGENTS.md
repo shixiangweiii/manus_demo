@@ -2,34 +2,31 @@
 
 ## Project Structure & Module Organization
 
-`main.py` is the CLI entry point; `config.py` loads environment-driven settings and `schema.py` defines shared Pydantic models. Agent orchestration lives in `agents/`, ReAct execution in `react/`, and graph/workflow engines in `dag/` and `workflow/`. Integrations and supporting services are grouped under `tools/`, `memory/`, `knowledge/`, `checkpoint/`, `guardrails/`, and `a2a/`. User-facing services live in `webui/`, `tracing/`, `evaluation/`, and `evalplatform/`. Tests mirror behavior in `tests/test_*.py`. Treat `backups/`, generated `traces/`, and research material under `sxw_aicoding/` as reference or artifacts, not primary runtime code.
+`main.py` is the thin CLI entry point and `cli.py` contains command handling. Stable contracts and configuration live in `core/`; runtime composition lives in `runtime/`. Task orchestration implementations are under `engines/`, while per-action ReAct implementations are under `execution/` and `react/`. Base and optional tools are registered through `tools/registry.py`. User-facing adapters are `webui/`, `tracing/`, and the unified `evaluation/` package. Retained peripheral capabilities live in `a2a/`, `memory/`, `skills/`, `evolution/`, `guardrails/`, and `checkpoint/`. Treat `sxw_aicoding/`, `agentbay_research/`, generated traces, and local evaluation output as historical or generated material.
 
-## Build, Test, and Development Commands
+## Build and Development Commands
+
+Use the repository virtual environment:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python main.py                         # interactive CLI
-python main.py "summarize this topic"  # one task
-python -m webui                        # local UI on port 8700
-python -m evaluation.eval_cli --dry-run
-python -m pytest tests/ -o asyncio_mode=auto --ignore=tests/test_llm_integration.py
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python main.py --help
+.venv/bin/python main.py chat
+.venv/bin/python -m webui --help
+.venv/bin/python -m evaluation run --dry-run
+.venv/bin/python -m compileall .
 ```
 
-Use `python -m pytest tests/test_subagent.py -o asyncio_mode=auto` for a focused run. The project has no separate build step.
+There is no build step and this learning repository does not maintain a unit-test suite. Do not run real LLM, network, or formal evaluation jobs unless explicitly requested.
 
 ## Coding Style & Naming Conventions
 
-Target Python 3.11+, four-space indentation, and PEP 8-oriented formatting. No formatter or linter is pinned, so match nearby code. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes and Pydantic models; and `UPPER_SNAKE_CASE` for constants and environment keys. Keep LLM/tool I/O asynchronous, add type hints to public interfaces, and preserve bilingual docstrings where the surrounding module uses them. New tools should inherit `BaseTool`; shared structured data should use Pydantic models.
+Target Python 3.11+, use four-space indentation, straightforward control flow, and type hints on public interfaces. Prefer `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants. Name engines by behavior (`TodoEngine`), never by version. New orchestration code must depend on `core` contracts and receive `AppSettings`, `EventBus`, tools, or runtime context explicitly. Keep compatibility access through `config.py` limited to retained peripheral modules.
 
-## Testing Guidelines
+## Configuration and Verification
 
-Pytest and `pytest-asyncio` are the test stack. Name files `test_<feature>.py` and tests `test_<behavior>`. Add regression coverage for every behavior change and mock network or LLM calls by default. Mark tests needing external services with `@pytest.mark.integration`; never rely on live credentials in the normal suite. There is no enforced coverage percentage, but affected modules should have focused success, failure, and async/concurrency cases.
+Put normal settings and feature switches in `settings.toml`; keep only secrets in `.env`, using `.env.example` as the key list. CLI flags are single-run overrides. Before handoff, run the documented import, `--help`, `compileall`, static-reference, and `git diff --check` checks. State clearly that these checks do not prove real agent quality.
 
 ## Commit & Pull Request Guidelines
 
-Use a concise, action-oriented subject naming the changed behavior. Recent history commonly uses Chinese summaries such as `修复subagent相关bug to #82161950`; include the `to #<work-item>` suffix only when a real tracker item exists. PRs should summarize scope and behavior, link the work item, list exact test commands/results, and call out configuration or API changes. Include screenshots for `webui/` changes and keep unrelated refactors separate.
-
-## Security & Configuration
-
-Copy `.env.example` to `.env` for local configuration. Never commit API keys, tokens, local memory, generated traces, or evaluation outputs containing prompts. Document new settings in `.env.example` with safe defaults.
+Use concise action-oriented subjects; recent history uses Chinese summaries such as `修复subagent相关bug to #82161950`. Add `to #<work-item>` only for a real tracker item. PRs should describe behavior and configuration changes, list exact validation commands, and include screenshots for WebUI changes. Keep generated output and secrets out of commits.

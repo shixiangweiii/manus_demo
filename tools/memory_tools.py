@@ -4,7 +4,7 @@ Memory Tools - Agent-callable tools for structured memory operations.
 
 Four tools: memory_search, memory_store, memory_consolidate, memory_revoke.
 All tools inject AgenticMemoryService via constructor.
-Tools emit events via optional on_event callback (v15 review fix).
+Tools emit events through an optional on_event callback.
 """
 
 from __future__ import annotations

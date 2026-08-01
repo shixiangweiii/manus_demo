@@ -2,16 +2,13 @@
 EventBridge: sync on_event sink → asyncio.Queue → drain task → WS broadcast.
 EventBridge：同步 on_event 汇入 → asyncio.Queue → drain 任务 → WS 广播。
 
-Zero FastAPI imports. The orchestrator runs on the SAME uvicorn event
-loop and calls on_event synchronously, so queue.put_nowait is safe with
-no thread-safety machinery (mirrors orchestrator._emit's asyncio model).
-零 FastAPI 依赖。orchestrator 与 uvicorn 同一事件循环、同步调用
-on_event，因此 queue.put_nowait 无需线程安全机制（与 orchestrator._emit
-的 asyncio 模型一致）。
+Zero FastAPI imports. AgentRuntime runs on the same uvicorn event loop and
+publishes synchronously, so queue.put_nowait needs no thread handoff.
+零 FastAPI 依赖。AgentRuntime 与 uvicorn 位于同一事件循环并同步发布事件，
+因此 queue.put_nowait 无需线程切换。
 
-Safety contract: on_event NEVER raises back into the orchestrator
-(extends the guarantee of orchestrator._emit).
-安全契约：on_event 绝不向 orchestrator 抛回异常（延续 _emit 的保证）。
+Safety contract: on_event never raises back into AgentRuntime.
+安全契约：on_event 绝不向 AgentRuntime 抛回异常。
 """
 
 from __future__ import annotations
@@ -21,6 +18,8 @@ import logging
 import time
 from collections import deque
 from typing import Any, Callable
+
+from core.events import RuntimeEvent
 
 from webui.serializer import serialize_event
 
@@ -61,14 +60,19 @@ class EventBridge:
     def current_seq(self) -> int:
         return self._seq
 
-    # -- 同步事件入口（传给 OrchestratorAgent 构造器）---------------------
-    # -- sync event sink (passed to OrchestratorAgent constructor) --------
+    # -- 同步事件入口（由 AgentRuntime 发布）-----------------------------
+    # -- sync event sink (published by AgentRuntime) ----------------------
 
     def on_event(self, event: str, data: Any) -> None:
+        self.on_runtime_event(RuntimeEvent(name=event, payload=data))
+
+    def on_runtime_event(self, event: RuntimeEvent) -> None:
         try:
+            event_name = event.name
+            data = event.payload
             payload: Any
             truncated = False
-            if event == "ask_user_prompt" and isinstance(data, dict):
+            if event_name == "ask_user_prompt" and isinstance(data, dict):
                 # 序列化之前注册 Future（序列化会剥离它）
                 # register the Future BEFORE serialization (which strips it)
                 if self._prompt_hook is not None and "response_future" in data:
@@ -77,30 +81,31 @@ class EventBridge:
                         data["response_future"],
                         str(data.get("question", "")),
                     )
-                import config  # 延迟读取，尊重会话覆盖 / late read honors session overrides
-
                 payload = {
                     "question": str(data.get("question", "")),
                     "prompt_id": str(data.get("prompt_id", "")),
-                    "timeout_seconds": config.HITL_USER_INPUT_TIMEOUT,
+                    "timeout_seconds": int(data.get("timeout_seconds", 120)),
                 }
             else:
-                payload, truncated = serialize_event(event, data)
+                payload, truncated = serialize_event(event_name, data)
 
             self._enqueue({
                 "type": "agent_event",
-                "run_id": self._run_id_provider(),
-                "ts": time.time(),
-                "event": event,
+                "run_id": event.run_id or self._run_id_provider(),
+                "task_id": event.task_id,
+                "engine": event.engine,
+                "executor": event.executor,
+                "ts": event.timestamp,
+                "event": event_name,
                 "data": payload,
                 "truncated": truncated,
             })
 
             if self._event_observer is not None:
-                self._event_observer(event)
+                self._event_observer(event_name)
         except Exception:
-            # 绝不抛回 orchestrator / never raise back into the orchestrator
-            logger.debug("EventBridge.on_event failed for %s", event, exc_info=True)
+            # 绝不抛回 AgentRuntime / never raise back into AgentRuntime
+            logger.debug("EventBridge.on_event failed for %s", event.name, exc_info=True)
 
     # -- 系统消息（run_started/run_finished 等）---------------------------
     # -- system messages (run_started/run_finished etc.) -------------------

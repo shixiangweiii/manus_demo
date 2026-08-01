@@ -17,6 +17,7 @@ import asyncio
 import logging
 from typing import Any, Callable
 
+from react.tool_call_helpers import classify_result
 from tools.base import BaseTool
 from tools.mcp.schema_adapter import mcp_schema_to_openai
 
@@ -31,9 +32,7 @@ class MCPBridgeTool(BaseTool):
     代理远程 MCP 工具调用的 BaseTool。
     每个发现的 MCP 工具对应一个 MCPBridgeTool 实例。
 
-    Inherits traced_execute() for OTel spans and to_openai_tool() for
-    OpenAI function-calling schema — zero changes needed in ReActEngine
-    or ToolRouter to support MCP bridge tools.
+    Uses the common BaseTool execution and OpenAI schema contracts.
     """
 
     def __init__(
@@ -94,7 +93,7 @@ class MCPBridgeTool(BaseTool):
             result = await self._client_manager.call_tool(
                 self._name, kwargs,
             )
-            error = isinstance(result, str) and result.startswith("Error:")
+            error, _ = classify_result(result)
             self._emit_executed(error=error)
             return result
         except asyncio.TimeoutError:
@@ -110,7 +109,7 @@ class MCPBridgeTool(BaseTool):
                 detail = "; ".join(f"{type(e).__name__}: {str(e)[:200]}" for e in inner)
 
             msg = detail or f"{type(exc).__name__}: {exc}"
-            # Fix-20: Truncate error message to prevent oversized tool responses
+            # Truncate error messages to prevent oversized tool responses.
             if len(msg) > 500:
                 msg = msg[:500] + "..."
             logger.error("[MCPBridgeTool] %s failed: %s", self._name, msg)

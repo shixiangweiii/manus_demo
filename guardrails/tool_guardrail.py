@@ -1,10 +1,9 @@
 """
-ToolGuardrail (v19.1) - validate tool inputs before execution.
-工具输入护栏（v19.1）—— 工具执行前校验危险参数 / 路径越权 / 写操作。
+Validate tool inputs before execution.
 
 Defense-in-depth ON TOP of ShellTool.BLOCKED_PATTERNS (not a replacement):
 centralized, configurable, event-emitting. Returns a GuardrailDecision; the
-engine maps CONFIRM (write ops) per GUARDRAIL_WRITE_CONFIRM.
+the runtime guardrail resolves write confirmations from structured settings.
 在 ShellTool 黑名单之上的纵深防御：集中、可配、可埋点。返回决策，写操作 CONFIRM 由 engine 按配置裁决。
 """
 
@@ -14,7 +13,6 @@ import os
 from urllib.parse import urlparse
 import ipaddress
 
-import config
 from guardrails.models import GuardrailAction, GuardrailDecision, GuardrailLayer
 from guardrails.patterns import (
     DANGEROUS_PYTHON_PATTERNS,
@@ -43,20 +41,20 @@ def _confirm(reason: str) -> GuardrailDecision:
     )
 
 
-def _within_sandbox(filename: str) -> bool:
-    """True if filename resolves inside SANDBOX_DIR (blocks ../ traversal)."""
-    if not filename:
-        return True
-    sandbox = os.path.realpath(config.SANDBOX_DIR)
-    if os.path.isabs(filename):
-        target = os.path.realpath(filename)
-    else:
-        target = os.path.realpath(os.path.join(sandbox, filename))
-    return target == sandbox or target.startswith(sandbox + os.sep)
-
-
 class ToolGuardrail:
     """Per-tool input validation. / 按工具的输入校验。"""
+
+    def __init__(self, sandbox_dir: str = "~/.manus_demo/sandbox") -> None:
+        self._sandbox = os.path.realpath(os.path.expanduser(sandbox_dir))
+
+    def _within_sandbox(self, filename: str) -> bool:
+        if not filename:
+            return True
+        if os.path.isabs(filename):
+            target = os.path.realpath(filename)
+        else:
+            target = os.path.realpath(os.path.join(self._sandbox, filename))
+        return target == self._sandbox or target.startswith(self._sandbox + os.sep)
 
     def check(self, tool_name: str, params: dict) -> GuardrailDecision:
         params = params or {}
@@ -91,7 +89,7 @@ class ToolGuardrail:
         elif tool_name == "file_ops":
             action = str(params.get("action", "")).lower()
             filename = str(params.get("filename", ""))
-            if not _within_sandbox(filename):
+            if not self._within_sandbox(filename):
                 return _block(f"path escapes sandbox: '{filename}'", risk="ASI03")
             if action in _WRITE_ACTIONS:
                 return _confirm(f"file_ops '{action}' on '{filename}' is a write operation")
@@ -106,8 +104,8 @@ class ToolGuardrail:
         return _allow()
 
     def check_skill_allowed_tools(self, skill_name: str, tool_name: str) -> GuardrailDecision:
-        """Verify that a skill's pre-authorized tool does not conflict with ToolGuardrail rules (v20.3).
-        验证技能预授权工具不与 ToolGuardrail 规则冲突（v20.3 新增）。
+        """Verify that a skill's pre-authorized tool does not conflict with ToolGuardrail rules.
+        验证技能预授权工具不与 ToolGuardrail 规则冲突。
 
         This is a "shadow check" — it runs the same per-tool rules as `check()`
         but with dummy params, to see if the tool would be blocked. This enforces

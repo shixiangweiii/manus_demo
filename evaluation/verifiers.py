@@ -12,7 +12,7 @@ Replaces keyword-only matching with structured verifiers:
 
 确定性结果验证器 —— 替代纯关键词匹配，减少假阳性/假阴性。
 
-Design: registry pattern + dataclass verifier specs attached to BenchmarkTask.
+Design: registry pattern + dataclass verifier specs attached to EvaluationCase.
 参考 SWE-bench execution-based verification 和 GAIA exact-match 模式。
 """
 
@@ -76,7 +76,9 @@ def register(vtype: VerifierType) -> Callable:
 
 def _read_file(path: str, sandbox_dir: str = "") -> str | None:
     """Read file content, returning None if file doesn't exist."""
-    full_path = os.path.join(sandbox_dir, path) if sandbox_dir else path
+    full_path = _safe_file_path(path, sandbox_dir)
+    if full_path is None:
+        return None
     if not os.path.isfile(full_path):
         return None
     try:
@@ -84,6 +86,19 @@ def _read_file(path: str, sandbox_dir: str = "") -> str | None:
             return f.read()
     except Exception:
         return None
+
+
+def _safe_file_path(path: str, sandbox_dir: str) -> str | None:
+    """Resolve a verifier path without allowing escape from its sandbox."""
+    if not path:
+        return None
+    if not sandbox_dir:
+        return os.path.realpath(path)
+    sandbox = os.path.realpath(sandbox_dir)
+    target = os.path.realpath(os.path.join(sandbox, path))
+    if target == sandbox or target.startswith(sandbox + os.sep):
+        return target
+    return None
 
 
 def _extract_json(text: str) -> Any:
@@ -126,6 +141,10 @@ def _extract_json(text: str) -> Any:
 @register(VerifierType.KEYWORD_INCLUDE)
 def _keyword_include(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> VerifierSpec:
     keywords = spec.params.get("keywords", [])
+    if not isinstance(keywords, list) or not keywords:
+        spec.passed = False
+        spec.detail = "keyword_include requires a non-empty keywords list"
+        return spec
     case_sensitive = spec.params.get("case_sensitive", False)
     text = output if case_sensitive else output.lower()
     missed = []
@@ -141,6 +160,10 @@ def _keyword_include(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> 
 @register(VerifierType.KEYWORD_EXCLUDE)
 def _keyword_exclude(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> VerifierSpec:
     keywords = spec.params.get("keywords", [])
+    if not isinstance(keywords, list) or not keywords:
+        spec.passed = False
+        spec.detail = "keyword_exclude requires a non-empty keywords list"
+        return spec
     case_sensitive = spec.params.get("case_sensitive", False)
     text = output if case_sensitive else output.lower()
     found = []
@@ -157,10 +180,14 @@ def _keyword_exclude(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> 
 def _regex_match(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> VerifierSpec:
     pattern = spec.params.get("pattern", "")
     source = spec.params.get("source", "output")
+    if not isinstance(pattern, str) or not pattern:
+        spec.passed = False
+        spec.detail = "regex_match requires a non-empty pattern"
+        return spec
     if source == "file":
         content = _read_file(spec.params.get("path", ""), sandbox_dir)
         if content is None:
-            spec.passed = None  # Cannot verify — file not accessible
+            spec.passed = False if sandbox_dir else None
             spec.detail = f"File not found: {spec.params.get('path', '')}"
             return spec
         text = content
@@ -169,7 +196,7 @@ def _regex_match(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Veri
     try:
         spec.passed = bool(re.search(pattern, text, re.IGNORECASE))
     except re.error as e:
-        spec.passed = None
+        spec.passed = False
         spec.detail = f"Invalid regex: {e}"
         return spec
     spec.detail = f"Regex '{pattern}' {'matched' if spec.passed else 'not matched'}"
@@ -181,11 +208,15 @@ def _json_field(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Verif
     field_path = spec.params.get("field", "")
     expected = spec.params.get("expected")
     source = spec.params.get("source", "output")
+    if not isinstance(field_path, str) or not field_path:
+        spec.passed = False
+        spec.detail = "json_field requires a non-empty field path"
+        return spec
 
     if source == "file":
         content = _read_file(spec.params.get("path", ""), sandbox_dir)
         if content is None:
-            spec.passed = None
+            spec.passed = False if sandbox_dir else None
             spec.detail = f"File not found: {spec.params.get('path', '')}"
             return spec
         text = content
@@ -235,7 +266,7 @@ def _numeric_range(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ve
     if source == "file":
         content = _read_file(spec.params.get("path", ""), sandbox_dir)
         if content is None:
-            spec.passed = None
+            spec.passed = False if sandbox_dir else None
             spec.detail = f"File not found: {spec.params.get('path', '')}"
             return spec
         text = content
@@ -274,6 +305,34 @@ def _numeric_range(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ve
         spec.detail = f"Cannot convert {value!r} to number"
         return spec
 
+    if min_val is None and max_val is None:
+        spec.passed = False
+        spec.detail = "numeric_range requires min and/or max"
+        return spec
+    try:
+        min_val = float(min_val) if min_val is not None else None
+        max_val = float(max_val) if max_val is not None else None
+        tolerance = float(tolerance)
+    except (TypeError, ValueError):
+        spec.passed = False
+        spec.detail = "numeric_range bounds and tolerance must be numbers"
+        return spec
+    if not math.isfinite(tolerance) or tolerance < 0:
+        spec.passed = False
+        spec.detail = "numeric_range tolerance must be a non-negative finite number"
+        return spec
+    if min_val is not None and not math.isfinite(min_val):
+        spec.passed = False
+        spec.detail = "numeric_range min must be finite"
+        return spec
+    if max_val is not None and not math.isfinite(max_val):
+        spec.passed = False
+        spec.detail = "numeric_range max must be finite"
+        return spec
+    if min_val is not None and max_val is not None and min_val > max_val:
+        spec.passed = False
+        spec.detail = "numeric_range min must not exceed max"
+        return spec
     checks = []
     if min_val is not None:
         checks.append(value >= min_val - tolerance)
@@ -287,12 +346,16 @@ def _numeric_range(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ve
 @register(VerifierType.FILE_EXISTS)
 def _file_exists(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> VerifierSpec:
     path = spec.params.get("path", "")
-    full_path = os.path.join(sandbox_dir, path) if sandbox_dir else path
     if not sandbox_dir:
         # No sandbox available — cannot verify file existence from output alone
         # Check if filename is mentioned in output as a heuristic
         spec.passed = path.lower() in output.lower() if path else None
         spec.detail = f"No sandbox; checking output for '{path}': {'found' if spec.passed else 'not found'}"
+        return spec
+    full_path = _safe_file_path(path, sandbox_dir)
+    if full_path is None:
+        spec.passed = False
+        spec.detail = f"Invalid or unsafe file path: {path!r}"
         return spec
     spec.passed = os.path.isfile(full_path)
     spec.detail = f"File '{path}' {'exists' if spec.passed else 'not found'}"
@@ -305,6 +368,11 @@ def _file_contains(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ve
     content_pattern = spec.params.get("content", "")
     fuzzy = spec.params.get("fuzzy", False)
     threshold = spec.params.get("threshold", 0.8)
+
+    if not isinstance(content_pattern, str) or not content_pattern:
+        spec.passed = False
+        spec.detail = "file_contains requires a non-empty 'content' parameter"
+        return spec
 
     content = _read_file(path, sandbox_dir)
     if content is None:
@@ -334,6 +402,10 @@ def _file_contains(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ve
 @register(VerifierType.COMPOSITE_AND)
 def _composite_and(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> VerifierSpec:
     sub_specs = spec.params.get("verifiers", [])
+    if not isinstance(sub_specs, list) or not sub_specs:
+        spec.passed = False
+        spec.detail = "composite_and requires a non-empty verifiers list"
+        return spec
     results = []
     for sub_dict in sub_specs:
         sub = _dict_to_spec(sub_dict)
@@ -356,6 +428,10 @@ def _composite_and(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ve
 @register(VerifierType.COMPOSITE_OR)
 def _composite_or(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> VerifierSpec:
     sub_specs = spec.params.get("verifiers", [])
+    if not isinstance(sub_specs, list) or not sub_specs:
+        spec.passed = False
+        spec.detail = "composite_or requires a non-empty verifiers list"
+        return spec
     results = []
     for sub_dict in sub_specs:
         sub = _dict_to_spec(sub_dict)
@@ -380,7 +456,7 @@ def _composite_or(spec: VerifierSpec, output: str, sandbox_dir: str = "") -> Ver
 # ======================================================================
 
 def _dict_to_spec(d: dict[str, Any]) -> VerifierSpec:
-    """Convert a dict (from BenchmarkTask.verifiers) to a VerifierSpec."""
+    """Convert an EvaluationCase verifier dictionary to a VerifierSpec."""
     return VerifierSpec(
         type=VerifierType(d["type"]),
         params=d.get("params", {}),

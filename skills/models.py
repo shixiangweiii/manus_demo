@@ -1,6 +1,6 @@
 """
-Skill models (v20) - Data classes for skill metadata and definitions.
-技能模型（v20）—— 技能元数据与定义的数据类。
+Skill models - Data classes for skill metadata and definitions.
+技能元数据与定义的数据类。
 
 Skills are file-system declarative packages that extend the agent's behavior
 at runtime. The LLM sees skill descriptions in its system prompt and decides
@@ -12,12 +12,12 @@ LLM 在系统提示词中看到技能描述，通过 activate_skill 工具决定
 Progressive disclosure tiers:
   1. Discovery — SkillMeta (name + description, ~100 tokens/skill in system prompt)
   2. Activation — SkillDef.full_content (via activate_skill tool, <5000 tokens)
-  3. Execution — scripts/references/assets (on demand, future v20.3+)
+  3. Execution — scripts/references/assets (on demand)
 
 渐进式披露层级：
   1. 发现层 — SkillMeta（名称+描述，约 100 tokens/技能 在系统提示词中）
   2. 激活层 — SkillDef.full_content（通过 activate_skill 工具，<5000 tokens）
-  3. 执行层 — scripts/references/assets（按需加载，v20.3+ 未来实现）
+  3. 执行层 — scripts/references/assets（按需加载）
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from typing import Any
 
 
 class SkillTrustLevel(str, Enum):
-    """Trust level for skill content security policy (v20.3).
-    技能内容安全策略的信任等级（v20.3 新增）。
+    """Trust level for skill content security policy.
+    技能内容安全策略的信任等级。
 
     Determines how the InputGuardrail processes SKILL.md body content:
     - PROJECT: Trusted — shipped with code, skip scanning entirely
@@ -71,8 +71,6 @@ class SkillMeta:
                                         # Empty = auto-detected by loader based on directory.
                                         # "project"（可信）| "user"（半可信）| "third_party"（不可信）
                                         # 空 = 由 loader 根据目录自动检测。
-    compatibility: str = ">=20.0"       # Semantic version range for agent compatibility
-                                        # 智能体兼容性的语义版本范围
     metadata: dict[str, Any] = field(default_factory=dict) # Arbitrary key-value metadata
                                                             # 任意键值元数据
     allowed_tools: list[str] = field(default_factory=list) # Tool names this skill pre-authorizes;

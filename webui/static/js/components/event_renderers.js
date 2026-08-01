@@ -123,6 +123,41 @@ const str = (v) => (v == null ? "" : String(v));
 
 export const RENDERERS = {
   // --- 生命周期 / lifecycle ---
+  task_started: {
+    icon: "▶", cls: "info",
+    summary: (d) => `任务开始 · ${str(d && d.selection_reason).slice(0, 100)}`,
+  },
+  engine_started: {
+    icon: "🧭", cls: "info",
+    summary: (d) => `引擎: ${str(d && d.engine)}`,
+  },
+  action_started: {
+    icon: "▸", cls: "info",
+    summary: (d) => str(d && d.action && d.action.description).slice(0, 100),
+  },
+  action_completed: {
+    icon: "✓", cls: "ok",
+    summary: (d) => `动作 ${str(d && d.action_id)} 完成`,
+    Body: (d) => html`<${Raw} data=${d} />`,
+  },
+  action_failed: {
+    icon: "✗", cls: "err", open: true,
+    summary: (d) => `动作 ${str(d && d.action_id)} 失败: ${str(d && d.error).slice(0, 80)}`,
+  },
+  tool_started: {
+    icon: "🔧", cls: "info",
+    summary: (d) => `调用工具: ${str(d && d.tool)}`,
+  },
+  tool_completed: {
+    icon: "🔧", cls: "info",
+    summary: (d) => `${str(d && d.tool)}: ${d && d.success ? "成功" : "失败"}`,
+    Body: (d) => html`<${Raw} data=${d} />`,
+  },
+  task_completed: { icon: "🏁", cls: "ok", summary: () => "任务完成" },
+  task_failed: {
+    icon: "💥", cls: "err", open: true,
+    summary: (d) => `任务失败: ${str(d && d.error).slice(0, 100)}`,
+  },
   task_start: { icon: "▶", cls: "info", summary: (d) => str(d && d.task).slice(0, 100) },
   task_complexity: {
     icon: "🧭", cls: "info",
@@ -139,6 +174,11 @@ export const RENDERERS = {
   plan: {
     icon: "📋", cls: "info", open: true,
     summary: (d) => `计划：${((d && d.steps) || []).length} 步`,
+    Body: (d) => html`<${PlanBody} data=${d} />`,
+  },
+  plan_created: {
+    icon: "📋", cls: "info", open: true,
+    summary: (d) => `顺序计划：${((d && d.steps) || []).length} 步`,
     Body: (d) => html`<${PlanBody} data=${d} />`,
   },
   plan_adaptation: {

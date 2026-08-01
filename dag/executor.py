@@ -2,9 +2,8 @@
 DAG Executor - Executes a TaskDAG using a super-step model.
 DAG 执行引擎 —— 以 Super-step 模型执行 TaskDAG。
 
-This is the core execution engine that replaces the sequential for-loop
-in the original orchestrator. Inspired by LangGraph's Pregel runtime:
-这是替代原 Orchestrator 顺序 for 循环的核心执行引擎，灵感来自 LangGraph 的 Pregel 运行时：
+This execution component uses a simplified Pregel-style runtime:
+此执行组件使用简化的 Pregel 风格运行时：
 
   LangGraph Pregel super-step:
     1. Find all nodes with pending messages (ready nodes)
@@ -44,17 +43,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable, Protocol
 
-import config
 from dag.graph import TaskDAG
 from dag.state_machine import NodeStateMachine
-from schema import EdgeType, NodeStatus, NodeType, ReasoningEffort, StepResult, TaskNode
+from dag.models import EdgeType, NodeStatus, NodeType, TaskNode
+from execution.models import ReasoningEffort, StepResult
 
-if TYPE_CHECKING:
-    from agents.executor import ExecutorAgent
-    from agents.planner import PlannerAgent
-    from agents.reflector import ReflectorAgent
+
+class NodeExecutor(Protocol):
+    def create_for_node(self, node_id: str): ...
+
+    async def execute_node(self, node, context: str = "", *, effort=None): ...
 
 logger = logging.getLogger(__name__)
 
@@ -86,23 +86,32 @@ class DAGExecutor:
 
     def __init__(
         self,
-        executor_agent: ExecutorAgent,
-        reflector_agent: ReflectorAgent,
-        planner_agent: PlannerAgent | None = None,
+        node_executor: NodeExecutor,
+        reflector: Any,
+        planner: Any | None = None,
         max_parallel: int | None = None,
         on_event: Callable[[str, Any], None] | None = None,
         effort: ReasoningEffort | None = None,
         on_checkpoint: Callable[[], None] | None = None,
+        serial_execution: bool = True,
+        node_timeout: int = 300,
+        adaptive_enabled: bool = True,
+        adaptive_interval: int = 1,
+        adaptive_min_completed: int = 1,
     ):
-        self._executor_agent = executor_agent   # ReAct 执行智能体，负责实际运行 ACTION 节点
-        self._reflector = reflector_agent        # 反思智能体，负责验证 exit criteria
-        self._planner = planner_agent            # v3: Planner 智能体，用于超步间自适应规划
-        self._max_parallel = max_parallel or config.MAX_PARALLEL_NODES  # 每轮最大并行节点数
+        self._node_executor = node_executor      # 负责实际运行 ACTION 节点
+        self._reflector = reflector              # 负责验证 exit criteria
+        self._planner = planner                  # 用于超步间自适应规划
+        self._max_parallel = max_parallel or 3
         self._emit = on_event or (lambda *_: None)  # 事件回调（用于 UI 实时更新）
         self._effort = effort                    # reasoning_effort 透传到 execute_node
-        self._on_checkpoint = on_checkpoint      # v14.5: callback after each super-step checkpoint
+        self._on_checkpoint = on_checkpoint      # callback after each super-step boundary
+        self._serial_execution = serial_execution
+        self._node_timeout = node_timeout
+        self._adaptive_interval = max(1, adaptive_interval)
+        self._adaptive_min_completed = max(0, adaptive_min_completed)
         self._sm = NodeStateMachine(on_transition=self._on_node_transition)  # 节点状态机
-        self._adaptive_enabled = config.ADAPTIVE_PLANNING_ENABLED and planner_agent is not None  # v3
+        self._adaptive_enabled = adaptive_enabled and planner is not None
         self._processed_conditions: set[tuple[str, str]] = set()  # 已评估条件边缓存 (source_id, target_id)
         self._node_attempt_counts: dict[str, int] = {}  # 单节点重试计数（检测 FAILED->PENDING 循环）
 
@@ -161,8 +170,8 @@ class DAGExecutor:
                 continue
 
             # Cap parallelism: serial mode limits to 1 node per super-step
-            # 限制每轮节点数：串行模式下始终为 1，避免共享 ExecutorAgent 的 reset() 串话问题
-            if config.DAG_SERIAL_EXECUTION:
+            # 限制每轮节点数：串行模式下始终为 1，避免共享执行状态串话。
+            if self._serial_execution:
                 batch = actionable[:1]
             else:
                 batch = actionable[:self._max_parallel]
@@ -175,10 +184,8 @@ class DAGExecutor:
 
             # --- Super-step: serial or parallel execution with timeout ---
             # --- Super-step：带超时控制的串行或并行执行当前批次节点 ---
-            if config.DAG_SERIAL_EXECUTION:
-                # 串行执行：逐个运行节点，避免共享 ExecutorAgent 的消息历史竞态
-                # Serial execution: run nodes one at a time to avoid shared
-                # ExecutorAgent state corruption (reset() cross-contamination)
+            if self._serial_execution:
+                # Serial execution avoids shared action-context races.
                 results = []
                 for node in batch:
                     try:
@@ -189,8 +196,7 @@ class DAGExecutor:
                         logger.error("[DAGExecutor] Unexpected exception for node %s: %s", node.id, exc)
                         results.append(exc)
             else:
-                # 并行执行：每个节点通过 create_for_node() 获得独立 ExecutorAgent 实例，
-                # 避免 _messages 共享导致的竞态条件
+                # 并行执行：每个节点通过 create_for_node() 获得独立动作执行器。
                 # return_exceptions=True: prevent one node's exception from cancelling siblings
                 results = await asyncio.gather(*[
                     self._run_node_with_timeout(node, dag) for node in batch
@@ -245,8 +251,8 @@ class DAGExecutor:
             # --- 评估条件边，决定下游分支是否激活 ---
             self._process_conditions(dag)
 
-            # --- v3: Adaptive planning — adjust pending nodes based on intermediate results ---
-            # --- v3: 自适应规划——根据中间结果调整待执行节点 ---
+            # --- Adaptive planning based on intermediate results ---
+            # --- 根据中间结果进行自适应规划 ---
             if self._adaptive_enabled and self._should_adapt(step, dag):
                 await self._adapt_plan(step, dag)
                 self._processed_conditions.clear()  # Topology may have changed
@@ -263,7 +269,7 @@ class DAGExecutor:
             # --- 保存检查点（灵感来自 LangGraph）---
             dag.save_checkpoint()
 
-            # v14.5: Notify orchestrator to persist checkpoint to disk
+            # Notify the runtime checkpoint hook at the super-step boundary.
             if self._on_checkpoint:
                 self._on_checkpoint()
 
@@ -289,11 +295,11 @@ class DAGExecutor:
 
     async def _run_node(self, node: TaskNode, dag: TaskDAG) -> StepResult:
         """
-        Execute a single ACTION node via the ReAct executor agent.
-        通过 ReAct 执行智能体执行单个 ACTION 节点。
+        Execute a single ACTION node through the configured action executor.
+        通过已配置的动作执行器执行单个 ACTION 节点。
 
         从 DAGState 中构建节点的输入上下文（汇集依赖节点结果），
-        然后委托给 ExecutorAgent 运行 ReAct 循环。
+        然后委托给动作执行器运行。
         """
         # 从集中式 DAGState 中提取该节点所需的上下文（依赖节点的结果）
         context = dag.state.get_node_context(
@@ -305,12 +311,12 @@ class DAGExecutor:
         self._sm.transition(node, NodeStatus.RUNNING)
         self._emit("node_running", {"node": node})
 
-        # 并行模式下为每个节点创建独立 ExecutorAgent 实例，避免 _messages 竞态
+        # 并行模式下为每个节点创建独立动作执行器，避免上下文竞态。
         # 串行模式直接使用共享实例（无并发，无竞态）
-        if config.DAG_SERIAL_EXECUTION:
-            executor = self._executor_agent
+        if self._serial_execution:
+            executor = self._node_executor
         else:
-            executor = self._executor_agent.create_for_node(node.id)
+            executor = self._node_executor.create_for_node(node.id)
 
         return await executor.execute_node(node, context, effort=self._effort)
 
@@ -319,7 +325,7 @@ class DAGExecutor:
         Execute a node with timeout protection.
         带超时保护地执行节点，防止单个节点卡死阻塞整个批次。
         """
-        timeout = config.NODE_EXECUTION_TIMEOUT
+        timeout = self._node_timeout
         try:
             return await asyncio.wait_for(
                 self._run_node(node, dag),
@@ -357,7 +363,7 @@ class DAGExecutor:
 
     # ------------------------------------------------------------------
     # Failure handling
-    # 失败处理，动态性 4：失败感知 + 回滚 + 子树级联跳过，v1 对失败的处理是「全盘重来」。v2 的失败处理是局部的、多层次的：
+    # 失败处理：失败感知、回滚与子树级联跳过。
     # ------------------------------------------------------------------
 
     def _track_node_attempt(self, node: TaskNode) -> None:
@@ -437,7 +443,7 @@ class DAGExecutor:
         节点完成后，评估条件边。
         条件边仅当源节点结果中包含指定条件关键词时才激活目标节点；
         否则目标节点被跳过。
-        v1 完全不具备的能力——计划的执行路径不是固定的，而是根据前序节点的输出动态选择
+        计划的执行路径不固定，而是根据前序节点输出动态选择。
         """
         for node in list(dag.nodes.values()):
             if node.status != NodeStatus.COMPLETED:
@@ -634,8 +640,8 @@ class DAGExecutor:
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
-    # Adaptive planning (v3)
-    # 自适应规划（v3 新增）
+    # Adaptive planning
+    # 自适应规划
     # ------------------------------------------------------------------
 
     def _should_adapt(self, step: int, dag: TaskDAG) -> bool:
@@ -653,9 +659,9 @@ class DAGExecutor:
           2. 最少完成数：至少 M 个 ACTION 完成后才启动
           3. 有待执行节点：否则无需调整
         """
-        if step % config.ADAPT_PLAN_INTERVAL != 0:
+        if step % self._adaptive_interval != 0:
             return False
-        if dag.get_completed_action_count() < config.ADAPT_PLAN_MIN_COMPLETED:
+        if dag.get_completed_action_count() < self._adaptive_min_completed:
             return False
         if not dag.get_pending_action_nodes():
             return False
@@ -666,8 +672,8 @@ class DAGExecutor:
         Invoke the planner's adaptive planning and apply changes to the DAG.
         调用 Planner 的自适应规划并将变更应用到 DAG。
 
-        This is the core of v3's "plan evolves during execution" capability.
-        这是 v3「计划在执行过程中持续演化」能力的核心。
+        This lets the plan evolve during execution.
+        这是“计划在执行过程中持续演化”能力的核心。
         """
         self._emit("phase", f"Adaptive planning check (super-step {step})...")
 

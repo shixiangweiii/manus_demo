@@ -73,7 +73,7 @@ class MCPClientManager:
         """
         from mcp.client.session import ClientSession
 
-        # Fix-2: 清空旧工具，避免重复 discovery 累积过时条目
+        # 清空旧工具，避免重复 discovery 累积过时条目。
         self._discovered.clear()
         discovered: list[DiscoveredTool] = []
 
@@ -139,7 +139,7 @@ class MCPClientManager:
         通过前缀名执行工具。查找对应的服务器配置，建立传输，调用工具，返回文本。
         失败时抛出异常（由 MCPBridgeTool.execute() 捕获并转为 Error: 字符串）。
         """
-        # Fix-3: TTL-based re-discovery with lock to prevent concurrent races
+        # TTL-based re-discovery uses a lock to prevent concurrent races.
         if not self._discovered or (
             self._config.discovery_ttl_seconds > 0
             and time.time() - self._last_discovery_time > self._config.discovery_ttl_seconds
@@ -157,7 +157,7 @@ class MCPClientManager:
             raise ValueError(f"Unknown MCP tool: {prefixed_name}")
 
         dt = self._discovered[prefixed_name]
-        # Fix-1: 用 asyncio.wait_for 包裹，强制超时
+        # 用 asyncio.wait_for 包裹，强制超时。
         return await asyncio.wait_for(
             self._connect_and_call(dt.server_config, dt.original_name, arguments),
             timeout=self._config.call_timeout_seconds,

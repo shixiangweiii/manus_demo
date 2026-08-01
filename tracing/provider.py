@@ -4,13 +4,13 @@ TracerProvider 工厂 —— 初始化 OpenTelemetry SDK。
 
 Responsibilities:
 - Configure Resource (service.name, service.version, environment)
-- Create SpanExporter based on TRACING_BACKEND config
+- Create SpanExporter from structured tracing settings
 - Configure sampling strategy
 - Provide global get_tracer() convenience method
 
 职责：
 - 配置 Resource（服务名、版本、环境）
-- 根据 TRACING_BACKEND 配置创建对应的 SpanExporter
+- 根据结构化 Tracing 配置创建对应的 SpanExporter
 - 配置采样策略
 - 提供全局 get_tracer() 便捷方法
 """
@@ -42,24 +42,27 @@ _initialized: bool = False
 _provider: TracerProvider | None = None
 
 
-def init_tracing() -> None:
+def init_tracing(settings=None) -> None:
     """
     Initialize the OpenTelemetry TracerProvider (idempotent).
     初始化 OpenTelemetry TracerProvider（幂等调用）。
 
     Creates the TracerProvider with:
     - Resource identification (service name, version)
-    - Sampling strategy based on TRACING_SAMPLE_RATE
-    - SpanExporter based on TRACING_BACKEND
+    - Sampling strategy from ``tracing.sample_rate``
+    - SpanExporter from ``tracing.backend``
     - BatchSpanProcessor for async export
 
     创建 TracerProvider：
     - Resource 标识（服务名、版本）
-    - 基于 TRACING_SAMPLE_RATE 的采样策略
-    - 基于 TRACING_BACKEND 的 SpanExporter
+    - 基于 ``tracing.sample_rate`` 的采样策略
+    - 基于 ``tracing.backend`` 的 SpanExporter
     - BatchSpanProcessor 异步导出
     """
     global _initialized, _provider
+
+    if settings is not None:
+        tracing_config.configure(settings)
 
     if _initialized:
         return

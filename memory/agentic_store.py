@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 import config
-from schema import MemoryEntry
+from memory.legacy_models import MemoryEntry
 
 from memory.models import (
     AgenticMemoryRecord,

@@ -3,9 +3,8 @@ REST router for the WebUI (prefix /api/webui).
 WebUI 的 REST 路由（前缀 /api/webui）。
 
 Thin adapter layer: no business logic here — delegates to
-config_schema / SessionManager / TaskStateStore.
-薄适配层：不含业务逻辑，仅转发给 config_schema / SessionManager /
-TaskStateStore。
+config_schema and SessionManager.
+薄适配层：不含业务逻辑，仅转发给 config_schema / SessionManager。
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ async def config_values_endpoint() -> dict:
 
 
 # ---------------------------------------------------------------------
-# 会话 / session（Phase 3 接入 SessionManager）
+# 会话 / session
 # ---------------------------------------------------------------------
 
 def _session_manager(request: Request) -> Any:
@@ -46,7 +45,7 @@ def _session_manager(request: Request) -> Any:
 
 @router.post("/session")
 async def create_session(request: Request) -> JSONResponse:
-    """校验 overrides → 关旧会话（恢复配置）→ 建新会话。运行中 409。"""
+    """校验 overrides 并创建独立运行时会话。运行中返回 409。"""
     mgr = _session_manager(request)
     if mgr is None:
         return JSONResponse({"error": "not_ready", "message": "会话管理器未初始化"}, status_code=503)
@@ -60,7 +59,13 @@ async def create_session(request: Request) -> JSONResponse:
     except config_schema.ConfigValidationError as exc:
         return JSONResponse({"error": "invalid_config", "errors": exc.errors}, status_code=422)
 
-    session = await mgr.create_session(coerced)
+    try:
+        session = await mgr.create_session(coerced)
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": "invalid_config", "message": str(exc)},
+            status_code=422,
+        )
     return JSONResponse({"session": session.describe()})
 
 
@@ -75,7 +80,7 @@ async def get_session(request: Request) -> JSONResponse:
 
 @router.delete("/session")
 async def delete_session(request: Request) -> JSONResponse:
-    """关闭会话并恢复配置。运行中 409。"""
+    """关闭会话。运行中返回 409。"""
     mgr = _session_manager(request)
     if mgr is None or mgr.session is None:
         return JSONResponse({"session": None})
@@ -92,15 +97,17 @@ async def delete_session(request: Request) -> JSONResponse:
 @router.get("/checkpoints")
 async def list_checkpoints() -> dict:
     """列出可恢复的 checkpoint 任务（新→旧）。"""
-    from checkpoint.store import TaskStateStore
+    from checkpoint.store import RuntimeCheckpointStore
 
-    summaries = TaskStateStore().list_tasks()
+    summaries = RuntimeCheckpointStore().list_tasks()
     return {
         "tasks": [
             {
                 "task_id": s.task_id,
                 "task": s.task,
-                "complexity": s.complexity,
+                "engine": s.engine.value,
+                "executor": s.executor.value,
+                "effort": s.effort.value,
                 "state": s.state.value if hasattr(s.state, "value") else str(s.state),
                 "updated_at": s.updated_at,
             }

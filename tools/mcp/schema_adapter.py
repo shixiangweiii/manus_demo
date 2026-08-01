@@ -162,7 +162,7 @@ def _convert_schema(
     if "format" in schema:
         result["format"] = schema["format"]
 
-    # Fix-9: Infer type when missing after conversion
+    # Infer a type when conversion leaves it unspecified.
     if "type" not in result:
         if "properties" in result:
             result["type"] = "object"

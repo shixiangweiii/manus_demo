@@ -16,7 +16,7 @@ import os
 from typing import Any
 
 import config
-from schema import MemoryEntry
+from memory.legacy_models import MemoryEntry
 
 from memory.text_utils import bilingual_tokenize
 

@@ -1,5 +1,5 @@
 """
-v16 MCP Bridge — Generic MCP client/server bridge.
+MCP Bridge — Generic MCP client/server bridge.
 
 Provides:
   - MCPClientManager: multi-server MCP tool discovery and execution
@@ -7,7 +7,7 @@ Provides:
   - MCPServerWrapper: exposes project tools/memory as an MCP server
   - mcp_schema_to_openai: MCP JSON Schema → OpenAI function-calling schema
 
-v16 MCP 桥接模块 —— 通用 MCP 客户端/服务端桥接。
+MCP 桥接模块——通用 MCP 客户端/服务端桥接。
 支持 stdio + Streamable HTTP 双传输，多服务器注册，动态工具发现。
 """
 

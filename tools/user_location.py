@@ -3,13 +3,13 @@ User Location Tool - Resolve current user's city via a fallback chain.
 用户位置工具 —— 通过 fallback 链解析当前用户所在城市。
 
 Resolution order (each step is independent; first hit wins):
-  1. USER_LOCATION env var                       (explicit, highest priority)
+  1. settings.toml tools.user_location           (explicit, highest priority)
   2. {MEMORY_DIR}/user_location.md               (persistent user fact file)
   3. IP geolocation                              (ip-api.com primary + ipapi.co/ip.sb fallback)
   4. Error string                                (no source resolved)
 
 解析顺序（按优先级降级）：
-  1. USER_LOCATION 环境变量                     （显式配置，最高优先级）
+  1. settings.toml 中的 tools.user_location     （显式配置，最高优先级）
   2. {MEMORY_DIR}/user_location.md              （用户事实文件，可手工维护）
   3. IP 地理定位                                 （ip-api.com 主 / ipapi.co / ip.sb 备份）
   4. Error: ... 字符串                          （所有源均失败）
@@ -20,7 +20,7 @@ Resolution order (each step is independent; first hit wins):
   把 zone tail 当 city 是 hack，对地理大国注定失败。
 - **IP 默认启用**：IP 段的运营商地理注册是真实地理信号，精度通常到城市；
   即便有偏差（如 CGNAT 汇聚到省会），仍比时区推断高一个数量级。
-- **SSL 降级**：LOCATION_SSL_VERIFY=true（默认）时先验证证书，SSL 错误自动
+- **SSL 降级**：`tools.location_ssl_verify=true`（默认）时先验证证书，SSL 错误自动
   降级为跳过验证重试一次；设为 false 则直接跳过验证。ip-api.com 使用 HTTP
   协议，不受 SSL 问题影响。
 - **错误透传**：所有异常 catch 后转 "Error:" 前缀字符串，配合
@@ -34,7 +34,6 @@ import logging
 import os
 from typing import Any
 
-import config
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -56,8 +55,19 @@ class UserLocationTool(BaseTool):
     通过 fallback 链解析用户当前城市。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        configured_location: str = "",
+        state_dir: str = "~/.manus_demo",
+        ip_lookup: bool = True,
+        ssl_verify: bool = True,
+    ) -> None:
         super().__init__()
+        self._configured_location = configured_location.strip()
+        self._state_dir = os.path.expanduser(state_dir)
+        self._ip_lookup = ip_lookup
+        self._ssl_verify = ssl_verify
         self._last_was_ssl_error: bool = False
 
     @property
@@ -70,14 +80,14 @@ class UserLocationTool(BaseTool):
             "Resolve the user's current city for tasks that depend on "
             "location (weather, local time, nearby restaurants, news, "
             "etc.). Takes no parameters. Returns a string like "
-            "'City: <name> (source=<env_var|memory_file|ip_geolocation>)' "
+            "'City: <name> (source=<settings|memory_file|ip_geolocation>)' "
             "on success, or 'Error: ...' if no source resolves. "
             "Sources marked APPROXIMATE (ip_geolocation) may be off by "
             "tens of kilometres due to CGNAT or ISP backbone aggregation "
             "— confirm with the user if precision matters. DO NOT call "
             "this tool for tasks that do not depend on location (math, "
             "coding, general Q&A)."
-            # 解析用户当前城市；按 env > memory > IP 顺序降级；
+            # 解析用户当前城市；按 settings > memory > IP 顺序降级；
             # APPROXIMATE 标记的来源精度有限，必要时与用户确认；
             # 不要为与位置无关的任务（数学、编码）调用此工具。
         )
@@ -91,22 +101,20 @@ class UserLocationTool(BaseTool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        # 1. env var (explicit, highest priority)
-        # 1. 环境变量（显式配置，最高优先级）
-        env_value = (os.getenv("USER_LOCATION") or "").strip()
-        if env_value:
-            return f"City: {env_value} (source=env_var)"
+        # 1. explicit normal configuration
+        if self._configured_location:
+            return f"City: {self._configured_location} (source=settings)"
 
         # 2. memory file: {MEMORY_DIR}/user_location.md
         # 2. 用户事实文件（可手工维护）
         memory_city = await asyncio.to_thread(self._read_memory_file)
         if memory_city:
-            path = os.path.join(config.MEMORY_DIR, "user_location.md")
+            path = os.path.join(self._state_dir, "user_location.md")
             return f"City: {memory_city} (source=memory_file path={path})"
 
         # 3. IP geolocation (default enabled; gated by config flag for privacy)
         # 3. IP 地理定位（默认启用，可通过开关关闭以保护隐私）
-        if config.LOCATION_IP_LOOKUP_ENABLED:
+        if self._ip_lookup:
             ip_city = await asyncio.to_thread(self._lookup_via_ip)
             if ip_city:
                 return (
@@ -117,11 +125,11 @@ class UserLocationTool(BaseTool):
 
         # 4. all sources failed
         # 4. 所有来源均失败
-        memory_path = os.path.join(config.MEMORY_DIR, "user_location.md")
+        memory_path = os.path.join(self._state_dir, "user_location.md")
         return (
             "Error: get_user_location could not resolve a location. "
-            "Set the USER_LOCATION env var, write a city to "
-            f"{memory_path}, ensure LOCATION_IP_LOOKUP_ENABLED is true "
+            "Set tools.user_location in settings.toml, write a city to "
+            f"{memory_path}, enable tools.location_ip_lookup "
             "and network access works, or ask the user directly for "
             "their city."
         )
@@ -136,7 +144,7 @@ class UserLocationTool(BaseTool):
         Read first non-empty, non-comment line from user_location.md.
         读取 user_location.md 第一条非空非注释行。
         """
-        path = os.path.join(config.MEMORY_DIR, "user_location.md")
+        path = os.path.join(self._state_dir, "user_location.md")
         if not os.path.isfile(path):
             return None
         try:
@@ -157,14 +165,14 @@ class UserLocationTool(BaseTool):
         按顺序尝试 IP 定位服务；首个返回非空 city 字段的胜出。
 
         SSL handling strategy (SSL 处理策略):
-          - LOCATION_SSL_VERIFY=false: skip verification for all requests
-          - LOCATION_SSL_VERIFY=true (default): verify first; on SSL error,
+          - tools.location_ssl_verify=false: skip verification for all requests
+          - tools.location_ssl_verify=true (default): verify first; on SSL error,
             retry once with verification disabled for the same service;
             non-SSL errors skip directly to the next service.
         """
         for name, url, extract in _IP_SERVICES:
             # 若用户主动关闭 SSL 验证，直接使用 unverified context
-            if not config.LOCATION_SSL_VERIFY:
+            if not self._ssl_verify:
                 city = self._try_service(name, url, extract, verify=False)
                 if city:
                     return city

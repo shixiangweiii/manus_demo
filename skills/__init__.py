@@ -1,6 +1,6 @@
 """
-Skills module (v20) - Declarative agent skill discovery, registration, and activation.
-技能模块（v20）—— 声明式智能体技能发现、注册与激活。
+Declarative agent skill discovery, registration, and activation.
+声明式智能体技能发现、注册与激活。
 
 Skills are file-system declarative packages (a directory with a SKILL.md file)
 that extend the agent's behavior at runtime. The LLM sees skill descriptions in

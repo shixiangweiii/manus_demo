@@ -7,9 +7,7 @@ Supports any provider that exposes an OpenAI-compatible chat completions endpoin
 支持任何暴露 OpenAI 兼容 chat completions 接口的服务商
 （如 DeepSeek、通义千问/DashScope、Ollama、vLLM 等）。
 
-v6.0: Optional retry mechanism with exponential backoff.
-      Set LLM_RETRY_ENABLED=true to enable retries on transient errors.
-      Default: false (backward compatible).
+Includes optional retry with exponential backoff and structured tracing.
 """
 
 from __future__ import annotations
@@ -20,15 +18,21 @@ import logging
 import re
 from typing import Any
 
-from openai import AsyncOpenAI, RateLimitError, APIError, APITimeoutError, BadRequestError
+from openai import (
+    APIConnectionError,
+    AsyncOpenAI,
+    BadRequestError,
+    InternalServerError,
+    RateLimitError,
+)
 
-import config
-from schema import LLMCallRecord
+from core.settings import AppSettings, get_settings
+from llm.models import LLMCallRecord
 from tracing.spans import AttrKey
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIError)
+RETRYABLE_ERRORS = (APIConnectionError, RateLimitError, InternalServerError)
 
 # Internal message keys that must NOT be sent to the OpenAI-compatible API.
 # These are annotation fields used by engines/tracing/context internally.
@@ -93,7 +97,7 @@ class LLMClient:
     OpenAI 兼容 chat completions API 的轻量异步封装。
     所有智能体共享同一个 LLMClient 实例，统一管理 API 凭证和模型配置。
 
-    v6.0: Optional retry mechanism with exponential backoff.
+    Supports optional retry with exponential backoff.
     """
 
     def __init__(
@@ -102,26 +106,75 @@ class LLMClient:
         api_key: str | None = None,
         model: str | None = None,
         retry_enabled: bool | None = None,
-        max_retries: int | None = None,
+        max_attempts: int | None = None,
         backoff_factor: float | None = None,
+        timeout: float | None = None,
+        token_tracking: bool | None = None,
+        reasoning_token_tracking: bool | None = None,
+        tracing_enabled: bool | None = None,
+        tracing_log_prompts: bool | None = None,
+        tracing_max_attribute_length: int | None = None,
+        settings_snapshot: AppSettings | None = None,
     ):
-        self.model = model or config.LLM_MODEL
+        defaults = settings_snapshot or get_settings()
+        self.model = defaults.llm.model if model is None else model
         self._client = AsyncOpenAI(
-            base_url=base_url or config.LLM_BASE_URL,
-            api_key=api_key or config.LLM_API_KEY,
+            base_url=defaults.llm.base_url if base_url is None else base_url,
+            api_key=defaults.llm.api_key if api_key is None else api_key,
+            timeout=defaults.llm.timeout_seconds if timeout is None else timeout,
         )
 
-        self.retry_enabled = retry_enabled if retry_enabled is not None else config.LLM_RETRY_ENABLED
-        self.max_retries = max_retries if max_retries is not None else config.LLM_RETRY_MAX_ATTEMPTS
-        self.backoff_factor = backoff_factor if backoff_factor is not None else config.LLM_RETRY_BACKOFF_FACTOR
+        self.retry_enabled = retry_enabled if retry_enabled is not None else defaults.llm.retry_enabled
+        self.max_attempts = (
+            max_attempts
+            if max_attempts is not None
+            else defaults.llm.retry_max_attempts
+        )
+        self.backoff_factor = backoff_factor if backoff_factor is not None else defaults.llm.retry_backoff_factor
+        self.token_tracking = token_tracking if token_tracking is not None else defaults.llm.token_tracking
+        self.reasoning_token_tracking = (
+            reasoning_token_tracking
+            if reasoning_token_tracking is not None
+            else defaults.llm.reasoning_token_tracking
+        )
+        self.tracing_enabled = tracing_enabled if tracing_enabled is not None else defaults.tracing.enabled
+        self.tracing_log_prompts = (
+            tracing_log_prompts
+            if tracing_log_prompts is not None
+            else defaults.tracing.log_prompts
+        )
+        self.tracing_max_attribute_length = (
+            tracing_max_attribute_length
+            if tracing_max_attribute_length is not None
+            else defaults.tracing.max_attribute_length
+        )
 
         # Per-call token 消耗记录列表
         self._call_records: list[LLMCallRecord] = []
 
         if self.retry_enabled:
-            logger.info("[LLMClient] Retry enabled (max_attempts=%d, backoff=%.1f)", self.max_retries, self.backoff_factor)
+            logger.info("[LLMClient] Retry enabled (max_attempts=%d, backoff=%.1f)", self.max_attempts, self.backoff_factor)
         else:
-            logger.info("[LLMClient] Retry disabled (backward compatible mode)")
+            logger.info("[LLMClient] Retry disabled")
+
+    @classmethod
+    def from_settings(cls, settings: AppSettings) -> "LLMClient":
+        """Create a client whose behavior comes from one AppSettings snapshot."""
+        return cls(
+            base_url=settings.llm.base_url,
+            api_key=settings.llm.api_key,
+            model=settings.llm.model,
+            retry_enabled=settings.llm.retry_enabled,
+            max_attempts=settings.llm.retry_max_attempts,
+            backoff_factor=settings.llm.retry_backoff_factor,
+            timeout=settings.llm.timeout_seconds,
+            token_tracking=settings.llm.token_tracking,
+            reasoning_token_tracking=settings.llm.reasoning_token_tracking,
+            tracing_enabled=settings.tracing.enabled,
+            tracing_log_prompts=settings.tracing.log_prompts,
+            tracing_max_attribute_length=settings.tracing.max_attribute_length,
+            settings_snapshot=settings,
+        )
 
     # ------------------------------------------------------------------
     # Core chat completion
@@ -141,9 +194,8 @@ class LLMClient:
         简单文本对话，返回 assistant 的文本响应。
         用于需要自由文本输出的场景（如 Reflector 的反馈、ContextManager 的摘要）。
 
-        v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
-        v7.0: Tracing integration — creates llm.chat span when TRACING_ENABLED=true.
-        Wave-6: caller_tag is recorded on the LLMCallRecord and the LLM span so
+        Supports configured retry and creates an llm.chat span when tracing is enabled.
+        caller_tag is recorded on the LLMCallRecord and the LLM span so
                 token usage can be attributed per-agent (SubAgent / Executor / ...).
         """
         # Allow internal callers (e.g. chat_json fallback) to suppress duplicate span creation
@@ -154,7 +206,8 @@ class LLMClient:
         last_error: Exception | None = None
         api_messages = _sanitize_messages_for_api(messages)
         try:
-            for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
+            attempts = self.max_attempts if self.retry_enabled else 1
+            for attempt in range(attempts):
                 try:
                     resp = await self._client.chat.completions.create(
                         model=self.model,
@@ -163,7 +216,7 @@ class LLMClient:
                         max_tokens=max_tokens,
                         **kwargs,
                     )
-                    if config.TOKEN_TRACKING_ENABLED:
+                    if self.token_tracking:
                         self._record_call(resp.usage, "chat", messages, caller_tag=caller_tag)
                     result = resp.choices[0].message.content or ""
                     response_data = self._extract_response_data(resp, "chat")
@@ -171,7 +224,7 @@ class LLMClient:
                     return result
                 except RETRYABLE_ERRORS as exc:
                     last_error = exc
-                    if self.retry_enabled and attempt < self.max_retries:
+                    if self.retry_enabled and attempt + 1 < attempts:
                         wait_time = self.backoff_factor ** attempt
                         logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
                         await asyncio.sleep(wait_time)
@@ -206,9 +259,8 @@ class LLMClient:
         这是 ReAct 循环的核心：让 LLM 自主决策调用哪个工具。
         tool_choice="auto" 让 LLM 自行决定是否调用工具（也可能直接给出文本答案）。
 
-        v6.0: Supports retry with exponential backoff if LLM_RETRY_ENABLED=true.
-        v7.0: Tracing integration — creates llm.chat_with_tools span when TRACING_ENABLED=true.
-        Wave-6: caller_tag is recorded on the LLMCallRecord and the LLM span.
+        Supports configured retry and traces llm.chat_with_tools calls.
+        caller_tag is recorded on the LLMCallRecord and the LLM span.
         """
         span_ctx = self._start_llm_span(
             "chat_with_tools", messages, temperature, max_tokens, caller_tag=caller_tag,
@@ -216,7 +268,8 @@ class LLMClient:
         last_error: Exception | None = None
         api_messages = _sanitize_messages_for_api(messages)
         try:
-            for attempt in range(self.max_retries + 1 if self.retry_enabled else 1):
+            attempts = self.max_attempts if self.retry_enabled else 1
+            for attempt in range(attempts):
                 try:
                     resp = await self._client.chat.completions.create(
                         model=self.model,
@@ -227,7 +280,7 @@ class LLMClient:
                         max_tokens=max_tokens,
                         **kwargs,
                     )
-                    if config.TOKEN_TRACKING_ENABLED:
+                    if self.token_tracking:
                         self._record_call(resp.usage, "chat_with_tools", messages, caller_tag=caller_tag)
                     result = resp.choices[0].message
                     response_data = self._extract_response_data(resp, "chat_with_tools")
@@ -235,7 +288,7 @@ class LLMClient:
                     return result
                 except RETRYABLE_ERRORS as exc:
                     last_error = exc
-                    if self.retry_enabled and attempt < self.max_retries:
+                    if self.retry_enabled and attempt + 1 < attempts:
                         wait_time = self.backoff_factor ** attempt
                         logger.warning("[LLMClient] Retryable error on attempt %d: %s. Waiting %.1fs...", attempt + 1, exc, wait_time)
                         await asyncio.sleep(wait_time)
@@ -268,8 +321,8 @@ class LLMClient:
         则降级为从纯文本中提取 JSON。
         用于 Planner 生成计划、Reflector 生成评估结果等结构化输出场景。
 
-        v7.0: Tracing integration — creates llm.chat_json span when TRACING_ENABLED=true.
-        Wave-6: caller_tag is recorded on the LLMCallRecord and the LLM span.
+        Creates an llm.chat_json span when tracing is enabled.
+        caller_tag is recorded on the LLMCallRecord and the LLM span.
                 The fallback path forwards caller_tag to chat() so attribution
                 survives JSON-mode-not-supported degradation.
         """
@@ -279,36 +332,57 @@ class LLMClient:
         response_data: dict[str, Any] | None = None
         api_messages = _sanitize_messages_for_api(messages)
         try:
-            try:
-                # 优先使用 JSON mode（强制 LLM 输出合法 JSON）
-                resp = await self._client.chat.completions.create(
-                    model=self.model,
-                    messages=api_messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"},  # OpenAI JSON mode
-                    **kwargs,
-                )
-                if config.TOKEN_TRACKING_ENABLED:
-                    self._record_call(resp.usage, "chat_json", messages, caller_tag=caller_tag)
-                text = resp.choices[0].message.content or "{}"
-                logger.debug("[chat_json] Raw response: %.500s", text)
-                response_data = self._extract_response_data(resp, "chat_json")
-            except BadRequestError as exc:
-                # Only fall back when the error is specifically about response_format
-                if "response_format" not in str(exc).lower():
-                    raise
-                # 部分模型/服务不支持 response_format，降级为普通文本模式
-                logger.warning("JSON mode not supported, falling back to plain text: %s", exc)
-                text = await self.chat(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    caller_tag=caller_tag,
-                    _skip_tracing=True,
-                )
-                logger.debug("[chat_json] Fallback response: %.500s", text)
-                response_data = {"response_content": text, "tool_calls": None, "finish_reason": "fallback"}
+            last_error: Exception | None = None
+            attempts = self.max_attempts if self.retry_enabled else 1
+            for attempt in range(attempts):
+                try:
+                    resp = await self._client.chat.completions.create(
+                        model=self.model,
+                        messages=api_messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format={"type": "json_object"},
+                        **kwargs,
+                    )
+                    if self.token_tracking:
+                        self._record_call(resp.usage, "chat_json", messages, caller_tag=caller_tag)
+                    text = resp.choices[0].message.content or "{}"
+                    logger.debug("[chat_json] Raw response: %.500s", text)
+                    response_data = self._extract_response_data(resp, "chat_json")
+                    break
+                except BadRequestError as exc:
+                    if "response_format" not in str(exc).lower():
+                        raise
+                    logger.warning("JSON mode not supported, falling back to plain text: %s", exc)
+                    text = await self.chat(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        caller_tag=caller_tag,
+                        _skip_tracing=True,
+                    )
+                    logger.debug("[chat_json] Fallback response: %.500s", text)
+                    response_data = {
+                        "response_content": text,
+                        "tool_calls": None,
+                        "finish_reason": "fallback",
+                    }
+                    break
+                except RETRYABLE_ERRORS as exc:
+                    last_error = exc
+                    if self.retry_enabled and attempt + 1 < attempts:
+                        wait_time = self.backoff_factor ** attempt
+                        logger.warning(
+                            "[LLMClient] Retryable JSON error on attempt %d: %s. Waiting %.1fs...",
+                            attempt + 1,
+                            exc,
+                            wait_time,
+                        )
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
+            else:
+                raise last_error or RuntimeError("LLM JSON call failed")
 
             result = self.parse_json(text)
             self._end_llm_span(span_ctx, success=True, response_data=response_data)
@@ -368,11 +442,11 @@ class LLMClient:
     ) -> None:
         """Record token usage for a single LLM API call.
 
-        Wave-6: caller_tag identifies which agent issued the call so the
+        caller_tag identifies which agent issued the call so the
         Orchestrator can build a by_caller token view (SubAgent gets its
         own bucket separate from the parent).
         """
-        if not config.TOKEN_TRACKING_ENABLED:
+        if not self.token_tracking:
             return
 
         prompt_summary = ""
@@ -392,9 +466,9 @@ class LLMClient:
         completion_tokens = getattr(usage, 'completion_tokens', 0) or 0
         total_tokens = getattr(usage, 'total_tokens', 0) or 0
 
-        # v14: 提取 reasoning tokens（OpenAI o 系列 / DeepSeek R1）
+        # 提取 reasoning tokens（如 OpenAI o 系列 / DeepSeek R1）。
         reasoning_tokens = 0
-        if config.REASONING_TOKEN_TRACKING:
+        if self.reasoning_token_tracking:
             # OpenAI: usage.completion_tokens_details.reasoning_tokens
             details = getattr(usage, 'completion_tokens_details', None)
             if details:
@@ -423,8 +497,8 @@ class LLMClient:
         self._call_records.clear()
 
     # ------------------------------------------------------------------
-    # Tracing Helpers (v7)
-    # 追踪辅助方法（v7 新增）
+    # Tracing helpers
+    # 追踪辅助方法
     # ------------------------------------------------------------------
 
     def _start_llm_span(
@@ -439,13 +513,13 @@ class LLMClient:
         Start a tracing span for an LLM call (if tracing is enabled).
         为 LLM 调用创建追踪 Span（如果 tracing 已启用）。
 
-        Wave-6: caller_tag is set as `gen_ai.caller` so trace consumers can
+        caller_tag is set as `gen_ai.caller` so trace consumers can
         filter/group LLM spans by issuing agent (SubAgent / Executor / ...).
 
         Returns an opaque context object (span + token) or None.
         返回一个不透明的上下文对象（span + token）或 None。
         """
-        if not config.TRACING_ENABLED:
+        if not self.tracing_enabled:
             return None
 
         try:
@@ -470,18 +544,16 @@ class LLMClient:
             span.set_attribute("gen_ai.request.model", self.model)
             span.set_attribute("gen_ai.call_type", call_type)
             if caller_tag:
-                # Wave-6: per-agent attribution
+                # Per-agent attribution
                 span.set_attribute("gen_ai.caller", caller_tag)
             if temperature is not None:
                 span.set_attribute("gen_ai.request.temperature", temperature)
             if max_tokens is not None:
                 span.set_attribute("gen_ai.request.max_tokens", max_tokens)
 
-            # Record prompt content (full, unconditional, no truncation — demo/tutorial use)
-            # v13: include assistant.tool_calls and tool message correlation fields
-            # (tool_call_id / name) so the trace preserves the v12 ReAct chain.
-            # 把 assistant.tool_calls 与 tool 消息关联字段也带上，否则 v12 ReAct 链路在 trace 里看不见。
-            if messages:
+            # Record prompt content only when explicitly enabled, with the
+            # configured attribute-length limit.
+            if messages and self.tracing_log_prompts:
                 parts = []
                 for msg in messages:
                     role = msg.get("role", "")
@@ -506,7 +578,10 @@ class LLMClient:
                     if body_lines:
                         parts.append(f"{header}\n" + "\n".join(body_lines))
                 if parts:
-                    span.set_attribute("gen_ai.prompt.content", "\n\n".join(parts))
+                    span.set_attribute(
+                        "gen_ai.prompt.content",
+                        "\n\n".join(parts)[:self.tracing_max_attribute_length],
+                    )
 
             import time
             return {"span": span, "token": token, "start_time": time.perf_counter()}
@@ -548,20 +623,29 @@ class LLMClient:
                 if last_record.reasoning_tokens > 0:
                     span.set_attribute(AttrKey.GEN_AI_USAGE_REASONING_TOKENS, last_record.reasoning_tokens)
 
-            # Record full response data (unconditional, no truncation, no sanitization — demo/tutorial use)
+            # Record response content only when prompt logging is enabled.
             if response_data:
                 content = response_data.get("response_content", "")
-                if content:
-                    span.set_attribute("gen_ai.response.content", content)
+                if content and self.tracing_log_prompts:
+                    span.set_attribute(
+                        "gen_ai.response.content",
+                        content[:self.tracing_max_attribute_length],
+                    )
                 tool_calls = response_data.get("tool_calls")
-                if tool_calls:
-                    span.set_attribute("gen_ai.response.tool_calls", json.dumps(tool_calls, ensure_ascii=False))
+                if tool_calls and self.tracing_log_prompts:
+                    span.set_attribute(
+                        "gen_ai.response.tool_calls",
+                        json.dumps(tool_calls, ensure_ascii=False)[:self.tracing_max_attribute_length],
+                    )
                 finish_reason = response_data.get("finish_reason", "")
                 if finish_reason:
                     span.set_attribute("gen_ai.response.finish_reason", finish_reason)
                 thinking = response_data.get("thinking_content", "")
-                if thinking:
-                    span.set_attribute(AttrKey.GEN_AI_RESPONSE_THINKING_CONTENT, thinking[:config.TRACING_MAX_ATTRIBUTE_LENGTH])
+                if thinking and self.tracing_log_prompts:
+                    span.set_attribute(
+                        AttrKey.GEN_AI_RESPONSE_THINKING_CONTENT,
+                        thinking[:self.tracing_max_attribute_length],
+                    )
 
             if success:
                 span.set_status(StatusCode.OK)
@@ -599,8 +683,8 @@ class LLMClient:
             # Response content (text the LLM returned)
             content = getattr(message, "content", None) or ""
 
-            # v14: DeepSeek official API exposes reasoning in message.reasoning_content
-            # v14: DeepSeek 官方 API 将推理内容放在 message.reasoning_content 字段
+            # DeepSeek exposes reasoning in message.reasoning_content.
+            # DeepSeek 官方 API 将推理内容放在 message.reasoning_content 字段。
             reasoning_content = getattr(message, "reasoning_content", None) or ""
 
             # Finish reason (e.g., "stop", "tool_calls", "length")

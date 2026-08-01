@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify as html_to_markdown
 import trafilatura
 
-import config
+from core.settings import ToolSettings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,9 @@ class LocalWebParser:
     _fetch_cache: OrderedDict[str, tuple[str, str]] = OrderedDict()
     _cache_lock = asyncio.Lock()
 
+    def __init__(self, settings: ToolSettings | None = None) -> None:
+        self._settings = settings or get_settings().tools
+
     async def fetch(self, url: str, format_type: str = "markdown") -> LocalWebParserResult:
         html, final_url = await self.fetch_html(url)
         result = self.extract_content(html, final_url, format_type=format_type)
@@ -62,7 +65,7 @@ class LocalWebParser:
             if fallback and len(fallback.content.strip()) > len(result.content.strip()):
                 result = fallback
 
-        if self._is_too_short(result.content) and config.LOCAL_WEBPARSER_BROWSER_FALLBACK:
+        if self._is_too_short(result.content) and self._settings.local_webparser_browser_fallback:
             rendered_html, rendered_url = await self.fetch_rendered_html(final_url)
             rendered_result = self.extract_content(
                 rendered_html,
@@ -93,12 +96,12 @@ class LocalWebParser:
         if cached is not None:
             return cached
 
-        if config.LOCAL_WEBPARSER_RESPECT_ROBOTS:
+        if self._settings.local_webparser_respect_robots:
             allowed = await self._robots_allowed(url)
             if not allowed:
                 raise LocalWebParserError("robots.txt disallows fetching this URL")
 
-        timeout_seconds = max(0.1, float(config.LOCAL_WEBPARSER_TIMEOUT))
+        timeout_seconds = max(0.1, float(self._settings.local_webparser_timeout))
         timeout = httpx.Timeout(
             timeout_seconds,
             connect=min(timeout_seconds, 10.0),
@@ -107,12 +110,12 @@ class LocalWebParser:
             pool=min(timeout_seconds, 10.0),
         )
         headers = {
-            "User-Agent": config.LOCAL_WEBPARSER_USER_AGENT,
+            "User-Agent": self._settings.local_webparser_user_agent,
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,application/xml;q=0.9,*/*;q=0.1",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
 
-        max_bytes = max(1, int(config.LOCAL_WEBPARSER_MAX_BYTES))
+        max_bytes = max(1, int(self._settings.local_webparser_max_bytes))
         async with httpx.AsyncClient(
             follow_redirects=True,
             max_redirects=5,
@@ -196,11 +199,11 @@ class LocalWebParser:
         except Exception as exc:  # pragma: no cover - import availability depends on environment
             raise LocalWebParserError(f"Playwright fallback unavailable: {type(exc).__name__}: {exc}") from exc
 
-        timeout_ms = int(max(1.0, float(config.LOCAL_WEBPARSER_TIMEOUT)) * 1000)
+        timeout_ms = int(max(1.0, float(self._settings.local_webparser_timeout)) * 1000)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
             try:
-                page = await browser.new_page(user_agent=config.LOCAL_WEBPARSER_USER_AGENT)
+                page = await browser.new_page(user_agent=self._settings.local_webparser_user_agent)
                 await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                 try:
                     await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
@@ -311,8 +314,11 @@ class LocalWebParser:
             robots_url = urljoin(origin, "/robots.txt")
             parser = RobotFileParser(robots_url)
             try:
-                async with httpx.AsyncClient(timeout=min(float(config.LOCAL_WEBPARSER_TIMEOUT), 10.0)) as client:
-                    response = await client.get(robots_url, headers={"User-Agent": config.LOCAL_WEBPARSER_USER_AGENT})
+                async with httpx.AsyncClient(timeout=min(float(self._settings.local_webparser_timeout), 10.0)) as client:
+                    response = await client.get(
+                        robots_url,
+                        headers={"User-Agent": self._settings.local_webparser_user_agent},
+                    )
                 if response.status_code >= 500:
                     return False
                 if response.status_code == 404:
@@ -324,7 +330,7 @@ class LocalWebParser:
             except Exception:
                 return False
             self._robots_cache[origin] = parser
-        return parser.can_fetch(config.LOCAL_WEBPARSER_USER_AGENT, url)
+        return parser.can_fetch(self._settings.local_webparser_user_agent, url)
 
     @staticmethod
     def _normalize_format(format_type: str) -> str:
@@ -385,9 +391,8 @@ class LocalWebParser:
             blank = False
         return "\n".join(compacted).strip()
 
-    @staticmethod
-    def _is_too_short(content: str) -> bool:
-        min_len = max(0, int(config.LOCAL_WEBPARSER_MIN_CONTENT_LENGTH))
+    def _is_too_short(self, content: str) -> bool:
+        min_len = max(0, int(self._settings.local_webparser_min_content_length))
         return bool(min_len and len(content.strip()) < min_len)
 
     @staticmethod
@@ -401,25 +406,23 @@ class LocalWebParser:
     def _looks_like_markup(content: str) -> bool:
         return content.lstrip().startswith("<")
 
-    @classmethod
-    async def _get_cached_fetch(cls, url: str) -> tuple[str, str] | None:
-        max_size = max(0, int(config.LOCAL_WEBPARSER_CACHE_SIZE))
+    async def _get_cached_fetch(self, url: str) -> tuple[str, str] | None:
+        max_size = max(0, int(self._settings.local_webparser_cache_size))
         if max_size == 0:
             return None
-        async with cls._cache_lock:
-            cached = cls._fetch_cache.get(url)
+        async with type(self)._cache_lock:
+            cached = type(self)._fetch_cache.get(url)
             if cached is None:
                 return None
-            cls._fetch_cache.move_to_end(url)
+            type(self)._fetch_cache.move_to_end(url)
             return cached
 
-    @classmethod
-    async def _set_cached_fetch(cls, url: str, fetched: tuple[str, str]) -> None:
-        max_size = max(0, int(config.LOCAL_WEBPARSER_CACHE_SIZE))
+    async def _set_cached_fetch(self, url: str, fetched: tuple[str, str]) -> None:
+        max_size = max(0, int(self._settings.local_webparser_cache_size))
         if max_size == 0:
             return
-        async with cls._cache_lock:
-            cls._fetch_cache[url] = fetched
-            cls._fetch_cache.move_to_end(url)
-            while len(cls._fetch_cache) > max_size:
-                cls._fetch_cache.popitem(last=False)
+        async with type(self)._cache_lock:
+            type(self)._fetch_cache[url] = fetched
+            type(self)._fetch_cache.move_to_end(url)
+            while len(type(self)._fetch_cache) > max_size:
+                type(self)._fetch_cache.popitem(last=False)

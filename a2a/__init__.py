@@ -1,6 +1,6 @@
 """
-A2A prototype (v18.4) - local-trusted Agent-to-Agent over MCP.
-A2A 原型（v18.4）—— 走 MCP 的本地可信 agent 间协作。
+Local-trusted Agent-to-Agent collaboration over MCP.
+走 MCP 的本地可信 agent 间协作。
 """
 
 from a2a.client import A2AClient
