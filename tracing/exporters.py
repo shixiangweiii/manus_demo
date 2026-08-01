@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -24,6 +26,10 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 logger = logging.getLogger(__name__)
 
+_NUMBERED_TRACE_FILENAME_RE = re.compile(
+    r"^(?P<trace_id>[0-9a-f]{32})-(?P<date>\d{4}-\d{2}-\d{2})-(?P<sequence>\d+)\.json$"
+)
+
 
 class FileSpanExporter(SpanExporter):
     """
@@ -31,16 +37,21 @@ class FileSpanExporter(SpanExporter):
     将完成的 Span 导出为 JSON 文件。
 
     Each trace is written to a separate file:
-      traces/{trace_id}_{timestamp}.json
+      traces/{trace_id}-{local_date}-{daily_sequence}.json
 
     每个 Trace 写入单独文件：
-      traces/{trace_id}_{timestamp}.json
+      traces/{trace_id}-{本地日期}-{当日序号}.json
+
+    Example / 示例：
+      traces/8eb53a127dd6f657bd646e2745a08157-2026-08-01-01.json
     """
 
     def __init__(self, output_dir: str = "traces"):
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._buffer: dict[str, list[dict]] = defaultdict(list)
+        self._trace_files: dict[str, Path] = {}
+        self._lock = threading.Lock()
         logger.info("[FileSpanExporter] Output directory: %s", self._output_dir.resolve())
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
@@ -55,51 +66,104 @@ class FileSpanExporter(SpanExporter):
                 trace_id = format(span.context.trace_id, "032x")
                 traces[trace_id].append(self._span_to_dict(span))
 
-            # Write each trace to a stable file (keyed by trace_id only)
-            for trace_id, span_dicts in traces.items():
-                filename = f"{trace_id}.json"
-                filepath = self._output_dir / filename
+            # One exporter can receive the same trace in several batches. Keep
+            # filename allocation and read/merge/write serialized so all batches
+            # continue updating one numbered file.
+            # 同一个 trace 可能分多批导出；串行分配和合并，确保只占用一个当日序号。
+            with self._lock:
+                for trace_id, span_dicts in traces.items():
+                    filepath = self._filepath_for_trace(trace_id)
 
-                # Merge with existing file if present (for multi-batch exports of same trace)
-                existing_spans = []
-                if filepath.exists():
-                    try:
-                        with open(filepath, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                            existing_spans = data.get("spans", [])
-                    except (json.JSONDecodeError, OSError):
-                        existing_spans = []
+                    # Merge with existing file if present (for multi-batch exports of same trace)
+                    existing_spans = []
+                    if filepath.stat().st_size:
+                        try:
+                            with open(filepath, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                                existing_spans = data.get("spans", [])
+                        except (json.JSONDecodeError, OSError):
+                            existing_spans = []
 
-                # Merge existing + new, dedup by span_id (defensive against
-                # any pathological re-export), then sort by start_time so the
-                # file content is stable and the viewer reads in chronological order.
-                # 多批合并按 span_id 去重 + 按 start_time 排序，避免重复 export 与文件膨胀。
-                seen_span_ids: set[str] = set()
-                merged: list[dict] = []
-                for s in existing_spans + span_dicts:
-                    sid = s.get("span_id")
-                    if sid and sid in seen_span_ids:
-                        continue
-                    if sid:
-                        seen_span_ids.add(sid)
-                    merged.append(s)
-                merged.sort(key=lambda s: s.get("start_time", "") or "")
+                    # Merge existing + new, dedup by span_id (defensive against
+                    # any pathological re-export), then sort by start_time so the
+                    # file content is stable and the viewer reads in chronological order.
+                    # 多批合并按 span_id 去重 + 按 start_time 排序，避免重复 export 与文件膨胀。
+                    seen_span_ids: set[str] = set()
+                    merged: list[dict] = []
+                    for s in existing_spans + span_dicts:
+                        sid = s.get("span_id")
+                        if sid and sid in seen_span_ids:
+                            continue
+                        if sid:
+                            seen_span_ids.add(sid)
+                        merged.append(s)
+                    merged.sort(key=lambda s: s.get("start_time", "") or "")
 
-                output = {
-                    "trace_id": trace_id,
-                    "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                    "span_count": len(merged),
-                    "spans": merged,
-                }
+                    output = {
+                        "trace_id": trace_id,
+                        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                        "span_count": len(merged),
+                        "spans": merged,
+                    }
 
-                with open(filepath, "w", encoding="utf-8") as f:
-                    json.dump(output, f, indent=2, ensure_ascii=False)
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(output, f, indent=2, ensure_ascii=False)
 
             return SpanExportResult.SUCCESS
 
         except Exception as e:
             logger.error("[FileSpanExporter] Export failed: %s", e, exc_info=True)
             return SpanExportResult.FAILURE
+
+    def _filepath_for_trace(self, trace_id: str) -> Path:
+        """Return one stable, daily-numbered file path for a trace."""
+        cached = self._trace_files.get(trace_id)
+        if cached is not None:
+            return cached
+
+        # Reuse an already allocated numbered file if the exporter is recreated
+        # while the same trace is still being flushed.
+        existing = self._existing_numbered_file(trace_id)
+        if existing is not None:
+            self._trace_files[trace_id] = existing
+            return existing
+
+        local_date = time.strftime("%Y-%m-%d", time.localtime())
+        sequence = self._next_daily_sequence(local_date)
+        while True:
+            filepath = self._output_dir / f"{trace_id}-{local_date}-{sequence:02d}.json"
+            try:
+                # O_EXCL makes sequence allocation safe when multiple processes
+                # export into the same directory at the same time.
+                fd = os.open(filepath, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(fd)
+                self._trace_files[trace_id] = filepath
+                return filepath
+            except FileExistsError:
+                sequence += 1
+
+    def _existing_numbered_file(self, trace_id: str) -> Path | None:
+        candidates: list[tuple[float, Path]] = []
+        for filepath in self._output_dir.glob(f"{trace_id}-*.json"):
+            match = _NUMBERED_TRACE_FILENAME_RE.fullmatch(filepath.name)
+            if match is None or match.group("trace_id") != trace_id:
+                continue
+            try:
+                candidates.append((filepath.stat().st_mtime, filepath))
+            except OSError:
+                continue
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    def _next_daily_sequence(self, local_date: str) -> int:
+        highest = 0
+        for filepath in self._output_dir.glob(f"*-{local_date}-*.json"):
+            match = _NUMBERED_TRACE_FILENAME_RE.fullmatch(filepath.name)
+            if match is None or match.group("date") != local_date:
+                continue
+            highest = max(highest, int(match.group("sequence")))
+        return highest + 1
 
     def shutdown(self) -> None:
         """Flush any remaining data."""

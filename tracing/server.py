@@ -14,6 +14,7 @@ Provides:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,10 @@ app = FastAPI(
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 _traces_dir = Path("traces")
+_TRACE_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+_NUMBERED_TRACE_FILE_RE = re.compile(
+    r"^[0-9a-f]{32}-\d{4}-\d{2}-\d{2}-\d+\.json$"
+)
 
 
 def configure_traces_dir(path: str | Path) -> None:
@@ -147,23 +152,47 @@ def _load_all_traces() -> list[dict[str, Any]]:
     return results
 
 
-def _load_trace(file_id: str) -> dict[str, Any] | None:
-    """
-    Load a single trace file by file_id (filename stem).
-    根据 file_id（文件名主干）加载单个 trace 文件。
-    """
-    # Path traversal protection: reject file_ids containing path separators
+def _resolve_trace_file(file_id: str) -> Path | None:
+    """Resolve an exact file ID or a legacy trace-ID-only viewer link."""
     if "/" in file_id or "\\" in file_id or ".." in file_id:
         return None
 
     traces_dir = _get_traces_dir()
-    filepath = traces_dir / f"{file_id}.json"
+    exact_path = traces_dir / f"{file_id}.json"
+    if (
+        exact_path.exists()
+        and exact_path.resolve().is_relative_to(traces_dir.resolve())
+    ):
+        return exact_path
 
-    # Extra safety: ensure resolved path is still within traces_dir
-    if not filepath.resolve().is_relative_to(traces_dir.resolve()):
+    # WebUI historically linked to /traces/{trace_id}. New numbered files use
+    # a longer file_id, so keep those links working by resolving the newest
+    # matching file. Hex validation prevents glob metacharacters in file_id.
+    if _TRACE_ID_RE.fullmatch(file_id) is None:
         return None
 
-    if not filepath.exists():
+    candidates: list[tuple[float, Path]] = []
+    for filepath in traces_dir.glob(f"{file_id}-*.json"):
+        try:
+            if _NUMBERED_TRACE_FILE_RE.fullmatch(filepath.name) is None:
+                continue
+            if not filepath.resolve().is_relative_to(traces_dir.resolve()):
+                continue
+            candidates.append((filepath.stat().st_mtime, filepath))
+        except OSError:
+            continue
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _load_trace(file_id: str) -> tuple[Path, dict[str, Any]] | None:
+    """
+    Load a single trace file by file_id (filename stem).
+    根据 file_id（文件名主干）加载单个 trace 文件。
+    """
+    filepath = _resolve_trace_file(file_id)
+    if filepath is None:
         return None
 
     try:
@@ -172,7 +201,7 @@ def _load_trace(file_id: str) -> dict[str, Any] | None:
         if not isinstance(data, dict) or not isinstance(data.get("spans", []), list):
             return None
         data["spans"] = [span for span in data.get("spans", []) if isinstance(span, dict)]
-        return data
+        return filepath, data
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -258,9 +287,10 @@ async def trace_list_page(request: Request):
 @app.get("/traces/{file_id}", response_class=HTMLResponse)
 async def trace_detail_page(request: Request, file_id: str):
     """Render the trace detail page with tree view."""
-    data = _load_trace(file_id)
-    if data is None:
+    loaded = _load_trace(file_id)
+    if loaded is None:
         raise HTTPException(status_code=404, detail=f"Trace file not found: {file_id}")
+    filepath, data = loaded
 
     spans = data.get("spans", [])
     tree = _build_span_tree(spans)
@@ -268,7 +298,7 @@ async def trace_detail_page(request: Request, file_id: str):
 
     return templates.TemplateResponse(request, "trace_detail.html", {
         "trace_id": trace_id,
-        "file_id": file_id,
+        "file_id": filepath.stem,
         "exported_at": data.get("exported_at", "N/A"),
         "span_count": len(spans),
         "tree": tree,
@@ -288,15 +318,16 @@ async def api_trace_list():
 @app.get("/api/traces/{file_id}")
 async def api_trace_detail(file_id: str):
     """Return full trace data with tree structure as JSON."""
-    data = _load_trace(file_id)
-    if data is None:
+    loaded = _load_trace(file_id)
+    if loaded is None:
         raise HTTPException(status_code=404, detail=f"Trace file not found: {file_id}")
+    filepath, data = loaded
 
     spans = data.get("spans", [])
     tree = _build_span_tree(spans)
 
     return {
-        "file_id": file_id,
+        "file_id": filepath.stem,
         "trace_id": data.get("trace_id", file_id),
         "exported_at": data.get("exported_at", "N/A"),
         "span_count": len(spans),
