@@ -39,7 +39,7 @@ class SequentialPlanEngine(TaskEngine):
         while True:
             current_results = []
             for step in plan.steps:
-                step.status = StepStatus.IN_PROGRESS
+                step.status = StepStatus.RUNNING
                 action = Action(id=str(step.id), description=step.description)
                 action_result = await self.executor.execute_legacy(
                     action,
