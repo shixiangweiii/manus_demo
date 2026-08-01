@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## Project Purpose & Engineering Posture
+
+This is a local learning project for studying agent development and comparing the strengths, weaknesses, behavior, and execution traces of different reasoning engines. It is not deployed or intended for production use. When the user asks for implementation or improvement work, favor clear experiments, observability, repeatability, and architectural learning over production compatibility or conservative change scope. Substantial refactors are welcome when they make engine comparisons or agent behavior easier to understand and validate; backward compatibility and production hardening are not default constraints unless the user explicitly adds them.
+
+The local-learning posture does not authorize unrequested real LLM, network, or formal evaluation runs, and it does not relax secret handling or protection of unrelated user data. Continue to run those jobs only when explicitly requested, preserve unrelated workspace changes, and report the validation boundary accurately.
+
 ## Project Structure & Module Organization
 
 `main.py` is the thin CLI entry point and `cli.py` contains command handling. Stable contracts and configuration live in `core/`; runtime composition lives in `runtime/`. Task orchestration implementations are under `engines/`, per-action executors are under `execution/`, and reusable native tool-calling loops are under `tool_calling/`. `ToolCallingLoop` handles the standard structured loop; `ReasoningAwareToolCallingLoop` adds reasoning-model budgets and reasoning-only rounds. Neither implements a literal `Thought:` / `Action:` / `Observation:` text protocol. Base and optional tools are registered through `tools/registry.py`. User-facing adapters are `webui/`, `tracing/`, and the unified `evaluation/` package. Retained peripheral capabilities live in `a2a/`, `memory/`, `skills/`, `evolution/`, `guardrails/`, and `checkpoint/`. Treat `sxw_aicoding/`, `agentbay_research/`, generated traces, and local evaluation output as historical or generated material.

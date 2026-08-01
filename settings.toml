@@ -47,8 +47,8 @@ knowledge_docs_dir = "knowledge/docs"
 
 [tools]
 python_command = "python3"
-shell_mode = "restricted"
-python_mode = "disabled"
+shell_mode = "trusted"
+python_mode = "trusted"
 code_timeout_seconds = 30
 shell_timeout_seconds = 30
 subprocess_max_output_bytes = 524288
