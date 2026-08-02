@@ -232,6 +232,8 @@ class ActionToolLoop:
             self.result_truncation_limit,
         )
 
+        # 每个 Action 都从独立 transcript 开始。例如“查询天气”步骤只携带该 Action
+        # 的 prompt 和前序步骤 context，不会继承另一个 DAG 节点的 assistant/tool 消息。
         user_content = prompt
         if context:
             user_content += f"\n\nContext from previous steps:\n{context}"
@@ -250,6 +252,8 @@ class ActionToolLoop:
         )
 
         logger.info("[ActionToolLoop] Starting action %s: %s", step_id, prompt[:100])
+        # 每轮都是一次 Action 级模型决策，受 effort 对应的 max_turns 约束；
+        # 它与 AgentLoop 的任务级 turn 是两层不同的预算。
         for turn in range(1, max_turns + 1):
             turn_identity = {"action_id": str(step_id), "turn": turn}
             turn_completion: dict[str, Any] = {
@@ -369,6 +373,8 @@ class ActionToolLoop:
                         failure_reason=EngineStopReason.ENGINE_ERROR,
                     )
 
+                # 无 tool_calls 且有 output 表示这个 Action 已完成；只有 reasoning 时继续，
+                # 例如模型仅分析“需要先查位置”但尚未发出工具调用，不能提前返回成功。
                 if not tool_calls:
                     if output.strip():
                         if on_iteration:
@@ -428,6 +434,8 @@ class ActionToolLoop:
                     continue
 
                 consecutive_reasoning_rounds = 0
+                # 执行结构化 tool_calls 后，把每个匹配 call_id 的 role="tool" 消息追加到
+                # transcript。例如 get_user_location 的城市结果会成为下一轮模型输入。
                 tool_messages = await execute_tool_calls(
                     tool_calls,
                     self.tools,
@@ -466,6 +474,8 @@ class ActionToolLoop:
                     {**turn_identity, **turn_completion},
                 )
 
+        # 耗尽 Action 级迭代预算时返回 MAX_TURNS，由上层 Sequential/DAG 决定是否反思、
+        # 重新规划或把整项任务标记为失败。
         return StepResult(
             step_id=step_id,
             success=False,

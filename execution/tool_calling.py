@@ -41,6 +41,8 @@ class ToolCallingActionExecutor(ActionExecutor):
             skill_descriptions=getattr(activation, "skill_descriptions", ""),
             skills_max_activations=getattr(activation, "max_activations", 1),
         )
+        # 这里的 system prompt 只约束“完成一个 Action”，不是整项用户任务。
+        # 例如 Sequential 的 Action 是“查询预报”，是否已回答整项天气问题由引擎判断。
         self._system_hint = build_system_prompt(
             "Complete the assigned action using only the tools available to this loop.",
             capabilities=capabilities,
@@ -70,6 +72,8 @@ class ToolCallingActionExecutor(ActionExecutor):
         effort: Effort = Effort.MEDIUM,
     ) -> ActionResult:
         self._events.emit("action_started", {"action": action.model_dump()})
+        # 把公共 Action 契约翻译成 ActionToolLoop 的单条用户消息，并附上前序上下文。
+        # 例如 description="查询明天天气"、context="城市: Los Angeles" 会一起交给模型。
         prompt = f"Execute this action:\n\n{action.description}"
         if action.success_criteria:
             prompt += f"\n\nSuccess criteria: {action.success_criteria}"
@@ -87,6 +91,8 @@ class ToolCallingActionExecutor(ActionExecutor):
                 {"action_id": action.id, "error": f"{type(exc).__name__}: {exc}"},
             )
             raise
+        # 底层 StepResult 是工具循环的保留模型；这里统一转换成各引擎共享的 ActionResult，
+        # 使 Sequential 和 DAG 能用同一字段统计 success、tool_calls 和 stop reason。
         result = self.from_legacy(legacy)
         self._last_stats = legacy.stats
         payload = result.model_dump()

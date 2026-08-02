@@ -143,6 +143,8 @@ class AgentLoop:
                 stop_reason=EngineStopReason.INVALID_RESPONSE,
             )
 
+        # 为本次任务新建 canonical transcript。显式 context 会并入首条 user 消息，
+        # 例如 task="明天天气" 与 context="用户位于上海" 会作为同一轮输入交给模型。
         initial_user = task
         if context:
             initial_user += f"\n\nContext:\n{context}"
@@ -213,6 +215,8 @@ class AgentLoop:
         policy: ToolExecutionPolicy,
     ) -> AgentLoopResult:
         last_text = ""
+        # 一个 agent turn 表示一次任务级模型决策：它可以请求若干工具、只产出
+        # reasoning，或在没有 tool_calls 时给出最终答案。
         while self._turns < turn_limit:
             budget_failure = self._token_budget_failure()
             if budget_failure is not None:
@@ -289,7 +293,8 @@ class AgentLoop:
                 )
                 self._stats.reasoning_tokens += recorded_reasoning_tokens
 
-                # Append the provider message before inspecting its terminal shape.
+                # 先把供应商响应规范化为 canonical assistant 消息；合法消息会在判断
+                # 终止形态前写入历史，畸形结构则返回 INVALID_RESPONSE，不合成 Thought/Action 文本。
                 try:
                     normalized = normalize_model_response(response)
                 except ValueError as exc:
@@ -341,6 +346,8 @@ class AgentLoop:
                 if text:
                     last_text = text
 
+                # 结构化协议的终止规则：没有 tool_calls 且有 text 才是最终回答；
+                # 只有 reasoning 时继续下一轮，二者都没有则是无效响应。
                 if not tool_calls:
                     if text.strip():
                         turn_completion = {
@@ -372,7 +379,8 @@ class AgentLoop:
                     }
                     continue
 
-                # Text accompanying tool calls is intentionally non-terminal.
+                # assistant 同时给出文字和 tool_calls 时，文字不是最终回答。例如模型说
+                # “我先查询位置”并调用 get_user_location，必须把 role="tool" 结果回填后再决策。
                 tool_messages = await execute_tool_calls(
                     tool_calls,
                     self.tools,
@@ -415,6 +423,8 @@ class AgentLoop:
             finally:
                 self._emit("agent_turn_completed", turn_completion)
 
+        # 达到 turn 上限属于未完成；即使上一轮曾伴随 tool_calls 输出说明文字，
+        # 也不能把那段“正在查询……”误报成成功的最终答案。
         output = last_text or f"Task did not complete within {turn_limit} agent turns."
         return self._result(
             output=output,

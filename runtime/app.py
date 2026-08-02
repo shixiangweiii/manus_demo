@@ -54,6 +54,8 @@ class AgentRuntime:
         if self._closed or self._closing:
             raise RuntimeError("AgentRuntime is closing or closed")
         request = task if isinstance(task, TaskRequest) else TaskRequest(task=task)
+        # 单次设置先继承 settings.toml，再应用调用方覆盖项。例如 CLI 只传入
+        # {"engine": "agent_loop"} 时，effort 仍沿用 [runtime] 的配置。
         run_settings = RunSettings.from_app(self.settings)
         if isinstance(overrides, RunSettings):
             run_settings = overrides
@@ -62,9 +64,8 @@ class AgentRuntime:
         self._validate_run_capabilities(run_settings)
 
         self.context.llm_client.reset_usage()
-        # 根据命令参数解析用哪种引擎
-        # 例如：python main.py run "明天天气怎么样？" --engine agent_loop --effort high
-        # 对应 --engine agent_loop
+        # 把公开的 auto effort 落成各引擎的实际档位。例如
+        # --engine agent_loop --effort auto 最终使用 high，供预算和温度策略读取。
         engine_kind = run_settings.engine
         effort = (
             _DEFAULT_EFFORT[engine_kind]
@@ -88,6 +89,8 @@ class AgentRuntime:
 
         checkpoint = self._new_checkpoint(request, engine_kind, effort)
         try:
+            # 这里建立“新任务”边界：先保存初始 checkpoint，再清空工具的任务级状态。
+            # 例如 chat 的第二条任务不能继承第一条任务的 skill 激活次数或 HITL 次数。
             if checkpoint is not None:
                 self.context.checkpoint_store.save(checkpoint)
             for capability in self.context.resettable_capabilities:
@@ -95,10 +98,16 @@ class AgentRuntime:
                 if callable(reset):
                     reset()
 
+            # 在选择引擎前统一补齐上下文。例如“明天天气”可以同时带上调用方 context、
+            # knowledge 检索片段和 memory 提示，三种引擎收到的是同一份 TaskRequest。
             request.context = self._gather_context(request)
-            # 构建引擎（plan引擎和exec执行引擎）
+            # 每次任务只选择一个编排引擎。Sequential/DAG 会再调用 ActionExecutor，
+            # AgentLoop 则由任务级循环直接调用工具，不存在第二个“exec 引擎”。
             engine = self._build_engine(engine_kind, effort)
             result = await engine.run(request)
+
+            # 引擎结果返回后再统一做宿主级收尾：过滤最终输出、写入记忆/学习结果，
+            # 更新 checkpoint，最后发布 task_completed 给终端、Tracing 等订阅者。
             result.output = self._apply_output_guardrail(result.output)
             self._store_conversation(request, result)
             await self._learn_from_result(request, result)
@@ -144,6 +153,8 @@ class AgentRuntime:
             )
             raise
         finally:
+            # 等待异步订阅者消费完本任务最后的事件，避免 task_completed 仍在队列中
+            # 下一条 chat 任务就已经开始，造成展示或 trace 串线。
             await self.events.drain()
 
     def _validate_run_capabilities(self, run: RunSettings) -> None:
@@ -230,6 +241,8 @@ class AgentRuntime:
 
     def _build_action_executor(self, tools=None):
         controller_tools = list(tools) if tools is not None else self._controller_tools()
+        # Plan-and-Execute 的每个 Action 交给一个有界工具循环执行。例如计划步骤
+        # “查询洛杉矶明天天气”会在这里获得自己的 assistant/tool 对话历史。
         executor = ToolCallingActionExecutor(
             llm_client=self.context.llm_client,
             tools=controller_tools,
@@ -262,6 +275,7 @@ class AgentRuntime:
         if kind == EngineKind.AGENT_LOOP:
             from engines.agent_loop import AgentLoopEngine
 
+            # AgentLoop 用一段持续的任务级对话自行决定下一次工具调用或最终回答。
             engine = AgentLoopEngine(**common)
             activation = next(
                 (tool for tool in controller_tools if tool.name == "activate_skill"),
@@ -272,10 +286,14 @@ class AgentRuntime:
             return engine
 
         if kind == EngineKind.SEQUENTIAL:
+            # Sequential 严格逐步执行，整份计划共用一个 ActionExecutor；后一步可读取
+            # 前一步累积的输出，例如先定位城市，再用该城市查询天气。
             return SequentialPlanAndExecuteEngine(
                 executor=self._build_action_executor(controller_tools),
                 **common,
             )
+        # DAG 的就绪节点可能并行执行，因此传入 factory 为每个节点创建独立的
+        # ActionExecutor，避免不同节点共享可变的工具循环历史和统计状态。
         return DagPlanAndExecuteEngine(
             executor=None,
             executor_factory=self._build_action_executor,
@@ -283,6 +301,8 @@ class AgentRuntime:
         )
 
     def _gather_context(self, request: TaskRequest) -> str:
+        # 按“显式上下文 -> 项目知识 -> 长期记忆 -> 经验提示”的顺序拼接。
+        # 例如调用方给出的城市不会被丢弃，检索到的天气工具说明会追加在其后。
         parts = [request.context] if request.context else []
         if self.settings.capabilities.knowledge:
             try:
@@ -330,6 +350,7 @@ class AgentRuntime:
                 logger.debug("Self-evolution hints unavailable", exc_info=True)
         combined = "\n\n".join(part for part in parts if part)
         if self.context.guardrail is not None and combined:
+            # 外部知识和历史记忆在进入模型前统一扫描；例如提示注入内容可在此被中和。
             decision = self.context.guardrail.scan_memory(combined)
             return decision.transformed_text or combined
         return combined

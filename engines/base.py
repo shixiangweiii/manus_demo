@@ -379,6 +379,8 @@ class PlanAndExecuteEngine(TaskEngine):
             failure = exc
             stop_reason = EngineStopReason.ENGINE_ERROR
 
+        # Plan-and-Execute 在这里把异常收敛成可比较的 EngineResult。例如 Planner 的
+        # 非法 JSON 是 INVALID_RESPONSE，ActionExecutor 自身崩溃则是 ENGINE_ERROR。
         actions = list(self.actions)
         result = self.make_result(
             request,
@@ -398,6 +400,8 @@ class PlanAndExecuteEngine(TaskEngine):
     async def synthesize(self, task: str, raw_output: str) -> str:
         if not raw_output.strip():
             return "No usable result was produced."
+        # Sequential/DAG 的步骤输出面向执行，不一定适合直接展示；因此另调用一次 LLM
+        # 合成用户答案。例如把“定位结果 + 预报 JSON”整理成同语言的天气摘要。
         prompt = (
             "Create the final response for the user from the execution results below. "
             "Preserve concrete facts and artifact paths, omit internal planning details, "
@@ -430,6 +434,8 @@ class PlanAndExecuteEngine(TaskEngine):
         stop_reason: EngineStopReason | None = None,
     ) -> EngineResult:
         actions = list(self.actions)
+        # success 与 stop_reason 分开解析：成功固定为 COMPLETED；失败优先使用反思/执行器
+        # 给出的具体原因，否则回看最后一个失败 Action，最后才退化为 ENGINE_ERROR。
         if success:
             resolved_stop_reason = EngineStopReason.COMPLETED
         elif stop_reason is not None:

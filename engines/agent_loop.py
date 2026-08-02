@@ -52,6 +52,8 @@ class AgentLoopEngine(TaskEngine):
             guardrail=guardrail,
             prompt_capabilities=prompt_capabilities,
         )
+        # AgentLoop 不预先生成外部 Plan，也没有独立 Reflector/Synthesizer；同一段任务级
+        # transcript 持续经历“模型决策 -> 工具结果 -> 下一次决策”，直到模型直接作答。
         self._loop = AgentLoop(
             llm_client=self.llm_client,
             tools=self.tools,
@@ -75,6 +77,8 @@ class AgentLoopEngine(TaskEngine):
         started_at = time.time()
         records_before = self.usage_marker()
         self.events.emit("engine_started", {"engine": self.kind.value})
+        # 例如天气任务的第一轮可产生 get_user_location tool_call，工具结果以
+        # role="tool" 回填后，下一轮再决定调用 execute_python 还是直接回答。
         loop_result = await self._loop.run(
             request.task,
             context=request.context,
@@ -90,6 +94,8 @@ class AgentLoopEngine(TaskEngine):
             local_stats=loop_result.stats,
         )
 
+        # loop_result.output 已是模型在“无 tool_calls”轮次给出的最终文本，
+        # 因此这里直接适配公共 EngineResult，不再额外调用一次 LLM 做 synthesis。
         result = self.make_result(
             request,
             output=loop_result.output,

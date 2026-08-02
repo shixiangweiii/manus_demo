@@ -226,6 +226,8 @@ async def execute_tool_calls(
         fn_name = tc.function.name
         _parser = parse_args or json.loads
         argument_error = ""
+        # tool_calls 中的 arguments 是 JSON 字符串，需要先解析并按工具 schema 校验。
+        # 例如 get_user_location 的 "{}" 合法，而传入数组 "[]" 会在执行前直接报错。
         try:
             fn_args = _parser(tc.function.arguments)
             if not isinstance(fn_args, dict):
@@ -330,6 +332,8 @@ async def execute_tool_calls(
         else:
             tool_router.record_success(node_id, func_name)
 
+        # 审计记录与回填模型的文本分别生成：例如超长天气 JSON 可在日志保留摘要，
+        # 给下一轮 LLM 的内容则按 effort 对应上限截断，避免一次工具结果挤满上下文。
         record_result, llm_result = truncate_tool_result_for_llm(
             result,
             effective_truncation,
@@ -350,6 +354,8 @@ async def execute_tool_calls(
         else:
             result_with_marker = llm_result
 
+        # 每个 assistant tool_call 必须有同 call_id 的 role="tool" 响应；这才是实际的
+        # Observation 传输方式，项目不会拼接字面量 "Observation: ..." 再交给模型。
         tool_messages.append({
             "role": "tool",
             "tool_call_id": tool_call.id,

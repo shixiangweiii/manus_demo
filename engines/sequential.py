@@ -33,6 +33,8 @@ class SequentialPlanAndExecuteEngine(PlanAndExecuteEngine):
             temperature=self.settings.engines.reflector_temperature,
             prompt_capabilities=self.prompt_capabilities,
         )
+        # Planner 先把整项任务拆成有序的扁平步骤。例如“明天天气”可拆成
+        # step 1 获取位置、step 2 查询预报、step 3 整理结论。
         self.events.emit("planner_started", {"operation": "create_plan"})
         plan = await self.model_operation(
             planner.create_plan(request.task, request.context),
@@ -57,13 +59,15 @@ class SequentialPlanAndExecuteEngine(PlanAndExecuteEngine):
         reflection = None
         if self.executor is None:
             raise RuntimeError("Sequential engine requires one ActionExecutor")
+        # 外层每轮代表一次完整计划尝试；反思不通过时，Planner 会生成一份新计划，
+        # 并在 max_replan_attempts 预算内回到这里重新执行。
         while True:
             current_results = []
-            # 循环执行执行计划中的步骤
+            # 同一份计划严格按顺序执行，并把每步输出追加到 accumulated_context。
+            # 例如 step 1 输出“Los Angeles”，step 2 的 ActionToolLoop 就能读取该城市。
             for step in plan.steps:
                 step.status = StepStatus.RUNNING
                 action = Action(id=str(step.id), description=step.description)
-                # 执行本次循环中的步骤
                 action_result = await self.executor.execute_legacy(
                     action,
                     context=accumulated_context,
@@ -79,6 +83,8 @@ class SequentialPlanAndExecuteEngine(PlanAndExecuteEngine):
                 if not action_result.success:
                     break
 
+            # Action 成功只表示步骤循环正常结束，Reflector 还要判断结果是否满足原任务。
+            # 例如天气工具请求成功但返回了今天而非明天，reflection 仍应判为不通过。
             self.events.emit("reflector_started", {"operation": "reflect"})
             reflection = await self.model_operation(
                 reflector.reflect(request.task, plan, current_results),
@@ -101,6 +107,7 @@ class SequentialPlanAndExecuteEngine(PlanAndExecuteEngine):
             if replans >= self.settings.engines.max_replan_attempts:
                 break
 
+            # 重新规划会同时参考全部历史结果、失败步骤和反思反馈，避免只机械重跑原计划。
             replans += 1
             self.events.emit(
                 "replan_started",
@@ -140,6 +147,8 @@ class SequentialPlanAndExecuteEngine(PlanAndExecuteEngine):
             if len({step.id for step in plan.steps}) != len(plan.steps):
                 self.reject_invalid_response("Replanner returned duplicate step IDs")
 
+        # 最终 synthesis 汇总所有尝试中产生的可用输出，而 success 只取决于
+        # 最后一轮步骤是否全成功且 reflection.passed，二者不能混为一谈。
         raw = "\n\n".join(result.output for result in all_results if result.output)
         answer = await self.synthesize(request.task, raw)
         success = bool(current_results) and all(

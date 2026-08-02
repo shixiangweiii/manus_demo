@@ -60,7 +60,8 @@ async def _runtime(interactive: bool):
     events = EventBus()
     renderer = ConsoleRenderer()
     events.subscribe(renderer)
-    # 构建运行时
+    # CLI 渲染器和 Runtime 共用同一个 EventBus：例如引擎发出
+    # planner_started 后，ConsoleRenderer 才能把规划阶段实时显示到终端。
     runtime = await build_runtime(settings, events, interactive=interactive)
     return runtime, renderer
 
@@ -74,8 +75,8 @@ def _overrides(args: argparse.Namespace) -> dict:
 
 
 async def _run_command(args: argparse.Namespace) -> None:
-    # 例如：python main.py run "明天天气怎么样？" --engine agent_loop --effort high
-    # args.command 为 "run"
+    # 先处理不执行普通任务的子命令；例如 tasks 只读取 checkpoint，
+    # mcp-server 则把本地工具作为服务暴露，不会进入 AgentRuntime.run。
     if args.command == "tasks":
         from checkpoint.store import RuntimeCheckpointStore
 
@@ -118,16 +119,20 @@ async def _run_command(args: argparse.Namespace) -> None:
             await runtime.aclose()
         return
 
-    # 构建运行时相关必要上下文和工具配置等
+    # run/chat/resume 共用完整 Runtime，其中已经组装好 LLM、工具和可选能力。
+    # 例如 chat 会复用同一个 Runtime 连续处理多条输入，而不是每轮重建工具注册表。
     runtime, renderer = await _runtime(
         interactive=args.command in {"chat", "resume"}
     )
     try:
         if args.command == "run":
-            # runtime.app.AgentRuntime.run
+            # 单任务命令从这里进入统一调度入口；例如 --engine agent_loop
+            # 和 --effort high 会作为本次覆盖项传给 AgentRuntime.run。
             await runtime.run(args.task, _overrides(args))
             return
         if args.command == "resume":
+            # resume 先恢复任务文本、上下文、engine 和 effort，再重新走同一个 run 入口。
+            # 例如 task_id=abc123 对应的 checkpoint 会继续使用其原始引擎配置。
             await runtime.resume(args.task_id)
             return
 
@@ -147,10 +152,12 @@ async def _run_command(args: argparse.Namespace) -> None:
                 break
             if task:
                 try:
+                    # chat 与 run 的任务执行链路相同，区别只是这里会循环接收下一条任务。
                     await runtime.run(task, _overrides(args))
                 except Exception:
                     logging.exception("Task failed")
     finally:
+        # CLI 是这两个异步对象的宿主；即使任务失败，也要停止渲染并释放 LLM 连接。
         await renderer.aclose()
         await runtime.aclose()
 
@@ -173,4 +180,5 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         from tracing import shutdown_tracing
 
+        # Runtime 只关闭自己持有的异步资源；进程级共享 Tracing provider 由 CLI 最后关闭一次。
         shutdown_tracing()

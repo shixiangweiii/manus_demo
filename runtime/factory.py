@@ -32,6 +32,8 @@ class RuntimeInitializationError(RuntimeError):
 
 
 async def _register_capability_tools(context: RuntimeContext) -> None:
+    # 在基础工具集上按开关追加能力：例如 skills 注册 activate_skill，
+    # 只有交互式 chat/resume 才会为 HITL 注册 ask_user。
     settings = context.settings
     caps = settings.capabilities
     registry = context.tools
@@ -178,6 +180,8 @@ async def build_runtime(
 ) -> "Any":
     from runtime.app import AgentRuntime
 
+    # Factory 是应用的组合根：先验证 settings.toml，再把长生命周期依赖
+    # 组装进一个 RuntimeContext，CLI/WebUI 不需要了解各能力的构造细节。
     settings = settings or get_settings()
     validate_settings(settings)
     events = events or EventBus()
@@ -187,14 +191,18 @@ async def build_runtime(
         llm_client = LLMClient.from_settings(settings)
         component = "core services"
         context_manager = ContextManager(max_tokens=settings.execution.max_context_tokens)
+        # 先注册无需能力开关的本地工具。例如 trusted Python 会出现
+        # execute_python；若 python_mode=disabled，该工具不会进入注册表。
         context = RuntimeContext(
             settings=settings,
             llm_client=llm_client,
-            tools=build_default_tools(settings, events), # 默认内置工具
+            tools=build_default_tools(settings, events),
             events=events,
             context_manager=context_manager,
             interactive=interactive,
         )
+        # Tracing、guardrail、checkpoint 等可选服务都挂在同一 Context 上，
+        # 后续构建任意引擎时读取的是同一套运行时能力。
         if settings.tracing.enabled:
             component = "tracing"
             from tracing import TracingBridge, init_tracing
@@ -244,8 +252,11 @@ async def build_runtime(
                         settings=settings.capabilities,
                         on_event=events.legacy_callback,
                     )
+        # AgentRuntime 接管 LLM 等异步资源的生命周期；共享 Tracing provider
+        # 仍由 CLI/WebUI 这类宿主进程负责最终 shutdown。
         return AgentRuntime(context)
     except (ImportError, OSError, ConnectionError, TimeoutError, OpenAIError) as exc:
+        # 初始化中途失败时 Runtime 尚未返回，因此 Factory 必须关闭已创建的 LLM client。
         if llm_client is not None:
             await llm_client.aclose()
         raise RuntimeInitializationError(component, exc) from exc

@@ -28,6 +28,8 @@ class _DagActionAdapter:
         self.results: list[Any] = results if results is not None else []
 
     def create_for_node(self, _node_id: str) -> "_DagActionAdapter":
+        # 每个 DAG 节点拿到独立 ActionExecutor，但共享结果列表。例如两个并行检索节点
+        # 各自维护工具对话历史，完成后仍会汇总到同一个 engine.actions 中。
         return _DagActionAdapter(
             self._engine,
             action_executor=self._engine.new_action_executor(),
@@ -83,6 +85,8 @@ class DagPlanAndExecuteEngine(PlanAndExecuteEngine):
             temperature=self.settings.engines.reflector_temperature,
             prompt_capabilities=self.prompt_capabilities,
         )
+        # Planner 生成带依赖关系的图，而非固定列表。例如“定位”完成后才能运行
+        # “查天气”，但“查交通”可与“查天气”在同一就绪层并行。
         self.events.emit("planner_started", {"operation": "create_dag"})
         dag = await self.model_operation(
             planner.create_dag(request.task, request.context),
@@ -107,6 +111,8 @@ class DagPlanAndExecuteEngine(PlanAndExecuteEngine):
         self.events.emit("dag_created", dag.to_dict())
 
         adapter = _DagActionAdapter(self)
+        # DAGExecutor 负责依赖判定、并发、条件跳过和超时；Adapter 只把一个就绪节点
+        # 转成公共 Action 并交给 ActionExecutor，因此 DAG 层不直接调用具体工具。
         runner = DAGExecutor(
             node_executor=adapter,
             reflector=reflector,
@@ -126,6 +132,7 @@ class DagPlanAndExecuteEngine(PlanAndExecuteEngine):
         self.events.emit("dag_execution_started", {"operation": "execute"})
         raw = await runner.execute(dag)
         self.events.emit("dag_execution_completed", {"operation": "execute"})
+        # 等整张图停止后再做任务级反思与答案合成；节点输出本身不是最终用户回答。
         self.events.emit("reflector_started", {"operation": "reflect_dag"})
         reflection = await self.model_operation(
             reflector.reflect_dag(request.task, dag, adapter.results),
@@ -146,6 +153,8 @@ class DagPlanAndExecuteEngine(PlanAndExecuteEngine):
         completed_actions = [
             node for node in action_nodes if node.status == NodeStatus.COMPLETED
         ]
+        # 严格成功要求图完整、至少执行过一个 Action、没有失败节点且反思通过。
+        # 例如条件节点让分支合法跳过可以完成，但天气 Action 失败不能仅靠 dag.is_complete 判成功。
         success = (
             dag.is_complete()
             and bool(completed_actions)
