@@ -56,7 +56,9 @@ class EngineSettings:
     adaptive_planning: bool = True
     adaptive_interval: int = 1
     adaptive_min_completed: int = 1
+    dag_checkpoint_history_limit: int = 5
     max_agent_turns: int = 30
+    max_agent_total_tokens: int = 240000
     agent_timeout_seconds: float = 600.0
     planner_temperature: float = 0.3
     reflector_temperature: float = 0.1
@@ -125,7 +127,6 @@ class ToolSettings:
 @dataclass
 class CapabilitySettings:
     checkpoint: bool = True
-    checkpoint_max_per_task: int = 5
     subagent: bool = False
     subagent_max_iterations: int = 10
     subagent_timeout_seconds: int = 300
@@ -428,7 +429,9 @@ def validate_settings(settings: AppSettings) -> None:
         "engines.max_parallel_nodes": settings.engines.max_parallel_nodes,
         "engines.adaptive_interval": settings.engines.adaptive_interval,
         "engines.node_timeout_seconds": settings.engines.node_timeout_seconds,
+        "engines.dag_checkpoint_history_limit": settings.engines.dag_checkpoint_history_limit,
         "engines.max_agent_turns": settings.engines.max_agent_turns,
+        "engines.max_agent_total_tokens": settings.engines.max_agent_total_tokens,
         "engines.agent_timeout_seconds": settings.engines.agent_timeout_seconds,
         "execution.max_reasoning_tokens": settings.execution.max_reasoning_tokens,
         "tools.code_timeout_seconds": settings.tools.code_timeout_seconds,
@@ -454,7 +457,6 @@ def validate_settings(settings: AppSettings) -> None:
         "evaluation.max_document_chars": settings.evaluation.max_document_chars,
         "evaluation.default_num_tasks": settings.evaluation.default_num_tasks,
         "evaluation.generation_max_tokens": settings.evaluation.generation_max_tokens,
-        "capabilities.checkpoint_max_per_task": settings.capabilities.checkpoint_max_per_task,
         "capabilities.subagent_max_iterations": settings.capabilities.subagent_max_iterations,
         "capabilities.subagent_timeout_seconds": settings.capabilities.subagent_timeout_seconds,
         "capabilities.subagent_max_concurrent": settings.capabilities.subagent_max_concurrent,

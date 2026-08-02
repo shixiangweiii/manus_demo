@@ -8,7 +8,7 @@ from copy import deepcopy
 from typing import Any, Callable
 from uuid import uuid4
 
-from context.manager import ContextManager
+from context.manager import ContextManager, ContextPreparation
 from core.models import Effort, EngineStats, EngineStopReason
 from execution.models import ResolvedEffort, ToolCallRecord, resolve_effort
 from llm.client import LLMClient
@@ -46,6 +46,7 @@ class AgentLoop:
         on_event: Callable[[str, Any], None] | None = None,
         max_total_tokens: int | None = None,
         max_reasoning_tokens: int = 10_000,
+        tool_failure_threshold: int = 2,
     ) -> None:
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
@@ -77,7 +78,10 @@ class AgentLoop:
         self._tools_full = dict(supplied)
         self._allowed_tool_names: list[str] | None = None
         self.tool_schemas = [tool.to_openai_tool() for tool in self.tools.values()]
-        self.tool_router = ToolRouter(available_tools=list(self.tools))
+        self.tool_router = ToolRouter(
+            available_tools=list(self.tools),
+            failure_threshold=tool_failure_threshold,
+        )
 
         self._history: list[dict[str, Any]] = []
         self._current_log: list[ToolCallRecord] = []
@@ -85,6 +89,8 @@ class AgentLoop:
         self._stats = EngineStats()
         self._caller_tag = f"{self.agent_name}:idle:{uuid4().hex}"
         self._untracked_tokens_used = 0
+        self._compacted_messages: list[dict[str, Any]] | None = None
+        self._compacted_history_size = 0
 
     @property
     def history(self) -> list[dict[str, Any]]:
@@ -102,7 +108,7 @@ class AgentLoop:
 
     @property
     def turns(self) -> int:
-        """Number of model calls consumed so far by the current run."""
+        """Number of task-level agent decision turns in the current run."""
         return self._turns
 
     @property
@@ -113,6 +119,7 @@ class AgentLoop:
     @property
     def stats_snapshot(self) -> EngineStats:
         """Return work observed so far, including an interrupted tool round."""
+        self._refresh_recorded_usage()
         stats = self._stats.model_copy(deep=True)
         stats.tool_calls = len(self._current_log)
         stats.subagent_calls = sum(
@@ -147,15 +154,12 @@ class AgentLoop:
         self._turns = 0
         self._stats = EngineStats()
         self._untracked_tokens_used = 0
+        self._compacted_messages = None
+        self._compacted_history_size = 0
         for tool in self._tools_full.values():
-            if tool.name == self.todo_write.name:
-                continue
             reset = getattr(tool, "reset_task_state", None)
             if callable(reset):
                 reset()
-        # A reused AgentLoop starts a new task with empty task-local TODO state.
-        self.todo_write = TodoWriteTool(on_event=self._emit)
-        self._tools_full[self.todo_write.name] = self.todo_write
         self._allowed_tool_names = None
         self._apply_tool_filter()
         self.tool_router.reset_node("agent-loop")
@@ -209,8 +213,7 @@ class AgentLoop:
         policy: ToolExecutionPolicy,
     ) -> AgentLoopResult:
         last_text = ""
-        model_calls = 0
-        while model_calls < turn_limit:
+        while self._turns < turn_limit:
             budget_failure = self._token_budget_failure()
             if budget_failure is not None:
                 return budget_failure
@@ -218,172 +221,236 @@ class AgentLoop:
             if reasoning_failure is not None:
                 return reasoning_failure
 
-            request_messages = self._history
-            if self.context_manager is not None:
-                prepared = await self.context_manager.prepare_messages(
-                    self._history,
-                    self.llm_client,
-                    caller_tag=caller_tag,
-                )
-                request_messages = prepared.messages
-                self._stats.llm_calls += prepared.llm_calls
-                self._stats.reasoning_tokens += prepared.reasoning_tokens
-                self._untracked_tokens_used += prepared.untracked_tokens
-                model_calls += prepared.llm_calls
-                self._turns = model_calls
+            prepared = await self._prepare_request_messages(caller_tag)
+            request_messages = prepared.messages
+            self._stats.llm_calls += prepared.llm_calls
+            self._stats.context_compaction_calls += prepared.llm_calls
+            self._stats.reasoning_tokens += prepared.reasoning_tokens
+            self._untracked_tokens_used += prepared.untracked_tokens
 
-            # Summarization is part of this loop's budget and may consume the
-            # remainder before the task-level model turn starts.
+            # Compaction remains real model work and consumes the total-token
+            # budget, but it is not a task-level agent decision turn.
             budget_failure = self._token_budget_failure()
             if budget_failure is not None:
                 return budget_failure
             reasoning_failure = self._reasoning_budget_failure()
             if reasoning_failure is not None:
                 return reasoning_failure
-            if model_calls >= turn_limit:
-                output = last_text or (
-                    f"Task did not complete within {turn_limit} model calls."
-                )
-                return self._result(
-                    output=output,
-                    success=False,
-                    stop_reason=EngineStopReason.MAX_TURNS,
-                )
 
-            turn = model_calls + 1
-            self._turns = turn
-            self._emit("agent_turn_started", {"turn": turn})
-            records_before = self._record_count()
             remaining_tokens = self._remaining_tokens()
             prompt_tokens_estimate = ContextManager.estimate_messages_tokens(
                 request_messages
             )
-            try:
-                call_kwargs: dict[str, Any] = {}
-                if remaining_tokens is not None:
-                    completion_budget = remaining_tokens - prompt_tokens_estimate
-                    if completion_budget <= 0:
-                        return self._token_budget_result()
-                    call_kwargs["max_tokens"] = min(4096, completion_budget)
-                # Count the invocation directly.  Usage recording is optional
-                # and must not decide whether an LLM call happened.
-                self._stats.llm_calls += 1
-                model_calls += 1
-                response = await self.llm_client.chat_with_tools(
-                    request_messages,
-                    tools=self.tool_schemas,
-                    temperature=temperature,
-                    caller_tag=caller_tag,
-                    **call_kwargs,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("[AgentLoop] Model call failed: %s", exc)
-                return self._result(
-                    output=f"Model call failed: {type(exc).__name__}: {exc}",
-                    success=False,
-                    stop_reason=EngineStopReason.MODEL_ERROR,
-                )
+            call_kwargs: dict[str, Any] = {}
+            if remaining_tokens is not None:
+                completion_budget = remaining_tokens - prompt_tokens_estimate
+                if completion_budget <= 0:
+                    return self._token_budget_result()
+                call_kwargs["max_tokens"] = min(4096, completion_budget)
 
-            recorded_reasoning_tokens = self._reasoning_tokens_since(
-                records_before,
-                caller_tag,
-            )
-            self._stats.reasoning_tokens += recorded_reasoning_tokens
-
-            # Append the provider message before inspecting its terminal shape.
+            turn = self._turns + 1
+            self._turns = turn
+            self._stats.agent_turns = turn
+            self._emit("agent_turn_started", {"turn": turn})
+            turn_completion: dict[str, Any] = {
+                "turn": turn,
+                "success": False,
+                "outcome": EngineStopReason.ENGINE_ERROR.value,
+            }
+            records_before = self._record_count()
             try:
-                normalized = normalize_model_response(response)
-            except ValueError as exc:
+                try:
+                    # Count the invocation independently of optional usage data.
+                    self._stats.llm_calls += 1
+                    response = await self.llm_client.chat_with_tools(
+                        request_messages,
+                        tools=self.tool_schemas,
+                        temperature=temperature,
+                        caller_tag=caller_tag,
+                        **call_kwargs,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("[AgentLoop] Model call failed: %s", exc)
+                    turn_completion.update(
+                        outcome=EngineStopReason.MODEL_ERROR.value,
+                        stop_reason=EngineStopReason.MODEL_ERROR.value,
+                    )
+                    return self._result(
+                        output=f"Model call failed: {type(exc).__name__}: {exc}",
+                        success=False,
+                        stop_reason=EngineStopReason.MODEL_ERROR,
+                    )
+
+                recorded_reasoning_tokens = self._reasoning_tokens_since(
+                    records_before,
+                    caller_tag,
+                )
+                self._stats.reasoning_tokens += recorded_reasoning_tokens
+
+                # Append the provider message before inspecting its terminal shape.
+                try:
+                    normalized = normalize_model_response(response)
+                except ValueError as exc:
+                    self._account_untracked_model_call(
+                        records_before,
+                        request_messages,
+                        response,
+                    )
+                    turn_completion.update(
+                        outcome=EngineStopReason.INVALID_RESPONSE.value,
+                        stop_reason=EngineStopReason.INVALID_RESPONSE.value,
+                    )
+                    return self._result(
+                        output=f"Model returned an invalid response: {exc}",
+                        success=False,
+                        stop_reason=EngineStopReason.INVALID_RESPONSE,
+                    )
                 self._account_untracked_model_call(
                     records_before,
                     request_messages,
                     response,
+                    assistant_message=normalized.assistant_message,
                 )
-                return self._result(
-                    output=f"Model returned an invalid response: {exc}",
-                    success=False,
-                    stop_reason=EngineStopReason.INVALID_RESPONSE,
-                )
-            self._account_untracked_model_call(
-                records_before,
-                request_messages,
-                response,
-                assistant_message=normalized.assistant_message,
-            )
-            self._history.append(normalized.assistant_message)
-            if normalized.reasoning and recorded_reasoning_tokens <= 0:
-                self._stats.reasoning_tokens += ContextManager.estimate_tokens(
-                    normalized.reasoning
-                )
-            if (
-                self.max_total_tokens is not None
-                and self.tokens_used > self.max_total_tokens
-            ):
-                return self._token_budget_result()
-            reasoning_failure = self._reasoning_budget_failure()
-            if reasoning_failure is not None:
-                return reasoning_failure
-            tool_calls = normalized.tool_calls
-            reasoning = normalized.reasoning
-            text = normalized.output
-            if text:
-                last_text = text
-
-            if not tool_calls:
-                if text.strip():
-                    self._emit("agent_turn_completed", {"turn": turn, "final": True})
-                    return self._result(
-                        output=text,
-                        success=True,
-                        stop_reason=EngineStopReason.COMPLETED,
+                self._history.append(normalized.assistant_message)
+                if normalized.reasoning and recorded_reasoning_tokens <= 0:
+                    self._stats.reasoning_tokens += ContextManager.estimate_tokens(
+                        normalized.reasoning
                     )
-                if not reasoning:
-                    return self._result(
-                        output="Model returned an empty response.",
-                        success=False,
-                        stop_reason=EngineStopReason.INVALID_RESPONSE,
+                if (
+                    self.max_total_tokens is not None
+                    and self.tokens_used > self.max_total_tokens
+                ):
+                    turn_completion.update(
+                        outcome="token_budget",
+                        stop_reason=EngineStopReason.ENGINE_ERROR.value,
                     )
-                # A provider reasoning-only assistant message is a valid turn.
-                # The next request uses that exact history without a fake user
-                # instruction; max_turns remains the convergence guard.
-                self._emit("agent_turn_completed", {"turn": turn, "reasoning_only": True})
-                continue
+                    return self._token_budget_result()
+                reasoning_failure = self._reasoning_budget_failure()
+                if reasoning_failure is not None:
+                    turn_completion.update(
+                        outcome="reasoning_budget",
+                        stop_reason=EngineStopReason.ENGINE_ERROR.value,
+                    )
+                    return reasoning_failure
 
-            # Text accompanying tool calls is intentionally non-terminal.  The
-            # exact assistant message remains in history, then each requested
-            # tool receives one matching result in provider order.
-            tool_messages = await execute_tool_calls(
-                tool_calls,
-                self.tools,
-                self.tool_router,
-                node_id="agent-loop",
-                agent_name=self.agent_name,
-                truncation_limit=policy.truncation_limit,
-                tool_calls_log=self._current_log,
-                log_prefix="AgentLoop",
-                policy=policy,
-                guardrail=self.guardrail,
-                on_event=self._emit,
-                turn=turn,
-            )
-            self._history.extend(tool_messages)
-            self._stats.tool_calls = len(self._current_log)
-            self._stats.subagent_calls = sum(
-                call.tool_name == "subagent" for call in self._current_log
-            )
-            self._emit(
-                "agent_turn_completed",
-                {"turn": turn, "tool_calls": len(tool_calls), "final": False},
-            )
+                tool_calls = normalized.tool_calls
+                reasoning = normalized.reasoning
+                text = normalized.output
+                if text:
+                    last_text = text
 
-        output = last_text or f"Task did not complete within {turn_limit} model calls."
+                if not tool_calls:
+                    if text.strip():
+                        turn_completion = {
+                            "turn": turn,
+                            "success": True,
+                            "outcome": "final",
+                            "final": True,
+                        }
+                        return self._result(
+                            output=text,
+                            success=True,
+                            stop_reason=EngineStopReason.COMPLETED,
+                        )
+                    if not reasoning:
+                        turn_completion.update(
+                            outcome=EngineStopReason.INVALID_RESPONSE.value,
+                            stop_reason=EngineStopReason.INVALID_RESPONSE.value,
+                        )
+                        return self._result(
+                            output="Model returned an empty response.",
+                            success=False,
+                            stop_reason=EngineStopReason.INVALID_RESPONSE,
+                        )
+                    turn_completion = {
+                        "turn": turn,
+                        "success": True,
+                        "outcome": "reasoning_only",
+                        "reasoning_only": True,
+                    }
+                    continue
+
+                # Text accompanying tool calls is intentionally non-terminal.
+                tool_messages = await execute_tool_calls(
+                    tool_calls,
+                    self.tools,
+                    self.tool_router,
+                    node_id="agent-loop",
+                    agent_name=self.agent_name,
+                    truncation_limit=policy.truncation_limit,
+                    tool_calls_log=self._current_log,
+                    log_prefix="AgentLoop",
+                    policy=policy,
+                    guardrail=self.guardrail,
+                    on_event=self._emit,
+                    turn=turn,
+                )
+                self._history.extend(tool_messages)
+                self._stats.tool_calls = len(self._current_log)
+                self._stats.subagent_calls = sum(
+                    call.tool_name == "subagent" for call in self._current_log
+                )
+                turn_completion = {
+                    "turn": turn,
+                    "success": True,
+                    "outcome": "tool_calls",
+                    "tool_calls": len(tool_calls),
+                    "final": False,
+                }
+            except asyncio.CancelledError:
+                turn_completion = {
+                    "turn": turn,
+                    "success": False,
+                    "outcome": "cancelled",
+                }
+                raise
+            except Exception:
+                turn_completion.update(
+                    outcome=EngineStopReason.ENGINE_ERROR.value,
+                    stop_reason=EngineStopReason.ENGINE_ERROR.value,
+                )
+                raise
+            finally:
+                self._emit("agent_turn_completed", turn_completion)
+
+        output = last_text or f"Task did not complete within {turn_limit} agent turns."
         return self._result(
             output=output,
             success=False,
             stop_reason=EngineStopReason.MAX_TURNS,
         )
+
+    async def _prepare_request_messages(
+        self,
+        caller_tag: str,
+    ) -> ContextPreparation:
+        """Reuse a compressed canonical-history view until it exceeds the cap."""
+        if self.context_manager is None:
+            return ContextPreparation(messages=self._history)
+
+        if self._compacted_messages is not None:
+            appended = self._history[self._compacted_history_size:]
+            candidate = [*self._compacted_messages, *appended]
+            if (
+                self.context_manager.estimate_messages_tokens(candidate)
+                <= self.context_manager.max_tokens
+            ):
+                return ContextPreparation(messages=candidate)
+
+        prepared = await self.context_manager.prepare_messages(
+            self._history,
+            self.llm_client,
+            caller_tag=caller_tag,
+        )
+        if prepared.compressed:
+            self._compacted_messages = list(prepared.messages)
+            self._compacted_history_size = len(self._history)
+        else:
+            self._compacted_messages = None
+            self._compacted_history_size = 0
+        return prepared
 
     def _effort_policy(self, effort: ResolvedEffort) -> tuple[float, int]:
         if effort == ResolvedEffort.LOW:
@@ -519,6 +586,7 @@ class AgentLoop:
         success: bool,
         stop_reason: EngineStopReason,
     ) -> AgentLoopResult:
+        self._refresh_recorded_usage()
         self._stats.tool_calls = len(self._current_log)
         return AgentLoopResult(
             output=output,
@@ -527,6 +595,33 @@ class AgentLoop:
             stats=self._stats.model_copy(deep=True),
             tool_calls_log=list(self._current_log),
             turns=self._turns,
+        )
+
+    def _refresh_recorded_usage(self) -> None:
+        """Copy provider-reported usage for this loop into its local stats."""
+        getter = getattr(self.llm_client, "get_call_records", None)
+        if not callable(getter):
+            return
+        records = [
+            record
+            for record in getter()
+            if getattr(record, "caller_tag", "") == self._caller_tag
+        ]
+        self._stats.prompt_tokens = sum(
+            int(getattr(record, "prompt_tokens", 0) or 0)
+            for record in records
+        )
+        self._stats.completion_tokens = sum(
+            int(getattr(record, "completion_tokens", 0) or 0)
+            for record in records
+        )
+        self._stats.total_tokens = self._untracked_tokens_used + sum(
+            int(getattr(record, "total_tokens", 0) or 0)
+            or (
+                int(getattr(record, "prompt_tokens", 0) or 0)
+                + int(getattr(record, "completion_tokens", 0) or 0)
+            )
+            for record in records
         )
 
     def _emit(self, event: str, data: Any = None) -> None:
@@ -556,3 +651,4 @@ class AgentLoop:
                 if name in allowed
             }
         self.tool_schemas = [tool.to_openai_tool() for tool in self.tools.values()]
+        self.tool_router.set_available_tools(list(self.tools))

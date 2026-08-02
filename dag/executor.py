@@ -212,16 +212,39 @@ class DAGExecutor:
             # --- Merge results + validate + handle failures ---
             # --- 合并结果 + 验证完成判据 + 处理失败 ---
             for node, result in zip(batch, results):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                if isinstance(result, BaseException) and not isinstance(
+                    result,
+                    Exception,
+                ):
+                    raise result
                 # Check for unexpected exceptions from asyncio.gather (not StepResult)
                 # 检查 asyncio.gather 返回的异常（非 StepResult 对象）
                 if isinstance(result, Exception):
                     logger.error("[DAGExecutor] Unexpected exception for node %s: %s", node.id, result)
+                    external_result = StepResult(
+                        step_id=node.id,
+                        success=False,
+                        output=(
+                            f"Unexpected error: {type(result).__name__}: {result}"
+                        ),
+                        failure_reason=EngineStopReason.ENGINE_ERROR,
+                    )
+                    self._record_external_result(external_result)
                     if node.status == NodeStatus.PENDING:
                         self._sm.transition(node, NodeStatus.READY)
                     if node.status == NodeStatus.READY:
                         self._sm.transition(node, NodeStatus.RUNNING)
                     self._sm.transition(node, NodeStatus.FAILED)
-                    self._emit("node_failed", {"node": node, "result": None, "reason": "unexpected_exception"})
+                    self._emit(
+                        "node_failed",
+                        {
+                            "node": node,
+                            "result": external_result,
+                            "reason": "unexpected_exception",
+                        },
+                    )
                     self._track_node_attempt(node)
                     self.failure_reasons.append(EngineStopReason.ENGINE_ERROR)
                     await self._handle_failure(node, dag)

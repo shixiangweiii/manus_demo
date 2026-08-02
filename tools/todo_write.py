@@ -141,3 +141,9 @@ class TodoWriteTool(BaseTool):
                 },
             )
         return f"TODO snapshot updated ({len(snapshot)} items)."
+
+    def reset_task_state(self) -> None:
+        """Clear task-local display state before reusing the owning AgentLoop."""
+        self._todos = []
+        self._last_submitted = []
+        self._update_count = 0

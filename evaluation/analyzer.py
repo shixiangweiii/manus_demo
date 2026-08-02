@@ -12,10 +12,17 @@ def analyze_runs(runs: list[EvalRunRecord]) -> AggregateAnalysis:
         analysis.findings.append("没有已完成且包含报告的运行。")
         return analysis
     best_success = max(summaries, key=lambda item: item.success_rate)
+    best_engine_success = max(
+        summaries,
+        key=lambda item: item.engine_success_rate,
+    )
     fastest = min(summaries, key=lambda item: item.average_latency_ms)
     analysis.findings.extend(
         [
             f"成功率最高：{best_success.experiment_id} ({best_success.success_rate:.1%})。",
+            "引擎自报完成率最高："
+            f"{best_engine_success.experiment_id} "
+            f"({best_engine_success.engine_success_rate:.1%})。",
             f"平均延迟最低：{fastest.experiment_id} ({fastest.average_latency_ms:.0f} ms)。",
         ]
     )

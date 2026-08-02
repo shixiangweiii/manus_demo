@@ -61,6 +61,11 @@ class EngineStats(BaseModel):
     """Small cross-engine counters suitable for comparison and tracing."""
 
     llm_calls: int = 0
+    agent_turns: int = 0
+    context_compaction_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
     tool_calls: int = 0
     reasoning_tokens: int = 0
     subagent_calls: int = 0
@@ -98,6 +103,7 @@ class ActionResult(BaseModel):
             failure_reason=self.failure_reason,
             stats=ActionLoopStats(
                 llm_calls=self.stats.llm_calls,
+                context_compaction_calls=self.stats.context_compaction_calls,
                 tool_calls=self.stats.tool_calls,
                 reasoning_tokens=self.stats.reasoning_tokens,
             ),

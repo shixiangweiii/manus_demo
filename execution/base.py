@@ -44,6 +44,7 @@ class ActionExecutor(ABC):
             failure_reason=result.failure_reason,
             stats=ActionLoopStats(
                 llm_calls=result.stats.llm_calls,
+                context_compaction_calls=result.stats.context_compaction_calls,
                 tool_calls=result.stats.tool_calls,
                 reasoning_tokens=result.stats.reasoning_tokens,
             ),
@@ -68,6 +69,9 @@ class ActionExecutor(ABC):
             failure_reason=result.failure_reason,
             stats=EngineStats(
                 llm_calls=int(getattr(local_stats, "llm_calls", 0) or 0),
+                context_compaction_calls=int(
+                    getattr(local_stats, "context_compaction_calls", 0) or 0
+                ),
                 tool_calls=int(getattr(local_stats, "tool_calls", 0) or 0),
                 reasoning_tokens=int(
                     getattr(local_stats, "reasoning_tokens", 0) or 0

@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from core.models import Effort, EngineKind
+from core.models import Effort, EngineKind, EngineStopReason
 
 _VERIFIER_TYPES = {
     "file_exists",
@@ -152,9 +152,18 @@ class ExperimentSpec(BaseModel):
 
 
 class CaseMetrics(BaseModel):
+    """Independent engine, verifier, cost, and latency observations."""
+
     success: bool = False
+    engine_success: bool = False
     verifier_passed: bool | None = None
+    stop_reason: EngineStopReason | None = None
     llm_calls: int = 0
+    agent_turns: int = 0
+    context_compaction_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
     latency_ms: float = 0.0
     tool_calls: int = 0
     reasoning_tokens: int = 0
@@ -178,8 +187,15 @@ class DimensionSummary(BaseModel):
     experiment_id: str
     cases: int = 0
     success_rate: float = 0.0
+    engine_success_rate: float = 0.0
     verifier_rate: float | None = None
+    stop_reason_counts: dict[str, int] = Field(default_factory=dict)
     average_llm_calls: float = 0.0
+    average_agent_turns: float = 0.0
+    average_context_compaction_calls: float = 0.0
+    average_prompt_tokens: float = 0.0
+    average_completion_tokens: float = 0.0
+    average_total_tokens: float = 0.0
     average_latency_ms: float = 0.0
     average_tool_calls: float = 0.0
     average_reasoning_tokens: float = 0.0

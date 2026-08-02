@@ -30,9 +30,23 @@ class AgentRuntime:
         self.events = context.events
         self._closed = False
         self._closing = False
+        self._run_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
 
     async def run(
+        self,
+        task: str | TaskRequest,
+        overrides: dict[str, Any] | RunSettings | None = None,
+    ) -> EngineResult:
+        """Run at most one task at a time on this mutable runtime instance."""
+        if self._closed or self._closing:
+            raise RuntimeError("AgentRuntime is closing or closed")
+        async with self._run_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("AgentRuntime is closing or closed")
+            return await self._run_once(task, overrides)
+
+    async def _run_once(
         self,
         task: str | TaskRequest,
         overrides: dict[str, Any] | RunSettings | None = None,
@@ -151,8 +165,9 @@ class AgentRuntime:
                 return
             self._closing = True
             try:
-                await self.events.drain()
-                await self.context.llm_client.aclose()
+                async with self._run_lock:
+                    await self.events.drain()
+                    await self.context.llm_client.aclose()
             except BaseException:
                 self._closing = False
                 raise
@@ -252,15 +267,15 @@ class AgentRuntime:
                 activation.set_tool_filter_callback(engine.set_allowed_tools)
             return engine
 
-        executor = self._build_action_executor(controller_tools)
-        engine_types = {
-            EngineKind.SEQUENTIAL: SequentialPlanAndExecuteEngine,
-            EngineKind.DAG: DagPlanAndExecuteEngine,
-        }
-        return engine_types[kind](
-            executor=executor,
-            **common,
+        if kind == EngineKind.SEQUENTIAL:
+            return SequentialPlanAndExecuteEngine(
+                executor=self._build_action_executor(controller_tools),
+                **common,
+            )
+        return DagPlanAndExecuteEngine(
+            executor=None,
             executor_factory=self._build_action_executor,
+            **common,
         )
 
     def _gather_context(self, request: TaskRequest) -> str:

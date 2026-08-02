@@ -124,8 +124,17 @@ class EvaluationRunner:
                 output=engine_result.output,
                 metrics=CaseMetrics(
                     success=success,
+                    engine_success=engine_result.success,
                     verifier_passed=verifier_passed,
+                    stop_reason=engine_result.stop_reason,
                     llm_calls=engine_result.stats.llm_calls,
+                    agent_turns=engine_result.stats.agent_turns,
+                    context_compaction_calls=(
+                        engine_result.stats.context_compaction_calls
+                    ),
+                    prompt_tokens=engine_result.stats.prompt_tokens,
+                    completion_tokens=engine_result.stats.completion_tokens,
+                    total_tokens=engine_result.stats.total_tokens,
                     latency_ms=elapsed_ms,
                     tool_calls=engine_result.stats.tool_calls,
                     reasoning_tokens=engine_result.stats.reasoning_tokens,

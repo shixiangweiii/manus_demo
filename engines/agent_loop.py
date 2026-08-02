@@ -64,6 +64,8 @@ class AgentLoopEngine(TaskEngine):
             result_truncation_limit=self.settings.tools.result_truncation_limit,
             on_event=self.events.legacy_callback,
             max_reasoning_tokens=self.settings.execution.max_reasoning_tokens,
+            max_total_tokens=self.settings.engines.max_agent_total_tokens,
+            tool_failure_threshold=self.settings.tools.failure_threshold,
         )
 
     def set_allowed_tools(self, tool_names: list[str] | None) -> None:

@@ -27,15 +27,15 @@ class TracingBridge:
         self._root_span: Span | None = None
         self._engine_span: Span | None = None
         self._action_spans: dict[str, Span] = {}
-        self._action_turn_spans: dict[str, Span] = {}
-        self._tool_spans: dict[str, Span] = {}
+        self._action_turn_spans: dict[tuple[str, str, int], Span] = {}
+        self._tool_spans: dict[tuple[str, str, str], Span] = {}
         self._turn_spans: dict[str, Span] = {}
         self._phase_spans: dict[str, Span] = {}
         self._context_token: object | None = None
         self._engine_token: object | None = None
         self._action_tokens: dict[str, object] = {}
-        self._action_turn_tokens: dict[str, object] = {}
-        self._tool_tokens: dict[str, object] = {}
+        self._action_turn_tokens: dict[tuple[str, str, int], object] = {}
+        self._tool_tokens: dict[tuple[str, str, str], object] = {}
         self._turn_tokens: dict[str, object] = {}
         self._phase_tokens: dict[str, object] = {}
 
@@ -105,7 +105,10 @@ class TracingBridge:
             self._turn_tokens[turn_key] = attach(set_span_in_context(span))
             return
         if event.name == "agent_turn_completed":
-            self._finish_turn(self._turn_key(payload), failed=False)
+            self._finish_turn(
+                self._turn_key(payload),
+                failed=payload.get("success") is False,
+            )
             return
         if event.name == "agent_loop_completed":
             self._finish_turn(
@@ -267,21 +270,21 @@ class TracingBridge:
         return str(payload.get("subagent_id") or "root")
 
     @staticmethod
-    def _action_turn_key(payload: dict[str, Any]) -> str:
+    def _action_turn_key(payload: dict[str, Any]) -> tuple[str, str, int]:
         owner = str(payload.get("subagent_id") or "root")
         action_id = TracingBridge._action_id(payload) or "no-action"
         turn = int(payload.get("turn", 0) or 0)
-        return f"{owner}:{action_id}:{turn}"
+        return owner, action_id, turn
 
     @staticmethod
-    def _tool_key(payload: dict[str, Any], call_id: str) -> str:
+    def _tool_key(payload: dict[str, Any], call_id: str) -> tuple[str, str, str]:
         owner = str(payload.get("subagent_id") or "root")
         # OpenAI only requires a tool-call ID to be unique within one assistant
         # response.  Concurrent DAG actions may therefore both emit ``call_1``.
         # Include the action boundary so one action cannot overwrite another's
         # active span in the bridge's shared dictionaries.
         action_id = TracingBridge._action_id(payload) or "no-action"
-        return f"{owner}:{action_id}:{call_id}"
+        return owner, action_id, call_id
 
     def _finish_turn(self, key: str, *, failed: bool) -> None:
         span = self._turn_spans.pop(key, None)
@@ -294,12 +297,12 @@ class TracingBridge:
 
     def _finish_action_turn(
         self,
-        key: str,
+        key: tuple[str, str, int],
         *,
         payload: dict[str, Any] | None = None,
         failed: bool,
     ) -> None:
-        action_id = key.rsplit(":", 1)[0].split(":", 1)[-1]
+        action_id = key[1]
         self._finish_tools_for_action(action_id, failed=failed)
         span = self._action_turn_spans.pop(key, None)
         self._safe_detach(self._action_turn_tokens.pop(key, None))
@@ -324,24 +327,27 @@ class TracingBridge:
         *,
         failed: bool,
     ) -> None:
-        marker = f":{action_id}:"
         for key in tuple(self._action_turn_spans):
-            if marker in key:
+            if key[1] == action_id:
                 self._finish_action_turn(key, failed=failed)
 
     def _finish_action_turns(self, *, failed: bool) -> None:
         for key in tuple(self._action_turn_spans):
             self._finish_action_turn(key, failed=failed)
 
-    def _finish_tool(self, key: str, *, failed: bool) -> None:
+    def _finish_tool(
+        self,
+        key: tuple[str, str, str],
+        *,
+        failed: bool,
+    ) -> None:
         span = self._tool_spans.pop(key, None)
         self._safe_detach(self._tool_tokens.pop(key, None))
         self._end_span(span, failed=failed)
 
     def _finish_tools_for_action(self, action_id: str, *, failed: bool) -> None:
-        marker = f":{action_id}:"
         for key in tuple(self._tool_spans):
-            if marker in key:
+            if key[1] == action_id:
                 self._finish_tool(key, failed=failed)
 
     def _finish_tools(self, *, failed: bool) -> None:

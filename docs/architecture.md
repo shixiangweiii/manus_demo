@@ -18,6 +18,6 @@ Native tool calls and matching `role="tool"` results form the action/observation
 
 Tracing follows the execution hierarchy: task → engine → AgentLoop turn → LLM/tool call. Plan-and-Execute adds planner, action, DAG-execution, and reflector spans; every ActionToolLoop model round is represented as action → action-loop turn → LLM/tool call, including failed and cancelled turns.
 
-Checkpoints store the engine, effort, task, and latest semantic state. Runtime results expose `output`, `stop_reason`, and `stats`; the shared statistics contract records whole-call-tree LLM calls, tool calls, reasoning tokens, and Subagent calls by combining loop-local observations with isolated child-loop aggregates and global usage records.
+Checkpoints store the engine, effort, task, and latest semantic state. Runtime results expose `output`, `stop_reason`, and `stats`; the shared statistics contract records whole-call-tree physical LLM calls, AgentLoop task turns, context-compaction calls, prompt/completion/total tokens, tool calls, reasoning tokens, and SubAgent calls by combining loop-local observations with isolated child-loop aggregates and global usage records.
 
 The runtime owns its LLM HTTP client and exposes idempotent `aclose()`. CLI commands, WebUI sessions, and each evaluation unit close the runtimes they create. The process host owns the shared tracing provider and flushes it only during overall shutdown.

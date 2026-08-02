@@ -26,8 +26,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-import config
-
 logger = logging.getLogger(__name__)
 
 
@@ -66,10 +64,12 @@ class ToolRouter:
     def __init__(
         self,
         available_tools: list[str],
-        failure_threshold: int | None = None,
+        failure_threshold: int = 2,
     ):
+        if failure_threshold <= 0:
+            raise ValueError("failure_threshold must be greater than zero")
         self._available_tools = list(available_tools)
-        self._threshold = failure_threshold or config.TOOL_FAILURE_THRESHOLD
+        self._threshold = failure_threshold
         # node_id -> tool_name -> ToolStats
         self._stats: dict[str, dict[str, ToolStats]] = {}
 
@@ -133,6 +133,10 @@ class ToolRouter:
         建议在该节点中尚未连续失败的工具。"""
         failing = set(self.get_failing_tools(node_id))
         return [t for t in self._available_tools if t not in failing and t != failed_tool]
+
+    def set_available_tools(self, available_tools: list[str]) -> None:
+        """Replace the active tool set without discarding usage statistics."""
+        self._available_tools = list(dict.fromkeys(available_tools))
 
     def get_hint(self, node_id: str) -> str:
         """

@@ -60,6 +60,7 @@ class SubAgentTool(BaseTool):
         result_truncation_limit: int = 2000,
         python_command: str = "python3",
         max_reasoning_tokens: int = 10_000,
+        tool_failure_threshold: int = 2,
     ) -> None:
         self._llm_client = llm_client
         self._available_tools = dict(available_tools)
@@ -80,6 +81,7 @@ class SubAgentTool(BaseTool):
         self._result_truncation_limit = result_truncation_limit
         self._python_command = python_command
         self._max_reasoning_tokens = max_reasoning_tokens
+        self._tool_failure_threshold = tool_failure_threshold
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._call_count = 0
         self._subagent_counter = 0
@@ -216,6 +218,7 @@ class SubAgentTool(BaseTool):
             on_event=on_child_event,
             max_total_tokens=self._max_tokens,
             max_reasoning_tokens=self._max_reasoning_tokens,
+            tool_failure_threshold=self._tool_failure_threshold,
         )
         if activation is not None:
             activation.set_tool_filter_callback(loop.set_allowed_tools)
@@ -395,6 +398,13 @@ class SubAgentTool(BaseTool):
 
     def _accumulate_stats(self, stats: EngineStats) -> None:
         self.aggregate_stats.llm_calls += stats.llm_calls
+        self.aggregate_stats.agent_turns += stats.agent_turns
+        self.aggregate_stats.context_compaction_calls += (
+            stats.context_compaction_calls
+        )
+        self.aggregate_stats.prompt_tokens += stats.prompt_tokens
+        self.aggregate_stats.completion_tokens += stats.completion_tokens
+        self.aggregate_stats.total_tokens += stats.total_tokens
         self.aggregate_stats.tool_calls += stats.tool_calls
         self.aggregate_stats.reasoning_tokens += stats.reasoning_tokens
         self.aggregate_stats.subagent_calls += 1

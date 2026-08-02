@@ -55,6 +55,8 @@ class SequentialPlanAndExecuteEngine(PlanAndExecuteEngine):
         planned_actions = len(plan.steps)
         current_results = []
         reflection = None
+        if self.executor is None:
+            raise RuntimeError("Sequential engine requires one ActionExecutor")
         while True:
             current_results = []
             for step in plan.steps:

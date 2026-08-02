@@ -33,6 +33,7 @@ class CodeExecutorTool(BaseTool):
         max_output_bytes: int,
         ssl_verify: bool,
         max_concurrent: int,
+        concurrency_limiter: asyncio.Semaphore | None = None,
     ) -> None:
         if not trusted:
             raise ValueError(
@@ -42,7 +43,9 @@ class CodeExecutorTool(BaseTool):
         self._timeout = timeout
         self._max_output_bytes = max_output_bytes
         self._ssl_verify = ssl_verify
-        self._concurrency_sem = asyncio.Semaphore(max_concurrent)
+        self._concurrency_sem = concurrency_limiter or asyncio.Semaphore(
+            max_concurrent
+        )
         self._max_concurrent = max_concurrent
 
     def for_sandbox(self, sandbox_dir: str) -> "CodeExecutorTool":
@@ -54,6 +57,7 @@ class CodeExecutorTool(BaseTool):
             max_output_bytes=self._max_output_bytes,
             ssl_verify=self._ssl_verify,
             max_concurrent=self._max_concurrent,
+            concurrency_limiter=self._concurrency_sem,
         )
 
     @property

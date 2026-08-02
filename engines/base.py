@@ -41,9 +41,13 @@ class _PlanInvalidResponse(ValueError):
 class RecordingActionExecutor(ActionExecutor):
     """Record the action trajectory without changing executor behavior."""
 
-    def __init__(self, inner: ActionExecutor) -> None:
+    def __init__(
+        self,
+        inner: ActionExecutor,
+        results: list[ActionResult] | None = None,
+    ) -> None:
         self.inner = inner
-        self.results: list[ActionResult] = []
+        self.results = results if results is not None else []
 
     async def execute(
         self,
@@ -143,6 +147,22 @@ class TaskEngine(ABC):
         if local_stats is None:
             root_stats = EngineStats(
                 llm_calls=sum(action.stats.llm_calls for action in action_results),
+                agent_turns=sum(
+                    action.stats.agent_turns for action in action_results
+                ),
+                context_compaction_calls=sum(
+                    action.stats.context_compaction_calls
+                    for action in action_results
+                ),
+                prompt_tokens=sum(
+                    action.stats.prompt_tokens for action in action_results
+                ),
+                completion_tokens=sum(
+                    action.stats.completion_tokens for action in action_results
+                ),
+                total_tokens=sum(
+                    action.stats.total_tokens for action in action_results
+                ),
                 tool_calls=sum(
                     action.stats.tool_calls for action in action_results
                 ),
@@ -162,6 +182,13 @@ class TaskEngine(ABC):
             if aggregate is None:
                 continue
             child_stats.llm_calls += int(aggregate.llm_calls)
+            child_stats.agent_turns += int(aggregate.agent_turns)
+            child_stats.context_compaction_calls += int(
+                aggregate.context_compaction_calls
+            )
+            child_stats.prompt_tokens += int(aggregate.prompt_tokens)
+            child_stats.completion_tokens += int(aggregate.completion_tokens)
+            child_stats.total_tokens += int(aggregate.total_tokens)
             child_stats.tool_calls += int(aggregate.tool_calls)
             child_stats.reasoning_tokens += int(aggregate.reasoning_tokens)
             child_stats.subagent_calls += int(aggregate.subagent_calls)
@@ -175,8 +202,37 @@ class TaskEngine(ABC):
         locally_observed_reasoning = (
             root_stats.reasoning_tokens + child_stats.reasoning_tokens
         )
+        recorded_prompt_tokens = sum(
+            int(record.prompt_tokens or 0) for record in records
+        )
+        recorded_completion_tokens = sum(
+            int(record.completion_tokens or 0) for record in records
+        )
+        recorded_total_tokens = sum(
+            int(record.total_tokens or 0)
+            or int(record.prompt_tokens or 0)
+            + int(record.completion_tokens or 0)
+            for record in records
+        )
         return EngineStats(
             llm_calls=max(len(records), locally_observed_llm_calls),
+            agent_turns=root_stats.agent_turns + child_stats.agent_turns,
+            context_compaction_calls=(
+                root_stats.context_compaction_calls
+                + child_stats.context_compaction_calls
+            ),
+            prompt_tokens=max(
+                recorded_prompt_tokens,
+                root_stats.prompt_tokens + child_stats.prompt_tokens,
+            ),
+            completion_tokens=max(
+                recorded_completion_tokens,
+                root_stats.completion_tokens + child_stats.completion_tokens,
+            ),
+            total_tokens=max(
+                recorded_total_tokens,
+                root_stats.total_tokens + child_stats.total_tokens,
+            ),
             tool_calls=root_tool_calls + child_stats.tool_calls,
             reasoning_tokens=max(
                 sum(record.reasoning_tokens for record in records),
@@ -235,7 +291,7 @@ class PlanAndExecuteEngine(TaskEngine):
     def __init__(
         self,
         llm_client: LLMClient,
-        executor: ActionExecutor,
+        executor: ActionExecutor | None,
         settings: AppSettings,
         events: EventBus,
         effort: Effort,
@@ -255,13 +311,20 @@ class PlanAndExecuteEngine(TaskEngine):
             guardrail=guardrail,
             prompt_capabilities=prompt_capabilities,
         )
-        self.executor = RecordingActionExecutor(executor)
+        self.actions: list[ActionResult] = []
+        self.executor = (
+            RecordingActionExecutor(executor, results=self.actions)
+            if executor is not None
+            else None
+        )
         self.executor_factory = executor_factory
 
     def new_action_executor(self) -> ActionExecutor:
         if self.executor_factory is not None:
             return self.executor_factory()
-        return self.executor.inner
+        if self.executor is not None:
+            return self.executor.inner
+        raise RuntimeError("Plan-and-Execute engine has no ActionExecutor")
 
     async def model_operation(
         self,
@@ -316,7 +379,7 @@ class PlanAndExecuteEngine(TaskEngine):
             failure = exc
             stop_reason = EngineStopReason.ENGINE_ERROR
 
-        actions = list(self.executor.results)
+        actions = list(self.actions)
         result = self.make_result(
             request,
             output=str(failure),
@@ -366,7 +429,7 @@ class PlanAndExecuteEngine(TaskEngine):
         metadata: dict | None = None,
         stop_reason: EngineStopReason | None = None,
     ) -> EngineResult:
-        actions = list(self.executor.results)
+        actions = list(self.actions)
         if success:
             resolved_stop_reason = EngineStopReason.COMPLETED
         elif stop_reason is not None:

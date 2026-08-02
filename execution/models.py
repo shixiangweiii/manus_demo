@@ -33,6 +33,7 @@ class ActionLoopStats(BaseModel):
     """Usage observed dynamically while one action loop is running."""
 
     llm_calls: int = 0
+    context_compaction_calls: int = 0
     tool_calls: int = 0
     reasoning_tokens: int = 0
 

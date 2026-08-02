@@ -14,18 +14,28 @@ def render_markdown(report: EvaluationReport) -> str:
         "",
         "No composite score is used. Compare each dimension directly.",
         "",
-        "| Experiment | Success | Verifier | LLM calls | Tools | Reasoning tokens | Subagents | Latency ms | Stability |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Experiment | Overall | Engine | Verifier | LLM calls | Agent turns | Compactions | Total tokens | Tools | Reasoning tokens | Subagents | Latency ms | Stability |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in report.summaries:
         verifier = "-" if row.verifier_rate is None else f"{row.verifier_rate:.1%}"
         stability = "-" if row.stability is None else f"{row.stability:.2f}"
         lines.append(
-            f"| {row.experiment_id} | {row.success_rate:.1%} | {verifier} | "
-            f"{row.average_llm_calls:.1f} | {row.average_tool_calls:.1f} | "
+            f"| {row.experiment_id} | {row.success_rate:.1%} | "
+            f"{row.engine_success_rate:.1%} | {verifier} | "
+            f"{row.average_llm_calls:.1f} | {row.average_agent_turns:.1f} | "
+            f"{row.average_context_compaction_calls:.1f} | "
+            f"{row.average_total_tokens:.0f} | {row.average_tool_calls:.1f} | "
             f"{row.average_reasoning_tokens:.0f} | {row.average_subagent_calls:.1f} | "
             f"{row.average_latency_ms:.0f} | {stability} |"
         )
+    lines.extend(["", "## Stop Reasons", ""])
+    for row in report.summaries:
+        counts = ", ".join(
+            f"{name}={count}"
+            for name, count in row.stop_reason_counts.items()
+        ) or "none"
+        lines.append(f"- `{row.experiment_id}`: {counts}")
     lines.extend(["", "## Case Results", ""])
     for result in report.results:
         status = "PASS" if result.metrics.success else "FAIL"
@@ -33,8 +43,16 @@ def render_markdown(report: EvaluationReport) -> str:
         lines.append(
             f"- `{result.case_id}` / `{result.experiment.id}` / trial {result.trial}: "
             f"**{status}**, engine={engine}, "
-            f"latency={result.metrics.latency_ms:.0f}ms, llm_calls={result.metrics.llm_calls}"
+            f"engine_success={result.metrics.engine_success}, "
+            f"verifier={result.metrics.verifier_passed}, "
+            f"stop_reason={result.metrics.stop_reason.value if result.metrics.stop_reason else '-'}, "
+            f"latency={result.metrics.latency_ms:.0f}ms, "
+            f"llm_calls={result.metrics.llm_calls}, tokens={result.metrics.total_tokens}"
         )
+        if result.metrics.stop_reason is not None:
+            lines.append(
+                f"  - Stop reason: `{result.metrics.stop_reason.value}`"
+            )
         if result.error:
             lines.append(f"  - Error: {result.error}")
     return "\n".join(lines) + "\n"

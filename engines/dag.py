@@ -24,7 +24,7 @@ class _DagActionAdapter:
         results=None,
     ) -> None:
         self._engine = engine
-        self._action_executor = action_executor or engine.new_action_executor()
+        self._action_executor = action_executor
         self.results: list[Any] = results if results is not None else []
 
     def create_for_node(self, _node_id: str) -> "_DagActionAdapter":
@@ -43,19 +43,21 @@ class _DagActionAdapter:
         selected_effort = self._engine.effort
         if effort is not None:
             selected_effort = Effort(getattr(effort, "value", effort))
+        if self._action_executor is None:
+            self._action_executor = self._engine.new_action_executor()
         core_result = await self._action_executor.execute(
             action,
             context=context,
             effort=selected_effort,
         )
-        self._engine.executor.results.append(core_result)
+        self._engine.actions.append(core_result)
         result = core_result.to_legacy()
         self.results.append(result)
         return result
 
     def record_external_result(self, result) -> None:
         """Record timeout/unexpected DAG results created outside the adapter."""
-        self._engine.executor.results.append(ActionExecutor.from_legacy(result))
+        self._engine.actions.append(ActionExecutor.from_legacy(result))
         self.results.append(result)
 
 
@@ -101,7 +103,7 @@ class DagPlanAndExecuteEngine(PlanAndExecuteEngine):
                 "Planner returned a DAG action without an ID or description"
             )
         self.events.emit("planner_completed", {"operation": "create_dag"})
-        dag.max_checkpoints = self.settings.capabilities.checkpoint_max_per_task
+        dag.max_checkpoints = self.settings.engines.dag_checkpoint_history_limit
         self.events.emit("dag_created", dag.to_dict())
 
         adapter = _DagActionAdapter(self)

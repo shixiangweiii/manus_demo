@@ -11,6 +11,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
+from uuid import uuid4
 
 from context.manager import ContextManager
 from core.models import EngineStopReason
@@ -244,7 +245,9 @@ class ActionToolLoop:
         self._current_log = tool_calls_log
         stats = ActionLoopStats()
         consecutive_reasoning_rounds = 0
-        caller_tag = f"{self.agent_name or 'ActionToolLoop'}:{step_id}:{id(messages):x}"
+        caller_tag = (
+            f"{self.agent_name or 'ActionToolLoop'}:{step_id}:{uuid4().hex}"
+        )
 
         logger.info("[ActionToolLoop] Starting action %s: %s", step_id, prompt[:100])
         for turn in range(1, max_turns + 1):
@@ -265,6 +268,7 @@ class ActionToolLoop:
                         )
                         request_messages = prepared.messages
                         stats.llm_calls += prepared.llm_calls
+                        stats.context_compaction_calls += prepared.llm_calls
                         stats.reasoning_tokens += prepared.reasoning_tokens
                         if stats.reasoning_tokens > reasoning_budget:
                             turn_completion = {
@@ -500,3 +504,4 @@ class ActionToolLoop:
         else:
             self.tools = dict(self._tools_full)
         self.tool_schemas = [tool.to_openai_tool() for tool in self.tools.values()]
+        self.tool_router.set_available_tools(list(self.tools))

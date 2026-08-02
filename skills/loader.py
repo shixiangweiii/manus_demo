@@ -21,8 +21,6 @@ import os
 import re
 from typing import Any
 
-import config
-
 from skills.models import SkillDef, SkillMeta, SKILL_NAME_PATTERN, RESERVED_SKILL_PREFIXES
 
 logger = logging.getLogger(__name__)
@@ -45,7 +43,11 @@ class SkillLoader:
     """
 
     @staticmethod
-    def discover(skill_dirs: list[str]) -> list[SkillDef]:
+    def discover(
+        skill_dirs: list[str],
+        *,
+        root_licenses: dict[str, str] | None = None,
+    ) -> list[SkillDef]:
         """Scan all skill directories, parse each SKILL.md, return valid SkillDefs.
         扫描所有技能目录，解析每个 SKILL.md，返回有效的 SkillDef 列表。
 
@@ -58,12 +60,19 @@ class SkillLoader:
             skill_dirs: Ordered list of directories to scan. Later directories
                 with the same skill name override earlier ones (user > project).
                 有序目录列表。同名技能后者覆盖前者（user > project）。
+            root_licenses: Optional mapping from discovery root to its default
+                trust label. Packages without an explicit frontmatter license
+                inherit this value; unlisted roots default to ``third_party``.
 
         Returns:
             List of successfully parsed SkillDef objects.
             成功解析的 SkillDef 对象列表。
         """
         skills: dict[str, SkillDef] = {}  # name -> SkillDef, later dirs override
+        licenses = {
+            os.path.abspath(root): license_name
+            for root, license_name in (root_licenses or {}).items()
+        }
 
         for skill_dir in skill_dirs:
             if not os.path.isdir(skill_dir):
@@ -81,7 +90,13 @@ class SkillLoader:
                 if not os.path.isdir(entry_path):
                     continue
 
-                skill = SkillLoader._scan_skill_dir(entry_path)
+                skill = SkillLoader._scan_skill_dir(
+                    entry_path,
+                    default_license=licenses.get(
+                        os.path.abspath(skill_dir),
+                        "third_party",
+                    ),
+                )
                 if skill is not None:
                     # Later directories override earlier ones (same name)
                     if skill.meta.name in skills:
@@ -312,7 +327,11 @@ class SkillLoader:
         return None  # Valid / 校验通过
 
     @staticmethod
-    def _scan_skill_dir(skill_dir: str) -> SkillDef | None:
+    def _scan_skill_dir(
+        skill_dir: str,
+        *,
+        default_license: str = "third_party",
+    ) -> SkillDef | None:
         """Parse a single skill directory. Returns None on any failure.
         解析单个技能目录。任何失败返回 None。
 
@@ -399,25 +418,11 @@ class SkillLoader:
             else:
                 allowed_tools_raw = allowed_tools_raw.split()
 
-        # Auto-detect license/trust level from directory if not explicitly set
-        # 如果未显式设置，根据目录自动检测 license/信任级别
+        # The runtime classifies each discovery root explicitly. Frontmatter may
+        # still override that default for a specific package.
         license_val = str(fm.get("license", "")).strip()
         if not license_val:
-            # Infer from skill_dir: project dir → "project", user dir → "user", else → "third_party"
-            # 从 skill_dir 推断：项目目录→"project"，用户目录→"user"，其他→"third_party"
-            abs_dir = os.path.abspath(skill_dir)
-            if config.SKILLS_PROJECT_DIR and SkillLoader._is_within(
-                abs_dir,
-                config.SKILLS_PROJECT_DIR,
-            ):
-                license_val = "project"
-            elif config.SKILLS_USER_DIR and SkillLoader._is_within(
-                abs_dir,
-                config.SKILLS_USER_DIR,
-            ):
-                license_val = "user"
-            else:
-                license_val = "third_party"
+            license_val = default_license
 
         meta = SkillMeta(
             name=str(name),
@@ -442,16 +447,6 @@ class SkillLoader:
             references=references,
             assets=assets,
         )
-
-    @staticmethod
-    def _is_within(path: str, directory: str) -> bool:
-        """Return true only when path is directory itself or a real descendant."""
-        try:
-            resolved_path = os.path.realpath(path)
-            resolved_directory = os.path.realpath(directory)
-            return os.path.commonpath([resolved_path, resolved_directory]) == resolved_directory
-        except ValueError:
-            return False
 
     @staticmethod
     def _classify_assets(skill_dir: str) -> tuple[list[str], list[str], list[str]]:

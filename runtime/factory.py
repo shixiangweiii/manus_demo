@@ -91,12 +91,20 @@ async def _register_capability_tools(context: RuntimeContext) -> None:
         from skills.loader import SkillLoader
         from skills.registry import SkillRegistry
 
-        skill_dirs = [str(Path(__file__).resolve().parent.parent / ".agents" / "skills")]
+        project_skill_dir = str(
+            Path(__file__).resolve().parent.parent / ".agents" / "skills"
+        )
+        skill_dirs = [project_skill_dir]
+        root_licenses = {project_skill_dir: "project"}
         if caps.skills_user_dir:
             skill_dirs.append(caps.skills_user_dir)
+            root_licenses[caps.skills_user_dir] = "user"
         skill_dirs.extend(path.strip() for path in caps.skills_dirs.split(",") if path.strip())
         skill_registry = SkillRegistry()
-        for skill in SkillLoader.discover(skill_dirs):
+        for skill in SkillLoader.discover(
+            skill_dirs,
+            root_licenses=root_licenses,
+        ):
             skill_registry.register(skill)
         activation = SkillActivationTool(
             registry=skill_registry,
@@ -156,6 +164,7 @@ async def _register_capability_tools(context: RuntimeContext) -> None:
             result_truncation_limit=settings.tools.result_truncation_limit,
             python_command=settings.tools.python_command,
             max_reasoning_tokens=settings.execution.max_reasoning_tokens,
+            tool_failure_threshold=settings.tools.failure_threshold,
         )
         registry.register(subagent)
         context.resettable_capabilities.append(subagent)

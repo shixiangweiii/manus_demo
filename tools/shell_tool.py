@@ -35,13 +35,16 @@ class ShellTool(BaseTool):
         max_output_bytes: int,
         max_concurrent: int,
         ssl_verify: bool = True,
+        concurrency_limiter: asyncio.Semaphore | None = None,
     ):
         self._workdir = workdir
         self._mode = mode
         self._timeout = timeout
         self._python_command = python_command
         self._max_output_bytes = max_output_bytes
-        self._concurrency_sem = asyncio.Semaphore(max_concurrent)
+        self._concurrency_sem = concurrency_limiter or asyncio.Semaphore(
+            max_concurrent
+        )
         self._max_concurrent = max_concurrent
         self._ssl_verify = ssl_verify
         os.makedirs(self._workdir, exist_ok=True)
@@ -56,6 +59,7 @@ class ShellTool(BaseTool):
             max_output_bytes=self._max_output_bytes,
             max_concurrent=self._max_concurrent,
             ssl_verify=self._ssl_verify,
+            concurrency_limiter=self._concurrency_sem,
         )
 
     @property

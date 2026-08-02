@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-import config
 from skills.registry import SkillRegistry
 from tools.base import BaseTool
 
@@ -42,8 +41,8 @@ class SkillActivationTool(BaseTool):
         registry: SkillRegistry,
         on_event: Callable[[str, Any], None] | None = None,
         tool_filter_callback: Callable[[list[str]], None] | None = None,
-        max_activations: int | None = None,
-        max_content_tokens: int | None = None,
+        max_activations: int = 3,
+        max_content_tokens: int = 5000,
         guardrail: Any | None = None,
     ):
         """
@@ -52,14 +51,14 @@ class SkillActivationTool(BaseTool):
             on_event: Event callback for emitting skill events.
             tool_filter_callback: callback to apply the allowed-tools filter.
                 Called with the skill's allowed_tools list after activation.
-            max_activations: Per-task activation limit. Defaults to config value.
-            max_content_tokens: Max content tokens per activation. Defaults to config.
+            max_activations: Per-task activation limit.
+            max_content_tokens: Max content tokens per activation.
         """
         self._registry = registry
         self._on_event = on_event or (lambda *_: None)
         self._tool_filter_callback = tool_filter_callback
-        self._max_activations = max_activations if max_activations is not None else config.SKILLS_MAX_ACTIVATIONS_PER_TASK
-        self._max_content_tokens = max_content_tokens if max_content_tokens is not None else config.SKILLS_MAX_CONTENT_TOKENS
+        self._max_activations = max_activations
+        self._max_content_tokens = max_content_tokens
         self._activation_count: int = 0
         self._active_skills: list[str] = []
         self._guardrail = guardrail
@@ -122,7 +121,10 @@ class SkillActivationTool(BaseTool):
         # Check if skill is already active — return cached result without wasting slot
         # 检查技能是否已激活——返回缓存结果，不浪费激活槽位
         if skill_name in self._active_skills:
-            content = self._registry.load_full_content(skill_name)
+            content = self._registry.load_full_content(
+                skill_name,
+                max_tokens=self._max_content_tokens,
+            )
             if content is None:
                 return f"Error: Failed to load content for skill '{skill_name}'"
             logger.debug(
@@ -149,7 +151,10 @@ class SkillActivationTool(BaseTool):
         self._activation_count += 1
 
         # Load full content with truncation / 加载完整内容（含截断）
-        content = self._registry.load_full_content(skill_name)
+        content = self._registry.load_full_content(
+            skill_name,
+            max_tokens=self._max_content_tokens,
+        )
         if content is None:
             # Should not happen since we just checked get(), but be defensive
             # 不应发生（刚检查过 get()），但保持防御性

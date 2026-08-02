@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 
-import config
 from skills.models import SkillDef
 
 logger = logging.getLogger(__name__)
@@ -87,18 +86,19 @@ class SkillRegistry:
 
         return "\n".join(lines)
 
-    def load_full_content(self, name: str) -> str | None:
+    def load_full_content(self, name: str, *, max_tokens: int) -> str | None:
         """Load the full SKILL.md content for a skill (progressive disclosure tier 2).
         加载技能的完整 SKILL.md 内容（渐进式披露第二层）。
 
-        Returns None if skill not found. Content is truncated at
-        SKILLS_MAX_CONTENT_TOKENS tokens (approximate, using 4 chars/token).
+        Returns None if skill not found. Content is truncated at the caller's
+        per-runtime ``max_tokens`` limit using a conservative approximation.
 
         未找到技能时返回 None。内容在 SKILLS_MAX_CONTENT_TOKENS tokens 处截断
         （近似估算，4 chars/token）。
 
         Args:
             name: Skill name to load.
+            max_tokens: Maximum approximate tokens returned to the caller.
 
         Returns:
             Full content string (possibly truncated), or None if not found.
@@ -108,7 +108,6 @@ class SkillRegistry:
             return None
 
         content = skill.full_content
-        max_tokens = config.SKILLS_MAX_CONTENT_TOKENS
         # Approximate token counting for mixed English+CJK content.
         # English: ~4 chars/token; CJK: ~1.5 chars/token.
         # Use a conservative estimate of 2 chars/token to avoid context overflow

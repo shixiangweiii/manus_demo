@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -33,10 +34,18 @@ class RuntimeCheckpointStore:
 
     def save(self, checkpoint: RuntimeCheckpoint) -> Path:
         path = self._path(checkpoint.task_id)
-        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary: Path | None = None
         checkpoint.updated_at = time.time()
         try:
-            with temporary.open("w", encoding="utf-8") as handle:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.directory,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
                 json.dump(
                     checkpoint.model_dump(mode="json"),
                     handle,
@@ -45,7 +54,8 @@ class RuntimeCheckpointStore:
                 )
             os.replace(temporary, path)
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return path
 
     def load(self, task_id: str) -> RuntimeCheckpoint | None:

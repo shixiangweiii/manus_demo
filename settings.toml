@@ -20,7 +20,9 @@ node_timeout_seconds = 300
 adaptive_planning = true
 adaptive_interval = 1
 adaptive_min_completed = 1
+dag_checkpoint_history_limit = 5
 max_agent_turns = 30
+max_agent_total_tokens = 240000
 agent_timeout_seconds = 600.0
 planner_temperature = 0.3
 reflector_temperature = 0.1
@@ -74,7 +76,6 @@ local_webparser_cache_size = 64
 
 [capabilities]
 checkpoint = true
-checkpoint_max_per_task = 5
 subagent = false
 subagent_max_iterations = 10
 subagent_timeout_seconds = 300

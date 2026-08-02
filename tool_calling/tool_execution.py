@@ -37,6 +37,8 @@ RATE_LIMITED_RESULT_MARKERS = (
     "rate limited",
 )
 
+_VALIDATOR_CACHE: dict[str, Any] = {}
+
 
 def _format_validation_path(error: ValidationError) -> str:
     """Return a compact JSONPath-like location for a schema error."""
@@ -55,10 +57,20 @@ def validate_tool_arguments(tool: BaseTool, arguments: dict[str, Any]) -> str:
     """
     try:
         schema = tool.parameters_schema
-        validator_type = validators.validator_for(schema)
-        validator_type.check_schema(schema)
+        cache_key = json.dumps(
+            schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        validator = _VALIDATOR_CACHE.get(cache_key)
+        if validator is None:
+            validator_type = validators.validator_for(schema)
+            validator_type.check_schema(schema)
+            validator = validator_type(schema)
+            _VALIDATOR_CACHE[cache_key] = validator
         errors = sorted(
-            validator_type(schema).iter_errors(arguments),
+            validator.iter_errors(arguments),
             key=lambda error: tuple(str(part) for part in error.absolute_path),
         )
     except SchemaError as exc:
@@ -101,7 +113,7 @@ def classify_tool_result(
     """
     if exc is not None:
         return True, False
-    if isinstance(result, str) and result.lstrip().lower().startswith("error"):
+    if isinstance(result, str) and result.lstrip().lower().startswith("error:"):
         return True, any(
             marker.lower() in result.lower()
             for marker in RATE_LIMITED_RESULT_MARKERS
@@ -115,8 +127,21 @@ def truncate_tool_result_for_llm(
     is_error: bool,
 ) -> tuple[Any, Any]:
     """Return the recorded and LLM-facing forms of one tool result."""
-    if is_error or not isinstance(result, str) or len(result) <= limit:
+    if not isinstance(result, str) or len(result) <= limit:
         return result, result
+    if is_error:
+        head_size = max(1, limit // 2)
+        tail_size = max(0, limit - head_size)
+        marker = (
+            f"\n\n[Tool error truncated to head/tail at {limit} characters; "
+            f"original length={len(result)}]\n\n"
+        )
+        truncated = result[:head_size]
+        if tail_size:
+            truncated += marker + result[-tail_size:]
+        else:
+            truncated += marker
+        return truncated, truncated
     truncated = result[:limit]
     marker = (
         f"\n\n[Tool output truncated at {limit} characters "
