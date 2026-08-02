@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import re
 import time
+from typing import Any
 
 from core.settings import AppSettings, get_settings
 from evaluation.models import (
     EvalSetStatus,
     EvaluationCase,
     GeneratedEvalSet,
-    GroundTruth,
     TaskDifficulty,
 )
 from llm.client import LLMClient
@@ -56,8 +56,17 @@ class EvalSetGenerator:
         prompt = (
             f"Create {count} independent agent evaluation cases from the document. "
             "Cover factual lookup, synthesis, and multi-step work. Return JSON with a cases array. "
-            "Each case needs task_id, task_description, difficulty, tags, ground_truth "
-            "(expected_engine and success_criteria), and deterministic verifiers when possible.\n\n"
+            "Each case MUST contain task_id, task_description, difficulty, tags, source_excerpt, and a non-empty "
+            "verifiers array. Do not return an engine preference or prose-only success criteria: "
+            "only deterministic verifiers affect evaluation success. Supported verifier "
+            "shapes are keyword_include/keyword_exclude with params.keywords, regex_match with "
+            "params.pattern, numeric_range with params.min and/or params.max, json_field with "
+            "params.field and optional params.expected, file_exists with params.path, file_contains "
+            "with params.path and params.content, and composite_and/composite_or with a non-empty "
+            "params.verifiers array. Choose assertions that can be checked from the final output or "
+            "the evaluation sandbox, and never emit an empty verifier list. source_excerpt MUST be a "
+            "non-empty verbatim excerpt from the supplied document containing the evidence needed to "
+            "solve that case; the task runner receives no hidden copy of the document.\n\n"
             f"Evaluation goal: {goal or 'general comprehension'}\n\nDocument:\n{content}"
         )
         data = await self.llm_client.chat_json(
@@ -69,7 +78,29 @@ class EvalSetGenerator:
         rows = data.get("cases", [])
         if not rows:
             raise ValueError("generator returned no cases")
-        return [EvaluationCase.model_validate(row) for row in rows[:count]]
+        cases: list[EvaluationCase] = []
+        for row in rows[:count]:
+            if not isinstance(row, dict):
+                raise ValueError("generator returned a non-object case")
+            source_excerpt = str(row.get("source_excerpt", "")).strip()
+            if not source_excerpt or source_excerpt not in content:
+                raise ValueError(
+                    "generator returned a case without a verbatim source_excerpt"
+                )
+            case_data = dict(row)
+            case_data.pop("source_excerpt", None)
+            description = str(case_data.get("task_description", "")).strip()
+            case_data["task_description"] = (
+                f"{description}\n\nSource material:\n{source_excerpt}"
+            )
+            cases.append(EvaluationCase.model_validate(case_data))
+        empty_verifier_ids = [case.task_id for case in cases if not case.verifiers]
+        if empty_verifier_ids:
+            raise ValueError(
+                "generator returned cases without deterministic verifiers: "
+                + ", ".join(empty_verifier_ids)
+            )
+        return cases
 
     @staticmethod
     def _generate_heuristically(content: str, goal: str, count: int) -> list[EvaluationCase]:
@@ -93,10 +124,34 @@ class EvalSetGenerator:
                     task_description=task,
                     difficulty=TaskDifficulty.MEDIUM,
                     tags=["generated", "document"],
-                    ground_truth=GroundTruth(
-                        expected_engine="sequential",
-                        success_criteria="结论必须基于给定材料",
-                    ),
+                    verifiers=[EvalSetGenerator._heuristic_verifier(fragment)],
                 )
             )
         return cases
+
+    @staticmethod
+    def _heuristic_verifier(fragment: str) -> dict[str, Any]:
+        """Build a minimal deterministic grounding check for a generated case."""
+        candidates = re.findall(
+            r"[A-Za-z][A-Za-z0-9_-]{3,}|[\u4e00-\u9fff]{2,8}",
+            fragment,
+        )
+        ignored = {
+            "about",
+            "agent",
+            "given",
+            "material",
+            "内容",
+            "以下内容",
+            "材料",
+        }
+        anchor = next(
+            (candidate for candidate in candidates if candidate.lower() not in ignored),
+            "",
+        )
+        if anchor:
+            return {
+                "type": "keyword_include",
+                "params": {"keywords": [anchor]},
+            }
+        return {"type": "regex_match", "params": {"pattern": r"\S"}}

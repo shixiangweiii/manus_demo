@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from core.models import Effort
+from core.models import Effort, EngineStopReason
 
 
 class ResolvedEffort(str, Enum):
@@ -29,9 +29,19 @@ class ToolCallRecord(BaseModel):
     result: str = ""
 
 
+class ActionLoopStats(BaseModel):
+    """Usage observed dynamically while one action loop is running."""
+
+    llm_calls: int = 0
+    tool_calls: int = 0
+    reasoning_tokens: int = 0
+
+
 class StepResult(BaseModel):
     step_id: int | str
     success: bool
     output: str = ""
     tool_calls_log: list[ToolCallRecord] = Field(default_factory=list)
     iterations_completed: int = 0
+    stats: ActionLoopStats = Field(default_factory=ActionLoopStats)
+    failure_reason: EngineStopReason | None = None

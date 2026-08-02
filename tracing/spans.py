@@ -20,9 +20,8 @@ SPAN_ICONS: dict[str, str] = {
     "reflector": "🪞",
     "memory": "🧠",
     "knowledge": "📚",
-    "todo": "📝",
+    "agent_loop": "🔁",
     "subagent": "🤖",
-    "workflow": "⚙",
     "step": "👣",
     "hitl": "🙋",
 }

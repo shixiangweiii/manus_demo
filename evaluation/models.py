@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 import time
 import uuid
 from enum import Enum
@@ -9,7 +11,91 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from core.models import Effort, EngineKind, ExecutorKind
+from core.models import Effort, EngineKind
+
+_VERIFIER_TYPES = {
+    "file_exists",
+    "file_contains",
+    "json_field",
+    "numeric_range",
+    "regex_match",
+    "keyword_include",
+    "keyword_exclude",
+    "composite_and",
+    "composite_or",
+}
+
+
+def _validate_verifier_specs(specs: list[dict[str, Any]], path: str = "verifiers") -> None:
+    for index, spec in enumerate(specs):
+        location = f"{path}[{index}]"
+        if not isinstance(spec, dict):
+            raise ValueError(f"{location} must be an object")
+        verifier_type = spec.get("type")
+        if verifier_type not in _VERIFIER_TYPES:
+            raise ValueError(f"{location}.type is not a supported deterministic verifier")
+        params = spec.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError(f"{location}.params must be an object")
+
+        def require_text(name: str) -> str:
+            value = params.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{location}.params.{name} must be non-empty text")
+            return value
+
+        source = params.get("source", "output")
+        if source not in {"output", "file"}:
+            raise ValueError(f"{location}.params.source must be output or file")
+        if source == "file":
+            require_text("path")
+
+        if verifier_type in {"composite_and", "composite_or"}:
+            nested = params.get("verifiers")
+            if not isinstance(nested, list) or not nested:
+                raise ValueError(f"{location}.params.verifiers must be a non-empty list")
+            _validate_verifier_specs(nested, f"{location}.params.verifiers")
+        elif verifier_type in {"keyword_include", "keyword_exclude"}:
+            keywords = params.get("keywords")
+            if (
+                not isinstance(keywords, list)
+                or not keywords
+                or any(not isinstance(item, str) or not item.strip() for item in keywords)
+            ):
+                raise ValueError(
+                    f"{location}.params.keywords must be a non-empty text list"
+                )
+        elif verifier_type == "regex_match":
+            pattern = require_text("pattern")
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"{location}.params.pattern is invalid: {exc}") from exc
+        elif verifier_type == "json_field":
+            require_text("field")
+        elif verifier_type == "numeric_range":
+            if params.get("min") is None and params.get("max") is None:
+                raise ValueError(f"{location}.params requires min and/or max")
+            try:
+                minimum = float(params["min"]) if params.get("min") is not None else None
+                maximum = float(params["max"]) if params.get("max") is not None else None
+                tolerance = float(params.get("tolerance", 0.01))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{location}.params numeric bounds must be numbers"
+                ) from exc
+            if any(
+                value is not None and not math.isfinite(value)
+                for value in (minimum, maximum)
+            ) or not math.isfinite(tolerance) or tolerance < 0:
+                raise ValueError(f"{location}.params numeric bounds must be finite")
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise ValueError(f"{location}.params.min must not exceed max")
+        elif verifier_type == "file_exists":
+            require_text("path")
+        elif verifier_type == "file_contains":
+            require_text("path")
+            require_text("content")
 
 
 def new_id(prefix: str) -> str:
@@ -22,31 +108,11 @@ class TaskDifficulty(str, Enum):
     HARD = "hard"
 
 
-class GroundTruth(BaseModel):
-    expected_engine: str = ""
-    expected_complexity: str = ""
-    expected_step_count_range: tuple[int, int] = (1, 10)
-    expected_tools: list[str] = Field(default_factory=list)
-    expected_subtasks: list[str] = Field(default_factory=list)
-    success_criteria: str = ""
-    must_include_keywords: list[str] = Field(default_factory=list)
-    must_not_include: list[str] = Field(default_factory=list)
-    reference_output: str = ""
-    expected_hitl_calls: tuple[int, int] | None = None
-    expected_subagent_calls: tuple[int, int] | None = None
-    expected_handoff_calls: tuple[int, int] | None = None
-    expected_skill_activations: tuple[int, int] | None = None
-    is_attack: bool = False
-    expected_goal_features: list[str] | None = None
-    simulated_responses: list[str] | None = None
-
-
 class EvaluationCase(BaseModel):
     task_id: str
     task_description: str
     difficulty: TaskDifficulty = TaskDifficulty.MEDIUM
     tags: list[str] = Field(default_factory=list)
-    ground_truth: GroundTruth = Field(default_factory=GroundTruth)
     verifiers: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("task_id")
@@ -67,37 +133,40 @@ class EvaluationCase(BaseModel):
             raise ValueError("task_description must not be empty")
         return value
 
+    @field_validator("verifiers")
+    @classmethod
+    def validate_verifiers(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        _validate_verifier_specs(value)
+        return value
+
 
 class ExperimentSpec(BaseModel):
-    engine: EngineKind = EngineKind.AUTO
-    executor: ExecutorKind = ExecutorKind.AUTO
+    engine: EngineKind = EngineKind.AGENT_LOOP
     effort: Effort = Effort.AUTO
     capabilities: list[str] = Field(default_factory=list)
 
     @property
     def id(self) -> str:
         capability_label = "+".join(sorted(self.capabilities)) or "base"
-        return f"{self.engine.value}__{self.executor.value}__{self.effort.value}__{capability_label}"
+        return f"{self.engine.value}__{self.effort.value}__{capability_label}"
 
 
 class CaseMetrics(BaseModel):
     success: bool = False
     verifier_passed: bool | None = None
-    tokens: int = 0
+    llm_calls: int = 0
     latency_ms: float = 0.0
     tool_calls: int = 0
-    iterations: int = 0
-    replans: int = 0
-    selector_correct: bool | None = None
+    reasoning_tokens: int = 0
+    subagent_calls: int = 0
 
 
 class CaseResult(BaseModel):
     case_id: str
     experiment: ExperimentSpec
     actual_engine: EngineKind | None = None
-    actual_executor: ExecutorKind | None = None
     actual_effort: Effort | None = None
-    answer: str = ""
+    output: str = ""
     metrics: CaseMetrics = Field(default_factory=CaseMetrics)
     verifier_details: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""
@@ -110,13 +179,12 @@ class DimensionSummary(BaseModel):
     cases: int = 0
     success_rate: float = 0.0
     verifier_rate: float | None = None
-    average_tokens: float = 0.0
+    average_llm_calls: float = 0.0
     average_latency_ms: float = 0.0
     average_tool_calls: float = 0.0
-    average_iterations: float = 0.0
-    average_replans: float = 0.0
+    average_reasoning_tokens: float = 0.0
+    average_subagent_calls: float = 0.0
     stability: float | None = None
-    selector_accuracy: float | None = None
 
 
 class EvaluationReport(BaseModel):

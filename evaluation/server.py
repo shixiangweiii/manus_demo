@@ -21,6 +21,7 @@ from evaluation.experiments import build_experiments
 from evaluation.generator import EvalSetGenerator
 from evaluation.models import EvalRunRecord, EvalSetStatus, RunStatus
 from evaluation.reporter import render_markdown
+from evaluation.runner import EvaluationRunner
 from evaluation.store import EvaluationStore
 from llm.client import LLMClient
 
@@ -164,11 +165,11 @@ def create_app(
             return JSONResponse({"error": "evaluation set is not ready"}, status_code=409)
         try:
             experiments = build_experiments(
-                engines=body.get("engines") or body.get("modes"),
-                executors=body.get("executors"),
+                engines=body.get("engines"),
                 efforts=body.get("efforts"),
                 capability_sets=body.get("capability_sets"),
             )
+            EvaluationRunner(settings).validate_experiments(experiments)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
         try:

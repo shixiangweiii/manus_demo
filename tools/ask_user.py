@@ -138,7 +138,7 @@ class AskUserTool(BaseTool):
                 )
                 # User cancellation (Ctrl+C / EOF) is signalled by the UI layer
                 # via the sentinel "(user cancelled)". Convert to Error: prefix
-                # so ToolCallingLoop treats it as a tool failure (ToolRouter accounting,
+                # so the active tool loop treats it as a tool failure (ToolRouter accounting,
                 # evaluation distinguishability) — matching the timeout/limit paths.
                 # 用户取消（Ctrl+C / EOF）由 UI 层通过 "(user cancelled)" sentinel 传达；
                 # 转为 Error 前缀以与 timeout/上限路径风格一致，并让 ToolRouter / evaluation 可区分。

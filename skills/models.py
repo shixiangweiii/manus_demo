@@ -82,7 +82,7 @@ class SkillMeta:
 # Reserved name prefixes that cannot be used for skill names (prevent confusion
 # with built-in tools and meta-tools).
 # 技能名称不可使用的保留前缀（避免与内置工具和元工具混淆）。
-RESERVED_SKILL_PREFIXES = ("activate_", "memory_", "handoff_", "subagent_", "remote_", "ask_", "guardrail_")
+RESERVED_SKILL_PREFIXES = ("activate_", "memory_", "subagent_", "ask_", "guardrail_")
 
 # Name validation pattern: lowercase, digits, hyphens only; 1-64 chars.
 # 名称校验正则：仅小写字母、数字、连字符；1-64 字符。

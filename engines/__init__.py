@@ -1,16 +1,16 @@
-"""Task orchestration engines selected by runtime policy."""
+"""The three explicit task engines exposed by the runtime."""
 
 from importlib import import_module
 
 _EXPORTS = {
     "TaskEngine": ("engines.base", "TaskEngine"),
-    "DagEngine": ("engines.dag_engine", "DagEngine"),
-    "GoalEngine": ("engines.goal", "GoalEngine"),
-    "SequentialPlanEngine": ("engines.sequential", "SequentialPlanEngine"),
-    "TodoEngine": ("engines.todo", "TodoEngine"),
-    "WorkflowEngine": ("engines.workflow", "WorkflowEngine"),
-    "EffortPolicy": ("engines.selector", "EffortPolicy"),
-    "EngineSelector": ("engines.selector", "EngineSelector"),
+    "PlanAndExecuteEngine": ("engines.base", "PlanAndExecuteEngine"),
+    "AgentLoopEngine": ("engines.agent_loop", "AgentLoopEngine"),
+    "DagPlanAndExecuteEngine": ("engines.dag", "DagPlanAndExecuteEngine"),
+    "SequentialPlanAndExecuteEngine": (
+        "engines.sequential",
+        "SequentialPlanAndExecuteEngine",
+    ),
 }
 
 __all__ = list(_EXPORTS)

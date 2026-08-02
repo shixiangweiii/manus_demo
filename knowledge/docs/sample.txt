@@ -1,25 +1,27 @@
-Manus AI Agent Architecture Overview
+Manus Agent Architecture Overview
 
-Manus is a general-purpose AI agent that bridges the gap between thought and action.
-It operates through a multi-agent architecture where specialized agents collaborate
-to solve complex tasks autonomously.
+Manus is a local learning project for comparing two explicit agent orchestration
+paradigms: a model-driven AgentLoop and structured Plan-and-Execute workflows.
 
 Core Design Principles:
-1. Plan-and-Execute: Tasks are first decomposed into structured plans with clear steps
-   before any execution begins. This ensures systematic progress and allows for
-   dynamic re-planning when unexpected situations arise.
+1. AgentLoop: The agent_loop engine keeps one task-level message history. The model
+   chooses structured tool calls, receives matching role="tool" results, and repeats
+   until it returns final text without another tool call. Planning and reflection are
+   internal model behaviors rather than separate runtime stages.
 
-2. Native Tool Calling: During action execution, the model emits structured
-   tool_calls. The runtime executes each tool and returns its result in a
-   role="tool" message before the model chooses the next step. This has the
-   semantics of reasoning, acting, and observing, but it does not require or
-   parse the classic ReAct text labels Thought:, Action:, and Observation:.
+2. Plan-and-Execute: The sequential and dag engines first create explicit plans.
+   Sequential execution can reflect and re-plan between actions, while DAG execution
+   preserves dependencies and makes concurrency explicit. Their individual actions
+   use a bounded native tool-calling loop.
 
-3. Multi-Agent Coordination: Different specialized agents handle different aspects:
-   - Planner Agent: Decomposes high-level tasks into executable steps
-   - Executor Agent: Carries out individual steps using available tools
-   - Reflector Agent: Validates results and provides quality feedback
-   - Orchestrator Agent: Coordinates the overall workflow
+3. Native Tool Calling: Both paradigms use OpenAI-compatible structured tool calls.
+   The runtime validates arguments, executes calls in response order, and returns a
+   result carrying the matching tool-call ID. It does not require or parse classic
+   ReAct text labels such as Thought:, Action:, and Observation:.
+
+4. Isolated Subagents: Any root engine may invoke the subagent tool. A child receives
+   its own AgentLoop history, sandbox context, budget, and Todo state; it cannot spawn
+   another child, and its final assistant text returns as a normal tool result.
 
 Memory System:
 - Short-term Memory: Maintains recent conversation context using a sliding window
@@ -43,10 +45,11 @@ Agents can interact with the external world through a pluggable tool system:
 - Code Execution: Run Python code to perform computations
 - File Operations: Read and write files for data processing
 
-The tool system uses OpenAI-compatible function calling, allowing the LLM to
-naturally select and invoke tools as part of its reasoning process.
+The tool system exposes only the capabilities enabled for the current run. AgentLoop
+also receives a private todo_write display tool; Todo state does not schedule work or
+decide whether the task succeeded.
 
 Reflection and Verification:
-After task execution, a dedicated reflection step evaluates the quality of
-results. If the outcome doesn't meet standards, the system can trigger
-re-planning with specific feedback, creating a self-improving loop.
+Sequential Plan-and-Execute has an explicit reflection and re-planning stage.
+AgentLoop relies on the model's ongoing task history and tool observations instead
+of adding an external planner or reflector.

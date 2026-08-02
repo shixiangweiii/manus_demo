@@ -38,18 +38,10 @@ SUBAGENT_ENABLED = _settings.capabilities.subagent
 SUBAGENT_MAX_ITERATIONS = _settings.capabilities.subagent_max_iterations
 SUBAGENT_TIMEOUT = _settings.capabilities.subagent_timeout_seconds
 SUBAGENT_MAX_CONCURRENT = _settings.capabilities.subagent_max_concurrent
-SUBAGENT_SUMMARY_MAX_LENGTH = _settings.capabilities.subagent_summary_max_length
 SUBAGENT_MAX_CALLS_PER_TASK = _settings.capabilities.subagent_max_calls
 SUBAGENT_MAX_TOKENS_PER_CALL = _settings.capabilities.subagent_max_tokens
 SUBAGENT_DEFAULT_TOOL_WHITELIST = _settings.capabilities.subagent_tool_whitelist
 SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH = _settings.capabilities.subagent_task_max_length
-EMERGENT_PARALLEL_TODOS = _settings.capabilities.parallel_todos
-HANDOFF_MAX_CALLS_PER_TASK = _settings.capabilities.handoff_max_calls
-HANDOFF_TIMEOUT = _settings.capabilities.handoff_timeout_seconds
-HANDOFF_MAX_ITERATIONS = _settings.capabilities.handoff_max_iterations
-REMOTE_SUBAGENT_MAX_CALLS_PER_TASK = _settings.capabilities.remote_subagent_max_calls
-REMOTE_SUBAGENT_TIMEOUT = _settings.capabilities.remote_subagent_timeout_seconds
-REMOTE_AGENT_FETCH_CARD = _settings.capabilities.remote_agent_fetch_card
 
 # Skills and self-evolution
 SKILLS_ENABLED = _settings.capabilities.skills

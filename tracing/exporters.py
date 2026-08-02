@@ -368,7 +368,7 @@ class RichConsoleExporter(SpanExporter):
         if span.attributes:
             key_attrs = []
             for key in (
-                "agent.engine", "agent.executor", "action.id", "tool.name",
+                "agent.engine", "action.id", "tool.name",
                 "gen_ai.request.model", "gen_ai.usage.total_tokens",
                 "gen_ai.response.finish_reason", "run.id", "task.id",
             ):

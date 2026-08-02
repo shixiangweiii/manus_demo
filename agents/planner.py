@@ -6,8 +6,9 @@ import logging
 from typing import Any
 
 from agents.base import BaseAgent
-from agents.prompt_utils import build_system_prompt
+from agents.prompt_utils import PromptCapabilities, build_system_prompt
 from context.manager import ContextManager
+from core.models import EngineStopReason
 from dag.graph import TaskDAG
 from llm.client import LLMClient
 from dag.models import (
@@ -38,8 +39,8 @@ into a clear, ordered sequence of executable steps.
 
 Rules:
 1. Break the task into 2-6 concrete, actionable steps.
-2. Each step should be independently executable by an executor agent that
-   has access to tools: web_search, fetch_url, execute_python, file_ops.
+2. Each step should be independently executable by an executor agent using
+   the runtime tools listed at the end of this prompt.
 3. Order steps logically; specify dependencies if a step requires output
    from a prior step.
 4. Keep step descriptions clear and specific.
@@ -81,8 +82,10 @@ You MUST respond with a valid JSON object in this exact format:
 # create_plan() / create_dag() / replan() each rebuild the system prompt before
 # use, so the date / HITL guidance reflect runtime state. Module-level
 # evaluation would freeze them at import time.
-def _build_simple_planner_prompt() -> str:
-    return build_system_prompt(
+def _build_simple_planner_prompt(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
+    prompt = build_system_prompt(
         _SIMPLE_PLANNER_BASE_PROMPT,
         inject_context=True,
         inject_subagent_guidance=False,
@@ -90,7 +93,14 @@ def _build_simple_planner_prompt() -> str:
         inject_search_guidance=False,
         inject_hitl_guidance=False,
         inject_hitl_unavailable_guidance=True,
+        inject_skill_guidance=False,
+        capabilities=capabilities,
     )
+    if capabilities is not None:
+        prompt += "\nAvailable action tools: " + ", ".join(
+            sorted(capabilities.tool_names)
+        )
+    return prompt
 
 _PLANNER_BASE_PROMPT = """\
 You are a hierarchical task planning agent. Your job is to decompose a
@@ -102,8 +112,8 @@ Rules:
 1. Create exactly ONE goal that captures the overall objective.
 2. Break the goal into 2-5 subgoals (logical groupings of work).
 3. Each subgoal contains 1-3 concrete, executable actions.
-4. Actions should be independently executable by a tool-using agent
-   with access to: web_search, fetch_url, execute_python, file_ops.
+4. Actions should be independently executable by a tool-using agent using
+   the runtime tools listed at the end of this prompt.
 5. For each node, specify:
    - exit_criteria: what defines "done" for this node
    - confidence: 0.0-1.0 how likely this will succeed
@@ -224,8 +234,10 @@ You MUST respond with a valid JSON object in this exact format:
 }
 """
 
-def _build_planner_prompt() -> str:
-    return build_system_prompt(
+def _build_planner_prompt(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
+    prompt = build_system_prompt(
         _PLANNER_BASE_PROMPT,
         inject_context=True,
         inject_subagent_guidance=False,
@@ -233,7 +245,14 @@ def _build_planner_prompt() -> str:
         inject_search_guidance=False,
         inject_hitl_guidance=False,
         inject_hitl_unavailable_guidance=True,
+        inject_skill_guidance=False,
+        capabilities=capabilities,
     )
+    if capabilities is not None:
+        prompt += "\nAvailable action tools: " + ", ".join(
+            sorted(capabilities.tool_names)
+        )
+    return prompt
 
 
 class PlannerAgent(BaseAgent):
@@ -244,16 +263,28 @@ class PlannerAgent(BaseAgent):
         llm_client: LLMClient,
         context_manager: ContextManager | None = None,
         temperature: float = 0.3,
+        prompt_capabilities: PromptCapabilities | None = None,
     ):
         # Build the prompt per instance (default to DAG form;
         # create_plan/create_dag below switch as needed).
         super().__init__(
             name="Planner",
-            system_prompt=_build_planner_prompt(),
+            system_prompt=_build_planner_prompt(prompt_capabilities),
             llm_client=llm_client,
             context_manager=context_manager,
         )
         self.temperature = temperature
+        self.prompt_capabilities = prompt_capabilities
+        self.last_failure_reason: EngineStopReason | None = None
+
+    @staticmethod
+    def _classify_model_failure(exc: Exception) -> EngineStopReason:
+        if isinstance(
+            exc,
+            (ValueError, TypeError, KeyError, AttributeError, IndexError),
+        ):
+            return EngineStopReason.INVALID_RESPONSE
+        return EngineStopReason.MODEL_ERROR
 
     # ==================================================================
     # Sequential planning (flat step list)
@@ -266,7 +297,7 @@ class PlannerAgent(BaseAgent):
         Uses SIMPLE_PLANNER_SYSTEM_PROMPT for a lightweight 2-6 step plan.
         使用 SIMPLE_PLANNER_SYSTEM_PROMPT 生成 2-6 步的轻量级计划。
         """
-        self.system_prompt = _build_simple_planner_prompt()
+        self.system_prompt = _build_simple_planner_prompt(self.prompt_capabilities)
         self.reset()
 
         prompt = f"Create an execution plan for this task:\n\nTask: {task}"
@@ -277,7 +308,7 @@ class PlannerAgent(BaseAgent):
         result = await self.think_json(prompt, temperature=self.temperature)
         plan = self._parse_plan(task, result)
 
-        self.system_prompt = _build_planner_prompt()
+        self.system_prompt = _build_planner_prompt(self.prompt_capabilities)
         return plan
 
     async def replan(
@@ -291,7 +322,7 @@ class PlannerAgent(BaseAgent):
         Revise the sequential plan based on execution progress and feedback.
         基于执行进度和反馈修订顺序计划。
         """
-        self.system_prompt = _build_simple_planner_prompt()
+        self.system_prompt = _build_simple_planner_prompt(self.prompt_capabilities)
         self.reset()
 
         completed_summary = "\n".join(
@@ -326,7 +357,7 @@ class PlannerAgent(BaseAgent):
         result = await self.think_json(prompt, temperature=self.temperature)
         plan = self._parse_plan(task, result)
 
-        self.system_prompt = _build_planner_prompt()
+        self.system_prompt = _build_planner_prompt(self.prompt_capabilities)
         return plan
 
     @staticmethod
@@ -489,6 +520,7 @@ class PlannerAgent(BaseAgent):
         Returns:
             AdaptationResult: 包含是否需要调整、理由和具体调整操作列表。
         """
+        self.last_failure_reason = None
         completed_summary = "\n".join(
             f"- {nid} [COMPLETED]: {dag.state.node_results.get(nid, '(no result)')[:300]}"
             for nid, n in dag.nodes.items()
@@ -570,6 +602,7 @@ class PlannerAgent(BaseAgent):
 
         except Exception as exc:
             logger.warning("[Planner] adapt_plan failed: %s. Continuing without adaptation.", exc)
+            self.last_failure_reason = self._classify_model_failure(exc)
             return AdaptationResult(should_adapt=False, reasoning=f"Adaptation evaluation failed: {exc}")
 
     def apply_adaptations(self, dag: TaskDAG, adaptations: list[PlanAdaptation]) -> list[str]:
@@ -634,8 +667,25 @@ class PlannerAgent(BaseAgent):
         将 LLM 输出的 JSON 解析为带节点和边的 TaskDAG。
         """
         if not isinstance(data, dict):
-            logger.error("[Planner] LLM returned non-dict: %s", type(data))
-            data = {}
+            raise ValueError(
+                "DAG planner response must be an object, got "
+                f"{type(data).__name__}"
+            )
+
+        raw_subgoals = data.get("subgoals")
+        if not isinstance(raw_subgoals, list) or not raw_subgoals:
+            raise ValueError(
+                "DAG planner response must contain a non-empty subgoals array"
+            )
+        if any(not isinstance(subgoal, dict) for subgoal in raw_subgoals):
+            raise ValueError("Every DAG subgoal must be an object")
+        if not any(
+            isinstance(subgoal.get("actions"), list) and subgoal["actions"]
+            for subgoal in raw_subgoals
+        ):
+            raise ValueError(
+                "DAG planner response must contain at least one executable action"
+            )
 
         nodes: dict[str, TaskNode] = {}
         edges: list[TaskEdge] = []
@@ -657,13 +707,6 @@ class PlannerAgent(BaseAgent):
 
         # --- SubGoal + Action nodes ---
         # --- 创建 SubGoal 节点和 Action 节点 ---
-        raw_subgoals = data.get("subgoals", [])
-        if not raw_subgoals:
-            # 降级处理：LLM 未返回 subgoals 时，创建单个子目标兜底
-            raw_subgoals = [{"id": "sub_1", "description": task, "actions": [
-                {"id": "act_1_1", "description": task}
-            ]}]
-
         all_action_ids: list[str] = []  # 跟踪跨子目标的全局 Action ID 列表（必须在 subgoals 循环外，否则跨子目标回退失效）
 
         for sg in raw_subgoals:

@@ -8,7 +8,7 @@ The local-learning posture does not authorize unrequested real LLM, network, or 
 
 ## Project Structure & Module Organization
 
-`main.py` is the thin CLI entry point and `cli.py` contains command handling. Stable contracts and configuration live in `core/`; runtime composition lives in `runtime/`. Task orchestration implementations are under `engines/`, per-action executors are under `execution/`, and reusable native tool-calling loops are under `tool_calling/`. `ToolCallingLoop` handles the standard structured loop; `ReasoningAwareToolCallingLoop` adds reasoning-model budgets and reasoning-only rounds. Neither implements a literal `Thought:` / `Action:` / `Observation:` text protocol. Base and optional tools are registered through `tools/registry.py`. User-facing adapters are `webui/`, `tracing/`, and the unified `evaluation/` package. Retained peripheral capabilities live in `a2a/`, `memory/`, `skills/`, `evolution/`, `guardrails/`, and `checkpoint/`. Treat `sxw_aicoding/`, `agentbay_research/`, generated traces, and local evaluation output as historical or generated material.
+`main.py` is the thin CLI entry point and `cli.py` contains command handling. Stable contracts and configuration live in `core/`; runtime composition lives in `runtime/`. The only task engines are `sequential`, `dag`, and `agent_loop` under `engines/`. The task-level autonomous loop lives in `agent_loop/`; the bounded per-Action loop lives in `tool_calling/`. There is no automatic engine selector, executor dimension, or declarative Workflow layer. Base and optional tools are registered through `tools/registry.py`. User-facing adapters are `webui/`, `tracing/`, and the unified `evaluation/` package. Retained peripheral capabilities live in `a2a/`, `memory/`, `skills/`, `evolution/`, `guardrails/`, and `checkpoint/`. Treat `sxw_aicoding/`, `agentbay_research/`, generated traces, and local evaluation output as historical or generated material.
 
 ## Build and Development Commands
 
@@ -27,13 +27,13 @@ There is no build step and this learning repository does not maintain a unit-tes
 
 ## Coding Style & Naming Conventions
 
-Target Python 3.11+, use four-space indentation, straightforward control flow, and type hints on public interfaces. Prefer `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants. Name engines by behavior (`TodoEngine`), never by version. New orchestration code must depend on `core` contracts and receive `AppSettings`, `EventBus`, tools, or runtime context explicitly. Keep compatibility access through `config.py` limited to retained peripheral modules.
+Target Python 3.11+, use four-space indentation, straightforward control flow, and type hints on public interfaces. Prefer `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants. Name engines by behavior (`AgentLoopEngine`), never by version. New orchestration code must depend on `core` contracts and receive `AppSettings`, `EventBus`, tools, or runtime context explicitly. Keep compatibility access through `config.py` limited to retained peripheral modules.
 
 ## Configuration and Verification
 
 Put normal settings and feature switches in `settings.toml`; keep only secrets in `.env`, using `.env.example` as the key list. CLI flags are single-run overrides. Before handoff, run the documented import, `--help`, `compileall`, static-reference, and `git diff --check` checks. State clearly that these checks do not prove real agent quality.
 
-Local execution is capability-gated. Shell defaults to `restricted`, which permits one allowlisted argv command inside the sandbox; `trusted` uses full bash with the local user's permissions. Python execution is disabled unless `python_mode = "trusted"`. Runtime-owning hosts must call `await runtime.aclose()`, while the host process alone shuts down the shared Tracing provider.
+Local execution is capability-gated. Base defaults are Shell `restricted` and Python `disabled`, while this checkout explicitly sets both modes to `trusted` for local experiments. Trusted execution uses the local user's permissions and is not a security sandbox. Runtime-owning hosts must call `await runtime.aclose()`, while the host process alone shuts down the shared Tracing provider.
 
 ## Commit & Pull Request Guidelines
 

@@ -460,7 +460,7 @@ input:disabled, textarea:disabled, select:disabled { opacity: .5; }
 
 .plan-deps { color: var(--text-faint); font-size: 11px; margin-left: 6px; }
 
-/* --- TODO 实时卡 / live TODO card --------------------------------------------- */
+/* --- Agent Loop todo snapshot card --------------------------------------------- */
 
 .todo-card {
   border: 1px solid var(--violet);
@@ -483,8 +483,6 @@ input:disabled, textarea:disabled, select:disabled { opacity: .5; }
 .todo-item.completed .todo-desc { color: var(--text-faint); text-decoration: line-through; }
 .todo-item.in_progress .todo-icon { color: var(--accent); }
 .todo-item.in_progress .todo-desc { color: var(--text); }
-.todo-item.failed .todo-icon { color: var(--err); }
-.todo-item.blocked .todo-icon { color: var(--warn); }
 .todo-item .todo-desc { color: var(--text-dim); }
 
 /* --- SubAgent 归组卡 / grouped subagent card ----------------------------------- */

@@ -1,12 +1,10 @@
 """
-Shared tool execution logic for native tool-calling action loops.
+Shared tool execution logic for native tool-calling loops.
 原生工具调用动作执行循环共享的工具执行逻辑。
 
-Extracts structured tool-call behavior shared across action-loop executors:
-  - tool_calling.loop.ToolCallingLoop.execute
-  - tool_calling.reasoning_aware_loop.ReasoningAwareToolCallingLoop.execute
-  - agents.emergent_planner.EmergentPlannerAgent._execute_todo
-  - agents.goal_driven_planner.GoalDrivenPlannerAgent._execute_todo_goal_guided
+Extracts structured tool-call behavior shared by:
+  - tool_calling.loop.ActionToolLoop.execute
+  - agent_loop.loop.AgentLoop.run
 
 将多个结构化工具调用路径的重复执行行为收敛为共享模块。
 
@@ -16,11 +14,13 @@ not parse the classic textual ``Thought:/Action:/Observation:`` protocol.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from jsonschema import validators
+from jsonschema.exceptions import SchemaError, ValidationError
 
 from execution.models import ResolvedEffort, ToolCallRecord
 from tools.base import BaseTool
@@ -36,6 +36,40 @@ RATE_LIMITED_RESULT_MARKERS = (
     "rate-limited",
     "rate limited",
 )
+
+
+def _format_validation_path(error: ValidationError) -> str:
+    """Return a compact JSONPath-like location for a schema error."""
+    path = "$"
+    for part in error.absolute_path:
+        path += f"[{part}]" if isinstance(part, int) else f".{part}"
+    return path
+
+
+def validate_tool_arguments(tool: BaseTool, arguments: dict[str, Any]) -> str:
+    """Validate one argument object against the tool's declared JSON Schema.
+
+    The returned string is empty on success.  Validation failures are data the
+    model can correct on its next turn, so callers transport the message as a
+    normal tool error instead of raising out of the agent loop.
+    """
+    try:
+        schema = tool.parameters_schema
+        validator_type = validators.validator_for(schema)
+        validator_type.check_schema(schema)
+        errors = sorted(
+            validator_type(schema).iter_errors(arguments),
+            key=lambda error: tuple(str(part) for part in error.absolute_path),
+        )
+    except SchemaError as exc:
+        return f"tool schema is invalid: {exc.message}"
+    except Exception as exc:
+        return f"tool schema validation failed: {type(exc).__name__}: {exc}"
+    if not errors:
+        return ""
+    first = errors[0]
+    suffix = f" (and {len(errors) - 1} more error(s))" if len(errors) > 1 else ""
+    return f"arguments do not match schema at {_format_validation_path(first)}: {first.message}{suffix}"
 
 
 def set_tool_caller(tool: Any, agent_name: str) -> None:
@@ -135,8 +169,9 @@ async def execute_tool_calls(
     parse_args: Callable[[str], dict] | None = None,
     guardrail: Any | None = None,
     on_event: Callable[[str, Any], None] | None = None,
+    turn: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Execute tool calls concurrently, classify results, account to router.
+    """Execute tool calls sequentially, classify results, account to router.
 
     Returns a list of tool-message dicts (``{"role": "tool", ...}``) in the
     same order as *tool_calls*, preserving the OpenAI protocol alignment.
@@ -148,7 +183,7 @@ async def execute_tool_calls(
     error message formatting. When *policy* is None (default), the function
     uses *truncation_limit* directly.
 
-    并行执行工具调用、分类结果、记账到 ToolRouter。
+    顺序执行工具调用、分类结果、记账到 ToolRouter。
     返回与 tool_calls 同序的 tool-message 列表。tool_calls_log 原地追加。
     """
     effective_policy = policy or ToolExecutionPolicy(truncation_limit=truncation_limit)
@@ -176,6 +211,7 @@ async def execute_tool_calls(
             fn_args = {}
         logger.info("[%s] Tool call: %s(%s)", prefix, fn_name, fn_args)
         event_args = BaseTool._sanitize_params(fn_args)
+        turn_payload = {"turn": turn} if turn is not None else {}
         if on_event is not None:
             on_event(
                 "tool_started",
@@ -184,6 +220,7 @@ async def execute_tool_calls(
                     "parameters": event_args,
                     "action_id": node_id,
                     "call_id": str(tc.id),
+                    **turn_payload,
                 },
             )
 
@@ -197,6 +234,7 @@ async def execute_tool_calls(
                         "result": str(res)[:1000],
                         "action_id": node_id,
                         "call_id": str(tc.id),
+                        **turn_payload,
                     },
                 )
             return tc, fn_name, fn_args, res, is_err, rate_limited
@@ -209,6 +247,11 @@ async def execute_tool_calls(
         t = tools.get(fn_name)
         if t is None:
             res = f"Error: Unknown tool '{fn_name}'"
+            is_err, rl = classify_tool_result(res, None)
+            return finish(res, is_err, rl)
+        argument_error = validate_tool_arguments(t, fn_args)
+        if argument_error:
+            res = f"Error: {argument_error}"
             is_err, rl = classify_tool_result(res, None)
             return finish(res, is_err, rl)
         # Tool-input guardrail: block dangerous calls and gated writes.
@@ -245,11 +288,16 @@ async def execute_tool_calls(
             is_err, rl = classify_tool_result(None, exc)
             return finish(res, is_err, rl)
 
-    executions = await asyncio.gather(*(_exec_one(tc) for tc in tool_calls))
-
     tool_messages: list[dict[str, Any]] = []
 
-    for tool_call, func_name, func_args, result, is_error, is_rate_limited in executions:
+    # Deliberately dispatch in provider order.  Tool calls in one assistant
+    # message are not guaranteed to be independent (writes and control-transfer
+    # tools in particular are order-sensitive), and every call must receive
+    # exactly one matching result before the loop advances.
+    for requested_call in tool_calls:
+        tool_call, func_name, func_args, result, is_error, is_rate_limited = (
+            await _exec_one(requested_call)
+        )
         if is_rate_limited:
             tool_router.record_rate_limited(node_id, func_name)
         elif is_error:

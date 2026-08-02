@@ -16,8 +16,6 @@ def aggregate_results(results: list[CaseResult]) -> list[DimensionSummary]:
     for experiment_id, rows in sorted(grouped.items()):
         count = len(rows)
         verifier_rows = [row for row in rows if row.metrics.verifier_passed is not None]
-        selector_rows = [row for row in rows if row.metrics.selector_correct is not None]
-
         trials_by_case: dict[str, list[bool]] = defaultdict(list)
         for row in rows:
             trials_by_case[row.case_id].append(row.metrics.success)
@@ -38,19 +36,18 @@ def aggregate_results(results: list[CaseResult]) -> list[DimensionSummary]:
                     / len(verifier_rows)
                     if verifier_rows else None
                 ),
-                average_tokens=sum(row.metrics.tokens for row in rows) / count,
+                average_llm_calls=sum(row.metrics.llm_calls for row in rows) / count,
                 average_latency_ms=sum(row.metrics.latency_ms for row in rows) / count,
                 average_tool_calls=sum(row.metrics.tool_calls for row in rows) / count,
-                average_iterations=sum(row.metrics.iterations for row in rows) / count,
-                average_replans=sum(row.metrics.replans for row in rows) / count,
+                average_reasoning_tokens=(
+                    sum(row.metrics.reasoning_tokens for row in rows) / count
+                ),
+                average_subagent_calls=(
+                    sum(row.metrics.subagent_calls for row in rows) / count
+                ),
                 stability=(
                     sum(stability_values) / len(stability_values)
                     if stability_values else None
-                ),
-                selector_accuracy=(
-                    sum(bool(row.metrics.selector_correct) for row in selector_rows)
-                    / len(selector_rows)
-                    if selector_rows else None
                 ),
             )
         )

@@ -42,8 +42,21 @@ class ShellTool(BaseTool):
         self._python_command = python_command
         self._max_output_bytes = max_output_bytes
         self._concurrency_sem = asyncio.Semaphore(max_concurrent)
+        self._max_concurrent = max_concurrent
         self._ssl_verify = ssl_verify
         os.makedirs(self._workdir, exist_ok=True)
+
+    def for_sandbox(self, sandbox_dir: str) -> "ShellTool":
+        """Return an independent shell tool rooted at a child sandbox."""
+        return ShellTool(
+            workdir=sandbox_dir,
+            mode=self._mode,
+            timeout=self._timeout,
+            python_command=self._python_command,
+            max_output_bytes=self._max_output_bytes,
+            max_concurrent=self._max_concurrent,
+            ssl_verify=self._ssl_verify,
+        )
 
     @property
     def name(self) -> str:

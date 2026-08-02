@@ -11,18 +11,18 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class EngineKind(str, Enum):
-    AUTO = "auto"
     SEQUENTIAL = "sequential"
     DAG = "dag"
-    TODO = "todo"
-    GOAL = "goal"
-    WORKFLOW = "workflow"
+    AGENT_LOOP = "agent_loop"
 
 
-class ExecutorKind(str, Enum):
-    AUTO = "auto"
-    TOOL_CALLING = "tool_calling"
-    REASONING_AWARE_TOOL_CALLING = "reasoning_aware_tool_calling"
+class EngineStopReason(str, Enum):
+    COMPLETED = "completed"
+    MAX_TURNS = "max_turns"
+    TIMEOUT = "timeout"
+    MODEL_ERROR = "model_error"
+    INVALID_RESPONSE = "invalid_response"
+    ENGINE_ERROR = "engine_error"
 
 
 class Effort(str, Enum):
@@ -57,6 +57,15 @@ class Action(BaseModel):
         return value
 
 
+class EngineStats(BaseModel):
+    """Small cross-engine counters suitable for comparison and tracing."""
+
+    llm_calls: int = 0
+    tool_calls: int = 0
+    reasoning_tokens: int = 0
+    subagent_calls: int = 0
+
+
 class ActionResult(BaseModel):
     """Result returned by any action executor."""
 
@@ -66,10 +75,12 @@ class ActionResult(BaseModel):
     tool_calls: list[ToolInvocation] = Field(default_factory=list)
     iterations: int = 0
     error: str | None = None
+    failure_reason: EngineStopReason | None = None
+    stats: EngineStats = Field(default_factory=EngineStats)
 
     def to_legacy(self):
         """Adapt to retained peripheral models at the runtime boundary."""
-        from execution.models import StepResult, ToolCallRecord
+        from execution.models import ActionLoopStats, StepResult, ToolCallRecord
 
         return StepResult(
             step_id=self.action_id,
@@ -84,6 +95,12 @@ class ActionResult(BaseModel):
                 for call in self.tool_calls
             ],
             iterations_completed=self.iterations,
+            failure_reason=self.failure_reason,
+            stats=ActionLoopStats(
+                llm_calls=self.stats.llm_calls,
+                tool_calls=self.stats.tool_calls,
+                reasoning_tokens=self.stats.reasoning_tokens,
+            ),
         )
 
 
@@ -118,13 +135,14 @@ class TaskRequest(BaseModel):
 class EngineResult(BaseModel):
     """Stable output returned by all task engines."""
 
-    answer: str
+    output: str
     success: bool
     engine: EngineKind
-    executor: ExecutorKind
     effort: Effort
     run_id: str
     task_id: str
+    stop_reason: EngineStopReason
+    stats: EngineStats = Field(default_factory=EngineStats)
     actions: list[ActionResult] = Field(default_factory=list)
     started_at: float = Field(default_factory=time.time)
     finished_at: float = Field(default_factory=time.time)

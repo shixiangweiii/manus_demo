@@ -8,7 +8,7 @@ import json
 import time
 from pathlib import Path
 
-from core.models import Effort, EngineKind, ExecutorKind
+from core.models import Effort, EngineKind
 from core.settings import get_settings
 from evaluation.analyzer import analyze_runs
 from evaluation.case_loader import load_cases
@@ -41,8 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--tags", nargs="+", help="Case tags")
     run.add_argument("--difficulty", choices=["easy", "medium", "hard"])
     run.add_argument("--evalset", help="Stored generated evaluation set ID")
-    run.add_argument("--engines", nargs="+", choices=[k.value for k in EngineKind if k != EngineKind.WORKFLOW], default=["auto"])
-    run.add_argument("--executors", nargs="+", choices=[k.value for k in ExecutorKind], default=["auto"])
+    run.add_argument("--engines", nargs="+", choices=[k.value for k in EngineKind], default=[k.value for k in EngineKind])
     run.add_argument("--efforts", nargs="+", choices=[k.value for k in Effort], default=["auto"])
     run.add_argument("--capability-set", action="append", help="Comma-separated enabled capabilities; repeat for matrix rows")
     run.add_argument("--repeat", type=int, default=1)
@@ -97,10 +96,11 @@ async def _run(args: argparse.Namespace) -> None:
         raise ValueError("No evaluation cases matched the requested filters")
     experiments = build_experiments(
         args.engines,
-        args.executors,
         args.efforts,
         _comma_sets(args.capability_set),
     )
+    runner = EvaluationRunner(settings)
+    runner.validate_experiments(experiments)
     if args.dry_run:
         print(json.dumps({
             "cases": [case.task_id for case in cases],
@@ -131,7 +131,7 @@ async def _run(args: argparse.Namespace) -> None:
         print(f"[{completed}/{total}] {case.task_id} × {experiment.id}")
 
     try:
-        report = await EvaluationRunner(settings).evaluate_matrix(
+        report = await runner.evaluate_matrix(
             cases,
             experiments,
             repeat=args.repeat,

@@ -1,25 +1,26 @@
-"""Unified runtime: route, execute, observe, and apply shared lifecycle hooks."""
+"""Unified runtime: construct, execute, observe, and apply lifecycle hooks."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Any
 
-from core.models import Effort, EngineKind, EngineResult, ExecutorKind, TaskRequest
+from agents.prompt_utils import PromptCapabilities
+from core.models import Effort, EngineKind, EngineResult, TaskRequest
 from core.settings import RunSettings
-from engines.dag_engine import DagEngine
-from engines.goal import GoalEngine
-from engines.sequential import SequentialPlanEngine
-from engines.todo import TodoEngine
-from engines.workflow import WorkflowEngine
-from engines.selector import EffortPolicy, EngineSelector, select_executor
-from execution.reasoning_aware_tool_calling import ReasoningAwareToolCallingActionExecutor
+from engines.dag import DagPlanAndExecuteEngine
+from engines.sequential import SequentialPlanAndExecuteEngine
 from execution.tool_calling import ToolCallingActionExecutor
 from runtime.context import RuntimeContext
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_EFFORT = {
+    EngineKind.SEQUENTIAL: Effort.LOW,
+    EngineKind.DAG: Effort.MEDIUM,
+    EngineKind.AGENT_LOOP: Effort.HIGH,
+}
 
 
 class AgentRuntime:
@@ -28,14 +29,16 @@ class AgentRuntime:
         self.settings = context.settings
         self.events = context.events
         self._closed = False
+        self._closing = False
+        self._close_lock = asyncio.Lock()
 
     async def run(
         self,
         task: str | TaskRequest,
         overrides: dict[str, Any] | RunSettings | None = None,
     ) -> EngineResult:
-        if self._closed:
-            raise RuntimeError("AgentRuntime is closed")
+        if self._closed or self._closing:
+            raise RuntimeError("AgentRuntime is closing or closed")
         request = task if isinstance(task, TaskRequest) else TaskRequest(task=task)
         run_settings = RunSettings.from_app(self.settings)
         if isinstance(overrides, RunSettings):
@@ -45,27 +48,28 @@ class AgentRuntime:
         self._validate_run_capabilities(run_settings)
 
         self.context.llm_client.reset_usage()
-        selector = EngineSelector()
-        engine_kind, reason = await selector.select(request.task, run_settings)
-        effort = EffortPolicy.select(engine_kind, run_settings.effort)
-        executor_kind = select_executor(self.settings, run_settings.executor)
+        engine_kind = run_settings.engine
+        effort = (
+            _DEFAULT_EFFORT[engine_kind]
+            if run_settings.effort == Effort.AUTO
+            else run_settings.effort
+        )
         self.events.set_context(
             run_id=request.run_id,
             task_id=request.task_id,
             engine=engine_kind.value,
-            executor=executor_kind.value,
         )
         self.events.emit(
             "task_started",
             {
                 "task": request.task,
-                "selection_reason": reason,
+                "engine": engine_kind.value,
                 "effort": effort.value,
                 "capabilities": list(run_settings.capabilities),
             },
         )
 
-        checkpoint = self._new_checkpoint(request, engine_kind, executor_kind, effort)
+        checkpoint = self._new_checkpoint(request, engine_kind, effort)
         try:
             if checkpoint is not None:
                 self.context.checkpoint_store.save(checkpoint)
@@ -75,10 +79,9 @@ class AgentRuntime:
                     reset()
 
             request.context = self._gather_context(request)
-            executor = self._build_executor(executor_kind)
-            engine = self._build_engine(engine_kind, executor, effort)
+            engine = self._build_engine(engine_kind, effort)
             result = await engine.run(request)
-            result.answer = self._apply_output_guardrail(result.answer)
+            result.output = self._apply_output_guardrail(result.output)
             self._store_conversation(request, result)
             await self._learn_from_result(request, result)
             if checkpoint is not None:
@@ -89,7 +92,7 @@ class AgentRuntime:
                     if result.success
                     else CheckpointStatus.FAILED
                 )
-                checkpoint.answer = result.answer
+                checkpoint.output = result.output
                 if not result.success:
                     checkpoint.error = "Engine completed without satisfying the task"
                 self.context.checkpoint_store.save(checkpoint)
@@ -136,109 +139,25 @@ class AgentRuntime:
             if not value:
                 raise ValueError(f"Run capability is not enabled: {name}")
 
-    async def run_workflow(
-        self,
-        spec: Any,
-        *,
-        task_id: str | None = None,
-        run_id: str | None = None,
-    ) -> EngineResult:
-        if self._closed:
-            raise RuntimeError("AgentRuntime is closed")
-        if not self.settings.capabilities.workflow:
-            raise ValueError("Workflow capability is disabled in settings.toml")
-        from workflow.models import WorkflowSpec
-
-        workflow_spec = (
-            spec if isinstance(spec, WorkflowSpec) else WorkflowSpec.model_validate(spec)
-        )
-        request = TaskRequest(
-            task=workflow_spec.name.strip() or "workflow",
-            metadata={"workflow_spec": workflow_spec},
-            **({"task_id": task_id} if task_id else {}),
-            **({"run_id": run_id} if run_id else {}),
-        )
-        self.events.set_context(
-            run_id=request.run_id,
-            task_id=request.task_id,
-            engine=EngineKind.WORKFLOW.value,
-            executor=ExecutorKind.AUTO.value,
-        )
-        self.events.emit(
-            "task_started",
-            {"task": request.task, "selection_reason": "explicit workflow", "effort": "low"},
-        )
-        self.context.llm_client.reset_usage()
-        checkpoint = self._new_checkpoint(
-            request,
-            EngineKind.WORKFLOW,
-            ExecutorKind.AUTO,
-            Effort.LOW,
-        )
-        try:
-            if checkpoint is not None:
-                self.context.checkpoint_store.save(checkpoint)
-            for capability in self.context.resettable_capabilities:
-                reset = getattr(capability, "reset_task_state", None)
-                if callable(reset):
-                    reset()
-            executor = self._build_executor(ExecutorKind.TOOL_CALLING)
-            engine = self._build_engine(EngineKind.WORKFLOW, executor, Effort.LOW)
-            result = await engine.run(request)
-            result.answer = self._apply_output_guardrail(result.answer)
-            self._store_conversation(request, result)
-            await self._learn_from_result(request, result)
-            if checkpoint is not None:
-                from checkpoint.models import CheckpointStatus
-
-                checkpoint.state = (
-                    CheckpointStatus.COMPLETED
-                    if result.success
-                    else CheckpointStatus.FAILED
-                )
-                checkpoint.answer = result.answer
-                if not result.success:
-                    checkpoint.error = "Workflow completed unsuccessfully"
-                self.context.checkpoint_store.save(checkpoint)
-            await self.events.emit_async("task_completed", self._completion_payload(result))
-            return result
-        except asyncio.CancelledError:
-            if checkpoint is not None:
-                from checkpoint.models import CheckpointStatus
-
-                checkpoint.state = CheckpointStatus.CANCELLED
-                checkpoint.error = "Workflow cancelled"
-                try:
-                    self.context.checkpoint_store.save(checkpoint)
-                except Exception:
-                    logger.error("Could not persist cancelled workflow checkpoint", exc_info=True)
-            await self.events.emit_async("task_cancelled", {"error": "Workflow cancelled"})
-            raise
-        except Exception as exc:
-            if checkpoint is not None:
-                from checkpoint.models import CheckpointStatus
-
-                checkpoint.state = CheckpointStatus.FAILED
-                checkpoint.error = f"{type(exc).__name__}: {exc}"
-                try:
-                    self.context.checkpoint_store.save(checkpoint)
-                except Exception:
-                    logger.error("Could not persist failed workflow checkpoint", exc_info=True)
-            await self.events.emit_async(
-                "task_failed",
-                {"error": f"{type(exc).__name__}: {exc}"},
-            )
-            raise
-        finally:
-            await self.events.drain()
-
     async def aclose(self) -> None:
-        """Release runtime-owned asynchronous resources."""
-        if self._closed:
-            return
-        self._closed = True
-        await self.events.drain()
-        await self.context.llm_client.aclose()
+        """Release runtime-owned asynchronous resources exactly once.
+
+        Concurrent callers serialize on one lock.  A failed or cancelled close
+        leaves the runtime retryable instead of claiming that its resources were
+        released successfully.
+        """
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closing = True
+            try:
+                await self.events.drain()
+                await self.context.llm_client.aclose()
+            except BaseException:
+                self._closing = False
+                raise
+            self._closed = True
+            self._closing = False
 
     async def resume(self, task_id: str, *, run_id: str | None = None) -> EngineResult:
         store = self.context.checkpoint_store
@@ -250,73 +169,99 @@ class AgentRuntime:
                 "No semantic runtime checkpoint found. Legacy path-specific checkpoints "
                 "are intentionally not compatible."
             )
-        if checkpoint.engine == EngineKind.WORKFLOW:
-            raw_spec = checkpoint.metadata.get("workflow_spec")
-            if raw_spec is None:
-                raise ValueError("Workflow checkpoint does not contain a workflow specification")
-            return await self.run_workflow(
-                raw_spec,
-                task_id=checkpoint.task_id,
-                run_id=run_id,
-            )
         request = TaskRequest(
             task=checkpoint.task,
             context=checkpoint.context,
             task_id=checkpoint.task_id,
+            metadata=dict(checkpoint.metadata),
             **({"run_id": run_id} if run_id else {}),
         )
         return await self.run(
             request,
             RunSettings(
                 engine=checkpoint.engine,
-                executor=checkpoint.executor,
                 effort=checkpoint.effort,
             ),
         )
 
-    def _build_executor(self, kind: ExecutorKind):
-        executor_type = (
-            ReasoningAwareToolCallingActionExecutor
-            if kind == ExecutorKind.REASONING_AWARE_TOOL_CALLING
-            else ToolCallingActionExecutor
+    def _controller_tools(self):
+        """Return a tool bundle whose mutable activation hook is loop-local."""
+        tools = []
+        for tool in self.context.tools.values():
+            if tool.name == "activate_skill":
+                clone = getattr(tool, "clone", None)
+                if callable(clone):
+                    tool = clone()
+            tools.append(tool)
+        return tools
+
+    def _prompt_capabilities(self, tools) -> PromptCapabilities:
+        activation = next(
+            (tool for tool in tools if tool.name == "activate_skill"),
+            None,
         )
-        executor = executor_type(
+        return PromptCapabilities.from_tools(
+            tools,
+            python_command=self.settings.tools.python_command,
+            hitl_configured=self.settings.capabilities.hitl,
+            hitl_max_prompts=self.settings.capabilities.hitl_max_prompts,
+            skill_descriptions=getattr(activation, "skill_descriptions", ""),
+            skills_max_activations=getattr(activation, "max_activations", 1),
+        )
+
+    def _build_action_executor(self, tools=None):
+        controller_tools = list(tools) if tools is not None else self._controller_tools()
+        executor = ToolCallingActionExecutor(
             llm_client=self.context.llm_client,
-            tools=self.context.tools.values(),
+            tools=controller_tools,
             settings=self.settings,
             events=self.events,
             context_manager=self.context.context_manager,
             guardrail=self.context.guardrail,
+            prompt_capabilities=self._prompt_capabilities(controller_tools),
         )
-        if self.context.skill_activation is not None:
-            self.context.skill_activation.set_tool_filter_callback(
-                executor.set_allowed_tools
-            )
+        activation = next(
+            (tool for tool in controller_tools if tool.name == "activate_skill"),
+            None,
+        )
+        if activation is not None:
+            activation.set_tool_filter_callback(executor.set_allowed_tools)
         return executor
 
-    def _build_engine(self, kind: EngineKind, executor, effort: Effort):
-        engine_types = {
-            EngineKind.SEQUENTIAL: SequentialPlanEngine,
-            EngineKind.DAG: DagEngine,
-            EngineKind.TODO: TodoEngine,
-            EngineKind.GOAL: GoalEngine,
-            EngineKind.WORKFLOW: WorkflowEngine,
-        }
-        engine_type = engine_types[kind]
-        kwargs = {
+    def _build_engine(self, kind: EngineKind, effort: Effort):
+        controller_tools = self._controller_tools()
+        common = {
             "llm_client": self.context.llm_client,
-            "executor": executor,
             "settings": self.settings,
             "events": self.events,
             "effort": effort,
             "context_manager": self.context.context_manager,
-            "tools": self.context.tools.values(),
-            "executor_factory": lambda: self._build_executor(executor.kind),
+            "tools": controller_tools,
+            "guardrail": self.context.guardrail,
+            "prompt_capabilities": self._prompt_capabilities(controller_tools),
         }
-        if kind == EngineKind.WORKFLOW:
-            kwargs["tools"] = self.context.tools.as_dict()
-            kwargs["guardrail"] = self.context.guardrail
-        return engine_type(**kwargs)
+        if kind == EngineKind.AGENT_LOOP:
+            from engines.agent_loop import AgentLoopEngine
+
+            engine = AgentLoopEngine(**common)
+            activation = next(
+                (tool for tool in controller_tools if tool.name == "activate_skill"),
+                None,
+            )
+            if activation is not None:
+                activation.set_tool_filter_callback(engine.set_allowed_tools)
+            return engine
+
+        executor = self._build_action_executor(controller_tools)
+        engine_types = {
+            EngineKind.SEQUENTIAL: SequentialPlanAndExecuteEngine,
+            EngineKind.DAG: DagPlanAndExecuteEngine,
+        }
+        return engine_types[kind](
+            executor=executor,
+            **common,
+            executor_factory=self._build_action_executor,
+        )
 
     def _gather_context(self, request: TaskRequest) -> str:
         parts = [request.context] if request.context else []
@@ -370,12 +315,12 @@ class AgentRuntime:
             return decision.transformed_text or combined
         return combined
 
-    def _apply_output_guardrail(self, answer: str) -> str:
+    def _apply_output_guardrail(self, output: str) -> str:
         guardrail = self.context.guardrail
         if guardrail is None:
-            return answer
-        decision = guardrail.scan_final_output(answer)
-        return decision.transformed_text or answer
+            return output
+        decision = guardrail.scan_final_output(output)
+        return decision.transformed_text or output
 
     def _store_conversation(self, request: TaskRequest, result: EngineResult) -> None:
         if not self.settings.capabilities.agentic_memory:
@@ -386,7 +331,7 @@ class AgentRuntime:
         try:
             service.store_task_result(
                 task=request.task,
-                answer=result.answer,
+                answer=result.output,
                 task_id=request.task_id,
                 success=result.success,
             )
@@ -397,16 +342,17 @@ class AgentRuntime:
     def _completion_payload(result: EngineResult) -> dict[str, Any]:
         """Return the guarded, user-facing subset published to event consumers."""
         return {
-            "answer": result.answer,
+            "output": result.output,
             "success": result.success,
             "engine": result.engine.value,
-            "executor": result.executor.value,
             "effort": result.effort.value,
+            "stop_reason": result.stop_reason.value,
+            "stats": result.stats.model_dump(),
             "action_count": len(result.actions),
             "duration_ms": result.duration_ms,
         }
 
-    def _new_checkpoint(self, request, engine, executor, effort):
+    def _new_checkpoint(self, request, engine, effort):
         if self.context.checkpoint_store is None:
             return None
         from checkpoint.models import RuntimeCheckpoint
@@ -417,7 +363,6 @@ class AgentRuntime:
             task=request.task,
             context=request.context,
             engine=engine,
-            executor=executor,
             effort=effort,
             metadata=request.metadata,
         )
@@ -435,7 +380,7 @@ class AgentRuntime:
                 task_id=request.task_id,
                 complexity=result.engine.value,
                 success=result.success,
-                final_answer=result.answer,
+                final_answer=result.output,
                 trajectory=legacy_results,
             )
             await learner.learn_from_task(outcome)

@@ -43,6 +43,18 @@ class CodeExecutorTool(BaseTool):
         self._max_output_bytes = max_output_bytes
         self._ssl_verify = ssl_verify
         self._concurrency_sem = asyncio.Semaphore(max_concurrent)
+        self._max_concurrent = max_concurrent
+
+    def for_sandbox(self, sandbox_dir: str) -> "CodeExecutorTool":
+        """Return an independent executor whose subprocess cwd is the child sandbox."""
+        return CodeExecutorTool(
+            trusted=True,
+            sandbox_dir=sandbox_dir,
+            timeout=self._timeout,
+            max_output_bytes=self._max_output_bytes,
+            ssl_verify=self._ssl_verify,
+            max_concurrent=self._max_concurrent,
+        )
 
     @property
     def name(self) -> str:

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Tools a remote agent must never expose/use (prevents cross-process
 # recursion + isolation breaks). / 远端 agent 永不暴露/使用的工具，防递归。
-_REMOTE_BLOCKED = ("remote_subagent", "handoff", "subagent", "ask_user")
+_REMOTE_BLOCKED = ("subagent", "ask_user")
 
 
 class MCPServerWrapper:
@@ -205,7 +205,7 @@ class MCPServerWrapper:
             skills = [AgentSkill(name=t.name, description=t.description) for t in agent_tools]
             card = AgentCard(
                 name=server_name,
-                description="Manus Demo remote agent (depth=1 SubAgent executor)",
+                description="Manus Demo remote agent (isolated depth-one AgentLoop)",
                 version="local",
                 auth="local",
                 skills=skills,
@@ -214,29 +214,34 @@ class MCPServerWrapper:
             return card.model_dump_json()
 
         async def a2a_run_task(input: str, context: str = "", task_id: str = "") -> str:
-            """Run a delegated task via an isolated depth=1 SubAgent; return A2ATaskResponse JSON."""
+            """Run a delegated task via an isolated AgentLoop; return A2ATaskResponse JSON."""
             import uuid as _uuid
+            from agent_loop import AgentLoop
             from a2a.models import A2ATaskResponse
-            from agents.subagent import SubAgent
-            from agents.subagent_models import SubAgentStatus
+            from core.models import Effort
 
             tid = task_id or _uuid.uuid4().hex[:12]
             try:
-                sub = SubAgent(
-                    name="RemoteAgent",
-                    task_description=input,
+                loop = AgentLoop(
                     llm_client=llm_client,
                     tools=agent_tools,
+                    agent_name="RemoteAgent",
                     on_event=lambda *_: None,
-                    parent_agent_name=f"a2a:{server_name}",
                 )
-                result = await sub.run(context=context)
-                completed = result.status == SubAgentStatus.COMPLETED
+                result = await loop.run(
+                    input,
+                    context=context,
+                    system_prompt=(
+                        "Complete the delegated task using the available tools. "
+                        "Return the final answer directly and do not delegate again."
+                    ),
+                    effort=Effort.HIGH,
+                )
                 return A2ATaskResponse(
                     task_id=tid,
-                    status="completed" if completed else "failed",
-                    output=result.summary_text,
-                    error="" if completed else (result.summary.issues or "remote task failed"),
+                    status="completed" if result.success else "failed",
+                    output=result.output,
+                    error="" if result.success else result.output[:300],
                 ).model_dump_json()
             except Exception as exc:
                 logger.error("[MCPServer] a2a_run_task failed: %s", exc, exc_info=True)

@@ -18,7 +18,6 @@ class RuntimeEvent:
     run_id: str = ""
     task_id: str = ""
     engine: str = ""
-    executor: str = ""
     payload: Any = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
@@ -57,13 +56,11 @@ class EventBus:
         run_id: str = "",
         task_id: str = "",
         engine: str = "",
-        executor: str = "",
     ) -> None:
         self._context = {
             "run_id": run_id,
             "task_id": task_id,
             "engine": engine,
-            "executor": executor,
         }
 
     def emit(self, name: str, payload: Any = None, **identity: str) -> RuntimeEvent:
@@ -109,7 +106,6 @@ class EventBus:
             run_id=values.get("run_id", ""),
             task_id=values.get("task_id", ""),
             engine=values.get("engine", ""),
-            executor=values.get("executor", ""),
             payload=self._copy_payload({} if payload is None else payload),
         )
 

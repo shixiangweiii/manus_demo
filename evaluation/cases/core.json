@@ -5,11 +5,6 @@
       "task_description": "Calculate the factorial of 10 using Python.",
       "difficulty": "easy",
       "tags": ["code", "single_step"],
-      "ground_truth": {
-        "expected_engine": "sequential",
-        "expected_tools": ["execute_python"],
-        "success_criteria": "Return 3628800"
-      },
       "verifiers": [
         {"type": "regex_match", "params": {"pattern": "3[,，\\s]?628[,，\\s]?800"}}
       ]
@@ -19,10 +14,6 @@
       "task_description": "Write 'Hello World' to a file named test_output.txt.",
       "difficulty": "easy",
       "tags": ["file_ops", "single_step"],
-      "ground_truth": {
-        "expected_engine": "sequential",
-        "expected_tools": ["file_ops"]
-      },
       "verifiers": [
         {"type": "file_contains", "params": {"path": "test_output.txt", "content": "Hello World"}}
       ]
@@ -32,23 +23,24 @@
       "task_description": "分别收集两个独立主题的信息，并行处理后对比它们，最后给出结论。",
       "difficulty": "medium",
       "tags": ["parallel", "comparison"],
-      "ground_truth": {"expected_engine": "dag", "success_criteria": "完成对比并给出结论"},
-      "verifiers": []
+      "verifiers": [
+        {"type": "keyword_include", "params": {"keywords": ["对比", "结论"]}}
+      ]
     },
     {
       "task_id": "exploratory_plan",
       "task_description": "探索当前目录的代码结构，逐步调查主要模块并总结可维护性问题。",
       "difficulty": "medium",
-      "tags": ["exploratory", "todo"],
-      "ground_truth": {"expected_engine": "todo", "success_criteria": "总结主要模块和问题"},
-      "verifiers": []
+      "tags": ["exploratory", "agent_loop"],
+      "verifiers": [
+        {"type": "keyword_include", "params": {"keywords": ["模块", "可维护"]}}
+      ]
     },
     {
-      "task_id": "goal_plan",
+      "task_id": "constraints_plan",
       "task_description": "最终目标是形成一份重构建议；成功标准是包含架构、配置和验证方案，约束是不修改文件。",
       "difficulty": "hard",
-      "tags": ["goal", "constraints"],
-      "ground_truth": {"expected_engine": "goal", "success_criteria": "建议覆盖三个指定维度"},
+      "tags": ["constraints", "agent_loop"],
       "verifiers": [
         {"type": "keyword_include", "params": {"keywords": ["架构", "配置", "验证"]}}
       ]

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from core.models import Effort, EngineKind, ExecutorKind
+from core.models import Effort, EngineKind
 from core.settings import AppSettings, get_settings, validate_settings
 
 
@@ -29,9 +29,8 @@ GROUPS = (
         "runtime",
         "运行选择",
         (
-            Item("engine", "enum", "编排引擎", "auto 或一种任务编排方式", tuple(k.value for k in EngineKind if k != EngineKind.WORKFLOW)),
-            Item("executor", "enum", "动作执行器", "auto 根据模型能力选择", tuple(k.value for k in ExecutorKind)),
-            Item("effort", "enum", "运行力度", "auto 根据编排引擎选择", tuple(k.value for k in Effort)),
+            Item("engine", "enum", "编排引擎", "选择 sequential、dag 或 agent_loop", tuple(k.value for k in EngineKind)),
+            Item("effort", "enum", "运行力度", "控制计划和循环预算", tuple(k.value for k in Effort)),
         ),
     ),
     (
@@ -81,7 +80,6 @@ def get_values(settings: AppSettings | None = None) -> dict[str, object]:
     settings = settings or get_settings()
     return {
         "engine": settings.runtime.engine.value,
-        "executor": settings.runtime.executor.value,
         "effort": settings.runtime.effort.value,
         "subagent": settings.capabilities.subagent,
         "hitl": settings.capabilities.hitl,
@@ -124,7 +122,7 @@ def settings_for_session(overrides: dict[str, object]) -> tuple[AppSettings, dic
     run_overrides = {
         name: value
         for name, value in overrides.items()
-        if name in {"engine", "executor", "effort"}
+        if name in {"engine", "effort"}
     }
     for name in (
         "subagent", "hitl", "agentic_memory", "memory_tools", "knowledge", "skills", "guardrails"

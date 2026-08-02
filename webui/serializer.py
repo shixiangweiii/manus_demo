@@ -152,34 +152,25 @@ def serialize_event(event: str, data: Any) -> tuple[Any, bool]:
 
 KNOWN_EVENTS: frozenset[str] = frozenset({
     # lifecycle / 生命周期
-    "task_started", "engine_started", "engine_completed", "task_completed", "task_failed",
-    "action_started", "action_completed", "action_failed", "tool_started", "tool_completed",
+    "task_started", "engine_started", "engine_completed", "task_completed", "task_failed", "task_cancelled",
+    "agent_loop_started", "agent_turn_started", "agent_turn_completed", "agent_loop_completed",
+    "action_started", "action_turn_started", "action_turn_completed", "action_completed", "action_failed", "tool_started", "tool_completed",
     "task_start", "phase", "task_complete", "token_usage_summary",
     # plan / 计划
     "plan", "plan_created", "plan_adaptation", "step_start", "step_complete", "step_failed",
-    "step_skipped", "reflection",
+    "step_skipped", "reflection", "planner_started", "planner_completed",
+    "reflector_started", "reflector_completed",
     # DAG
-    "dag_created", "superstep", "node_running", "node_completed", "node_failed",
+    "dag_created", "dag_execution_started", "dag_execution_completed", "superstep", "node_running", "node_completed", "node_failed",
     "node_rollback", "node_transition", "condition_evaluated", "execution_error",
-    # TODO planning（控制台未渲染 / console-dropped）
-    "todo_list_initialized", "todo_start", "todo_complete", "todo_blocked",
-    "todo_failed", "todo_list_update",
-    # goal-driven（控制台未渲染 / console-dropped）
-    "goal_anchor", "goal_reflection", "goal_drift_alert", "goal_reanchor",
-    "stagnation_detected",
+    # agent loop todo snapshot
+    "todo_updated",
     # memory / 记忆
     "memory", "knowledge", "memory_stored", "memory_search_start",
     "memory_search_result", "memory_store", "memory_revoke", "memory_consolidate",
     # evolution / 自演化
     "experience_learned", "failure_lesson_stored", "avoidance_hints_injected",
     "preference_hints_injected", "preference_learned",
-    # workflow
-    "workflow_start", "workflow_step_start", "workflow_step_complete",
-    "workflow_step_failed", "workflow_complete", "workflow_failed",
-    # handoff / remote / A2A
-    "handoff_start", "handoff_complete", "handoff_failed",
-    "remote_subagent_start", "a2a_card_fetched", "remote_subagent_complete",
-    "remote_subagent_failed",
     # guardrail / 护栏
     "guardrail_blocked", "guardrail_injection_neutralized",
     "guardrail_output_redacted", "guardrail_write_confirm", "guardrail_violation",
@@ -189,7 +180,8 @@ KNOWN_EVENTS: frozenset[str] = frozenset({
     "skill_optimization_applied", "skill_optimization_report",
     # subagent / 子智能体
     "subagent_start", "subagent_complete", "subagent_failed", "subagent_timed_out",
-    "subagent_limit_exceeded", "subagent_iteration",
+    "subagent_cancelled",
+    "subagent_iteration", "subagent_todo_updated",
     # HITL
     "ask_user_prompt", "ask_user_response", "ask_user_timeout", "ask_user_cancelled",
     # checkpoint

@@ -14,18 +14,17 @@ def render_markdown(report: EvaluationReport) -> str:
         "",
         "No composite score is used. Compare each dimension directly.",
         "",
-        "| Experiment | Success | Verifier | Tokens | Latency ms | Tools | Iterations | Replans | Stability | Selector |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Experiment | Success | Verifier | LLM calls | Tools | Reasoning tokens | Subagents | Latency ms | Stability |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in report.summaries:
         verifier = "-" if row.verifier_rate is None else f"{row.verifier_rate:.1%}"
-        selector = "-" if row.selector_accuracy is None else f"{row.selector_accuracy:.1%}"
         stability = "-" if row.stability is None else f"{row.stability:.2f}"
         lines.append(
             f"| {row.experiment_id} | {row.success_rate:.1%} | {verifier} | "
-            f"{row.average_tokens:.0f} | {row.average_latency_ms:.0f} | "
-            f"{row.average_tool_calls:.1f} | {row.average_iterations:.1f} | "
-            f"{row.average_replans:.1f} | {stability} | {selector} |"
+            f"{row.average_llm_calls:.1f} | {row.average_tool_calls:.1f} | "
+            f"{row.average_reasoning_tokens:.0f} | {row.average_subagent_calls:.1f} | "
+            f"{row.average_latency_ms:.0f} | {stability} |"
         )
     lines.extend(["", "## Case Results", ""])
     for result in report.results:
@@ -34,7 +33,7 @@ def render_markdown(report: EvaluationReport) -> str:
         lines.append(
             f"- `{result.case_id}` / `{result.experiment.id}` / trial {result.trial}: "
             f"**{status}**, engine={engine}, "
-            f"latency={result.metrics.latency_ms:.0f}ms, tokens={result.metrics.tokens}"
+            f"latency={result.metrics.latency_ms:.0f}ms, llm_calls={result.metrics.llm_calls}"
         )
         if result.error:
             lines.append(f"  - Error: {result.error}")

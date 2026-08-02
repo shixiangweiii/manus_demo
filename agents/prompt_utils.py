@@ -2,7 +2,9 @@
 Prompt utilities - Shared system prompt components for agent tool selection guidance.
 提示词工具 - 智能体工具选择引导的共享系统提示组件。
 """
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Iterable
 
 import config
 
@@ -26,61 +28,63 @@ DO NOT use the "subagent" tool for:
 When in doubt, use basic tools directly. The subagent tool trades context visibility for isolation.
 """
 
-_SUBAGENT_RUNTIME_OVERRIDE: bool | None = None
+
+@dataclass(frozen=True)
+class PromptCapabilities:
+    """Immutable, runtime-local facts used to compose system prompts.
+
+    Prompt construction used to depend on mutable module globals populated by
+    the last runtime that happened to be built.  Keeping the facts in an
+    explicit value object makes two runtimes safe to construct and run in the
+    same process, and lets child agents describe their restricted tool set.
+    """
+
+    tool_names: frozenset[str] = frozenset()
+    python_command: str = "python3"
+    hitl_configured: bool = False
+    hitl_max_prompts: int = 3
+    skill_descriptions: str = ""
+    skills_max_activations: int = 1
+
+    @classmethod
+    def from_tools(
+        cls,
+        tools: Iterable[object],
+        *,
+        python_command: str = "python3",
+        hitl_configured: bool = False,
+        hitl_max_prompts: int = 3,
+        skill_descriptions: str = "",
+        skills_max_activations: int = 1,
+    ) -> "PromptCapabilities":
+        return cls(
+            tool_names=frozenset(
+                name
+                for tool in tools
+                if isinstance((name := getattr(tool, "name", None)), str)
+            ),
+            python_command=python_command,
+            hitl_configured=hitl_configured,
+            hitl_max_prompts=hitl_max_prompts,
+            skill_descriptions=skill_descriptions,
+            skills_max_activations=skills_max_activations,
+        )
+
+    def has_tool(self, name: str) -> bool:
+        return name in self.tool_names
 
 
-def set_subagent_runtime_enabled(enabled: bool | None) -> None:
-    global _SUBAGENT_RUNTIME_OVERRIDE
-    _SUBAGENT_RUNTIME_OVERRIDE = enabled
-
-
-def get_subagent_guidance() -> str:
-    """Return subagent guidance when the current runtime enables it."""
+def get_subagent_guidance(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
+    """Return subagent guidance only when that tool is actually available."""
     enabled = (
-        _SUBAGENT_RUNTIME_OVERRIDE
-        if _SUBAGENT_RUNTIME_OVERRIDE is not None
+        capabilities.has_tool("subagent")
+        if capabilities is not None
         else config.SUBAGENT_ENABLED
     )
     if enabled:
         return _SUBAGENT_GUIDANCE
-    return ""
-
-
-# TODO parallel dispatch guidance is appended only when both TODO parallelism
-# and subagents are enabled. Unlike the
-# generic _SUBAGENT_GUIDANCE (which ends with "when in doubt, use basic tools"),
-# this actively encourages keeping independent subjects as separate dependency-free
-# TODOs so the scheduler can fan them out to isolated sub-agents in parallel.
-# TODO 并行派发引导由运行时 capability 配置注入。
-_EMERGENT_PARALLEL_GUIDANCE = """
-
-## Parallel Execution of Independent TODOs
-
-This task may contain multiple INDEPENDENT subjects/subtasks. The scheduler can
-execute mutually independent TODOs IN PARALLEL by dispatching each to an isolated
-sub-agent. To enable this:
-- Keep genuinely independent subjects as SEPARATE TODOs with EMPTY `dependencies`.
-- Do NOT merge unrelated research subjects into one TODO.
-- Do NOT add artificial dependencies between subjects that don't actually depend
-  on each other.
-- Only declare a dependency when a TODO truly needs another TODO's output.
-
-Each independent TODO will be run by its own focused sub-agent and only its
-summary is returned — so write each TODO description as a self-contained,
-fully-specified unit of work.
-"""
-
-
-def get_emergent_parallel_guidance(
-    parallel_todos: bool | None = None,
-    subagent_enabled: bool | None = None,
-) -> str:
-    """Return emergent parallel-dispatch guidance, or empty string when disabled.
-    EMERGENT_PARALLEL_TODOS 且 SUBAGENT_ENABLED 同时为 true 时返回引导，否则空串。"""
-    parallel = config.EMERGENT_PARALLEL_TODOS if parallel_todos is None else parallel_todos
-    subagent = config.SUBAGENT_ENABLED if subagent_enabled is None else subagent_enabled
-    if parallel and subagent:
-        return _EMERGENT_PARALLEL_GUIDANCE
     return ""
 
 
@@ -104,9 +108,12 @@ DO NOT call get_user_location for tasks that do not depend on location
 """
 
 
-def get_location_guidance() -> str:
-    """Return the get_user_location tool guidance string (always on).
-    返回 get_user_location 工具引导（始终启用）。"""
+def get_location_guidance(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
+    """Return location guidance when ``get_user_location`` is available."""
+    if capabilities is not None and not capabilities.has_tool("get_user_location"):
+        return ""
     return _LOCATION_GUIDANCE
 
 
@@ -134,37 +141,45 @@ etc.) when web_search + fetch_url can obtain the same information.
 """
 
 
-def get_search_guidance() -> str:
-    """Return the search tool priority guidance string (always on).
-    返回搜索工具优先级引导（始终启用）。"""
-    return _SEARCH_TOOL_GUIDANCE
+def get_search_guidance(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
+    """Return search guidance mentioning only tools available to this loop."""
+    if capabilities is None:
+        return _SEARCH_TOOL_GUIDANCE
+    search_tools = [
+        name for name in ("web_search", "fetch_url") if capabilities.has_tool(name)
+    ]
+    if not search_tools:
+        return ""
+    lines = [
+        "\n\n## Tool Selection: Prefer Built-in Search Tools for Information Retrieval\n",
+        "For current-information and retrieval tasks, prefer the available "
+        "built-in tools in this order:",
+    ]
+    for index, name in enumerate(search_tools, start=1):
+        purpose = (
+            "search the web for relevant information"
+            if name == "web_search"
+            else "extract content from a specific URL"
+        )
+        lines.append(f"{index}. **{name}** — {purpose}")
+    if capabilities.has_tool("execute_python"):
+        lines.extend(
+            [
+                "Use **execute_python** for computation, data processing, file "
+                "manipulation, or a structured API that the search tools cannot serve.",
+                "Do not use execute_python for public information that the built-in "
+                "search tools can obtain.",
+            ]
+        )
+    return "\n".join(lines) + "\n"
 
 
 # HITL tool usage guidance (injected when HITL is active)
 # 人机交互工具使用引导（HITL 激活时追加到系统提示词）
 #
-# Activation gating uses a runtime override based on
-# interactive mode) with fallback to config.HITL_ENABLED. This avoids injecting
-# the guidance in non-interactive single-task mode where ask_user would only
-# return Error: anyway — preventing wasted LLM calls on a tool the LLM cannot
-# usefully invoke.
-# 通过运行时开关 + config 兜底门控；非交互模式下既不注册工具也不注入引导，
-# 避免 LLM 调用一个注定返回 Error 的工具。
-_HITL_RUNTIME_OVERRIDE: bool | None = None
-
-
-def set_hitl_runtime_enabled(enabled: bool | None) -> None:
-    """Runtime override for HITL guidance injection.
-
-    Set by the runtime based on interactive mode and structured settings.
-    Pass None (or never call) to fall back to config.HITL_ENABLED.
-
-    由运行时根据 interactive 模式与结构化配置设置此开关。
-    None 表示回退到 config.HITL_ENABLED。"""
-    global _HITL_RUNTIME_OVERRIDE
-    _HITL_RUNTIME_OVERRIDE = enabled
-
-
+# Availability comes from the immutable runtime-local prompt capabilities.
 _HITL_GUIDANCE_TEMPLATE = """
 
 ## Tool Selection: When to Use the "ask_user" Tool
@@ -188,23 +203,28 @@ If not, please tell me your city."
 """
 
 
-def get_hitl_guidance() -> str:
+def get_hitl_guidance(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
     """Return HITL guidance string if HITL is active, empty string otherwise.
 
-    Active when runtime override is True, or (override unset AND config.HITL_ENABLED).
-    The max-prompts limit is interpolated from config.HITL_MAX_PROMPTS_PER_TASK
-    so the LLM always sees the actual configured value.
+    Runtime callers pass explicit capabilities; the config fallback exists for
+    standalone callers that do not have a runtime tool bundle.
 
     HITL 激活时返回引导文本，否则返回空字符串。max-prompts 从 config 动态注入。"""
     enabled = (
-        _HITL_RUNTIME_OVERRIDE
-        if _HITL_RUNTIME_OVERRIDE is not None
+        capabilities.has_tool("ask_user")
+        if capabilities is not None
         else config.HITL_ENABLED
     )
     if not enabled:
         return ""
     return _HITL_GUIDANCE_TEMPLATE.format(
-        max_prompts=config.HITL_MAX_PROMPTS_PER_TASK
+        max_prompts=(
+            capabilities.hitl_max_prompts
+            if capabilities is not None
+            else config.HITL_MAX_PROMPTS_PER_TASK
+        )
     )
 
 
@@ -220,9 +240,15 @@ ask_user is unavailable in non-interactive mode.
 """
 
 
-def get_hitl_unavailable_guidance() -> str:
+def get_hitl_unavailable_guidance(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
     """Return planning guidance when HITL is configured but runtime-disabled."""
-    if config.HITL_ENABLED and _HITL_RUNTIME_OVERRIDE is False:
+    if capabilities is not None:
+        if capabilities.hitl_configured and not capabilities.has_tool("ask_user"):
+            return _HITL_UNAVAILABLE_GUIDANCE
+        return ""
+    if config.HITL_ENABLED:
         return _HITL_UNAVAILABLE_GUIDANCE
     return ""
 
@@ -230,36 +256,8 @@ def get_hitl_unavailable_guidance() -> str:
 # Skill activation guidance (injected when skills are enabled and discovered)
 # 技能激活引导（技能启用且已发现时追加到系统提示词）
 #
-# Uses the same module-level variable pattern as HITL's _HITL_RUNTIME_OVERRIDE:
-# The runtime calls set_skill_descriptions() after discovery, and
-# get_skill_guidance() reads it at system prompt build time. This avoids
-# changing planner constructor signatures.
-# 使用与 HITL _HITL_RUNTIME_OVERRIDE 相同的模块级变量模式：
-# 运行时在发现技能后调用 set_skill_descriptions()，
-# get_skill_guidance() 在系统提示词构建时读取。避免修改各 Agent 构造函数签名。
-_SKILL_DESCRIPTIONS: str = ""
-_SKILLS_RUNTIME_ENABLED: bool | None = None
-_SKILLS_RUNTIME_MAX_ACTIVATIONS: int | None = None
-
-
-def set_skill_descriptions(
-    descriptions: str,
-    *,
-    enabled: bool | None = None,
-    max_activations: int | None = None,
-) -> None:
-    """Set the formatted skill descriptions for guidance injection.
-    设置格式化的技能描述供引导注入。
-
-    Called by the runtime after SkillLoader.discover() completes.
-    Only when SKILLS_ENABLED=true; otherwise should not be called.
-    """
-    global _SKILL_DESCRIPTIONS, _SKILLS_RUNTIME_ENABLED, _SKILLS_RUNTIME_MAX_ACTIVATIONS
-    _SKILL_DESCRIPTIONS = descriptions
-    _SKILLS_RUNTIME_ENABLED = enabled
-    _SKILLS_RUNTIME_MAX_ACTIVATIONS = max_activations
-
-
+# Skill descriptions are carried by ``PromptCapabilities`` instead of process
+# globals so concurrent runtimes cannot overwrite one another.
 _SKILL_GUIDANCE_TEMPLATE = """
 
 ## Tool Selection: When to Use the "activate_skill" Tool
@@ -283,36 +281,36 @@ any tool pre-authorizations take effect.
 """
 
 
-def get_skill_guidance() -> str:
+def get_skill_guidance(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
     """Return skill guidance string if Skills are enabled and skills exist, empty string otherwise.
     Skills 启用且存在技能时返回引导文本，否则返回空字符串。
 
-    The guidance is only injected when BOTH conditions are met:
-    1. config.SKILLS_ENABLED is True (master switch)
-    2. _SKILL_DESCRIPTIONS is non-empty (skills were discovered)
+    Runtime guidance is injected only when ``activate_skill`` is in the loop's
+    actual tool set and that tool exposes at least one discovered skill.
 
     This prevents injecting the guidance when no skills are available,
     which would confuse the LLM into trying to activate non-existent skills.
     """
-    enabled = (
-        _SKILLS_RUNTIME_ENABLED
-        if _SKILLS_RUNTIME_ENABLED is not None
-        else config.SKILLS_ENABLED
-    )
+    if capabilities is None:
+        return ""
+    enabled = capabilities.has_tool("activate_skill")
     if not enabled:
         return ""
-    if not _SKILL_DESCRIPTIONS:
+    descriptions = capabilities.skill_descriptions
+    if not descriptions:
         return ""
     return _SKILL_GUIDANCE_TEMPLATE.format(
         max_activations=(
-            _SKILLS_RUNTIME_MAX_ACTIVATIONS
-            if _SKILLS_RUNTIME_MAX_ACTIVATIONS is not None
-            else config.SKILLS_MAX_ACTIVATIONS_PER_TASK
+            capabilities.skills_max_activations
         )
     )
 
 
-def build_context_injection() -> str:
+def build_context_injection(
+    capabilities: PromptCapabilities | None = None,
+) -> str:
     """
     Build runtime context to inject into system prompts: today's date, weekday, etc.
     构建注入到系统提示词的运行时上下文：当前日期、星期几等。
@@ -328,16 +326,27 @@ def build_context_injection() -> str:
     now = datetime.now()
     weekday_en = now.strftime("%A")
     weekday_zh = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday()]
-    return (
-        "\n\n## Current Context (auto-injected, treat as ground truth)\n"
-        f"- Today's date: {now.strftime('%Y-%m-%d')} ({weekday_en} / {weekday_zh})\n"
-        f"- Current time: {now.strftime('%H:%M')} (local timezone)\n"
-        f"- Python command for shell tasks: `{config.PYTHON_COMMAND}`. "
-        "Use this command instead of bare `python` when invoking Python from shell.\n"
+    lines = [
+        "\n\n## Current Context (auto-injected, treat as ground truth)",
+        f"- Today's date: {now.strftime('%Y-%m-%d')} ({weekday_en} / {weekday_zh})",
+        f"- Current time: {now.strftime('%H:%M')} (local timezone)",
+    ]
+    if capabilities is None or capabilities.has_tool("execute_shell"):
+        command = (
+            capabilities.python_command
+            if capabilities is not None
+            else config.PYTHON_COMMAND
+        )
+        lines.append(
+            f"- Python command for shell tasks: `{command}`. Use this command "
+            "instead of bare `python` when invoking Python from shell."
+        )
+    lines.append(
         "Use these values directly when composing search queries or reasoning "
         "about \"today\" / \"tomorrow\" / \"yesterday\". Do NOT ask tools for the "
-        "date when it is already provided here.\n"
+        "date when it is already provided here."
     )
+    return "\n".join(lines) + "\n"
 
 
 def build_system_prompt(
@@ -349,6 +358,7 @@ def build_system_prompt(
     inject_hitl_guidance: bool = True,
     inject_hitl_unavailable_guidance: bool = False,
     inject_skill_guidance: bool = True,
+    capabilities: PromptCapabilities | None = None,
 ) -> str:
     """Compose a system prompt with optional context / location / search / subagent / HITL / skill guidance.
     组合系统提示词，按需注入运行时上下文、位置工具引导、搜索工具引导、子智能体引导、人机交互引导和技能引导。
@@ -375,29 +385,50 @@ def build_system_prompt(
             tool usage guidance (only emitted if SKILLS_ENABLED=true and skills
             were discovered). Set False for agents that do not call tools.
     """
+    capabilities = capabilities or PromptCapabilities(
+        python_command=config.PYTHON_COMMAND,
+        hitl_configured=config.HITL_ENABLED,
+        hitl_max_prompts=config.HITL_MAX_PROMPTS_PER_TASK,
+        skills_max_activations=config.SKILLS_MAX_ACTIVATIONS_PER_TASK,
+    )
     parts = [base_prompt]
     if inject_context:
-        parts.append(build_context_injection())
+        parts.append(build_context_injection(capabilities))
     if inject_location_guidance:
-        parts.append(get_location_guidance())
+        guidance = get_location_guidance(capabilities)
+        if guidance:
+            parts.append(guidance)
     if inject_search_guidance:
-        parts.append(get_search_guidance())
+        guidance = get_search_guidance(capabilities)
+        if guidance:
+            parts.append(guidance)
     if inject_subagent_guidance:
-        guidance = get_subagent_guidance()
+        guidance = get_subagent_guidance(capabilities)
         if guidance:
             parts.append(guidance)
     if inject_hitl_guidance:
-        hitl_guidance = get_hitl_guidance()
+        hitl_guidance = get_hitl_guidance(capabilities)
         if hitl_guidance:
             parts.append(hitl_guidance)
     if inject_hitl_unavailable_guidance:
-        unavailable_guidance = get_hitl_unavailable_guidance()
+        unavailable_guidance = get_hitl_unavailable_guidance(capabilities)
         if unavailable_guidance:
             parts.append(unavailable_guidance)
     if inject_skill_guidance:
-        skill_guidance = get_skill_guidance()
+        skill_guidance = get_skill_guidance(capabilities)
         if skill_guidance:
             parts.append(skill_guidance)
+    if (
+        inject_skill_guidance
+        and capabilities is not None
+        and capabilities.has_tool("activate_skill")
+        and capabilities.skill_descriptions
+    ):
+        parts.append(
+            "\n\n=== Available Skills ===\n"
+            f"{capabilities.skill_descriptions}\n"
+            "=== End Available Skills ===\n"
+        )
     return "".join(parts)
 
 

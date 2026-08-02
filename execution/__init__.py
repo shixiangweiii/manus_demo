@@ -8,10 +8,6 @@ _EXPORTS = {
         "execution.tool_calling",
         "ToolCallingActionExecutor",
     ),
-    "ReasoningAwareToolCallingActionExecutor": (
-        "execution.reasoning_aware_tool_calling",
-        "ReasoningAwareToolCallingActionExecutor",
-    ),
 }
 
 __all__ = list(_EXPORTS)

@@ -39,6 +39,9 @@ export function EventCard({ entry }) {
   }
 
   const open = typeof renderer.open === "function" ? renderer.open(entry.data) : !!renderer.open;
+  const cls = typeof renderer.cls === "function"
+    ? renderer.cls(entry.data)
+    : (renderer.cls || "info");
   let summary = "";
   try {
     summary = renderer.summary ? renderer.summary(entry.data) : "";
@@ -53,7 +56,7 @@ export function EventCard({ entry }) {
     : html`<pre class="event-json">${JSON.stringify(entry.data, null, 2)}</pre>`;
 
   return html`
-    <details class="event-card ${renderer.cls || "info"}" open=${open}>
+    <details class="event-card ${cls}" open=${open}>
       <summary>
         <span class="event-icon">${renderer.icon || "•"}</span>
         <span class="event-name">${entry.event}</span>

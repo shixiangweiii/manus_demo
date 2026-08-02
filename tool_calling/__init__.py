@@ -3,11 +3,7 @@
 from importlib import import_module
 
 _EXPORTS = {
-    "ToolCallingLoop": ("tool_calling.loop", "ToolCallingLoop"),
-    "ReasoningAwareToolCallingLoop": (
-        "tool_calling.reasoning_aware_loop",
-        "ReasoningAwareToolCallingLoop",
-    ),
+    "ActionToolLoop": ("tool_calling.loop", "ActionToolLoop"),
 }
 
 __all__ = list(_EXPORTS)

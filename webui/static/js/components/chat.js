@@ -27,12 +27,23 @@ function RunStarted({ entry }) {
 }
 
 function RunFinished({ entry }) {
-  if (entry.status === "failed") {
+  if (entry.status !== "completed") {
+    const cancelled = entry.status === "cancelled";
     return html`
       <div class="msg-agent">
         <div class="bubble error">
-          <div class="bubble-head">✗ 任务失败</div>
-          <pre class="answer-text">${entry.error || "未知错误"}</pre>
+          <div class="bubble-head">
+            ${cancelled ? "■ 任务已取消" : "✗ 任务失败"}
+            ${entry.stopReason && html`<span class="badge warn">${entry.stopReason}</span>`}
+            ${entry.trace && html`
+              <a class="badge run" href=${entry.trace.url} target="_blank">Trace ↗</a>
+            `}
+          </div>
+          <pre class="answer-text">${entry.error || (cancelled ? "Run cancelled" : "未知错误")}</pre>
+          ${entry.answer && html`
+            <div class="bubble-head">停止前输出</div>
+            <pre class="answer-text">${entry.answer}</pre>
+          `}
         </div>
       </div>
     `;

@@ -173,7 +173,7 @@ class SessionManager:
                 "overrides": dict(session.overrides),
                 "ts": time.time(),
             })
-            status, answer, error = "completed", None, None
+            status, answer, error, stop_reason = "completed", None, None, None
             try:
                 if run.kind == "run":
                     result = await session.runtime.run(
@@ -182,10 +182,11 @@ class SessionManager:
                     )
                 else:
                     result = await session.runtime.resume(run.task_text, run_id=run.run_id)
-                answer = result.answer
+                answer = result.output
+                stop_reason = result.stop_reason.value
                 if not result.success:
                     status = "failed"
-                    error = "Engine completed without satisfying the task"
+                    error = f"Engine stopped: {stop_reason}"
             except asyncio.CancelledError:
                 status, error = "cancelled", "Run cancelled"
             except Exception as exc:
@@ -201,6 +202,7 @@ class SessionManager:
                     "status": status,
                     "answer": answer,
                     "error": error,
+                    "stop_reason": stop_reason,
                     "trace": trace_ref,
                     "ts": time.time(),
                 })

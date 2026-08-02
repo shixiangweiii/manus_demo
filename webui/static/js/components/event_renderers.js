@@ -1,5 +1,5 @@
-// 按事件族的富渲染器 + TODO 实时卡 + SubAgent 归组卡
-// Per-family rich renderers + live TODO card + grouped SubAgent card.
+// 按事件族的富渲染器 + Agent Loop 任务快照 + SubAgent 归组卡
+// Per-family rich renderers + Agent Loop task snapshot + grouped SubAgent card.
 //
 // 每个渲染器：{ icon, cls, summary(data), Body(data)?, open? }
 // 未注册的事件由 event_card.js 走 raw JSON 兜底卡。
@@ -125,19 +125,56 @@ export const RENDERERS = {
   // --- 生命周期 / lifecycle ---
   task_started: {
     icon: "▶", cls: "info",
-    summary: (d) => `任务开始 · ${str(d && d.selection_reason).slice(0, 100)}`,
+    summary: (d) => `任务开始 · ${str(d && d.task).slice(0, 100)}`,
   },
   engine_started: {
     icon: "🧭", cls: "info",
     summary: (d) => `引擎: ${str(d && d.engine)}`,
   },
+  engine_completed: {
+    icon: "🧭",
+    cls: (d) => d && d.success ? "ok" : "err",
+    open: (d) => !(d && d.success),
+    summary: (d) => d && d.success
+      ? `引擎完成 · ${str(d && d.engine)}`
+      : `引擎停止 · ${str(d && d.engine)} (${str(d && d.stop_reason)})`,
+  },
+  agent_loop_started: {
+    icon: "🔁", cls: "info",
+    summary: (d) => `AgentLoop 开始 · 最多 ${d && d.max_turns} 轮`,
+  },
+  agent_turn_started: {
+    icon: "↻", cls: "info",
+    summary: (d) => `模型轮次 ${d && d.turn} 开始`,
+  },
+  agent_turn_completed: {
+    icon: "↻", cls: "ok",
+    summary: (d) => `模型轮次 ${d && d.turn} 完成${d && d.final ? " · 最终回答" : ""}${d && d.tool_calls ? ` · ${d.tool_calls} 个工具调用` : ""}`,
+  },
+  agent_loop_completed: {
+    icon: "🔁", cls: (d) => d && d.success ? "ok" : "err",
+    open: (d) => !(d && d.success),
+    summary: (d) => `AgentLoop ${d && d.success ? "完成" : `停止 (${str(d && d.stop_reason)})`}`,
+  },
   action_started: {
     icon: "▸", cls: "info",
     summary: (d) => str(d && d.action && d.action.description).slice(0, 100),
   },
+  action_turn_started: {
+    icon: "↻", cls: "info",
+    summary: (d) => `动作 ${str(d && d.action_id)} · 模型轮次 ${d && d.turn} 开始`,
+  },
+  action_turn_completed: {
+    icon: "↻",
+    cls: (d) => d && d.success ? "ok" : "err",
+    open: (d) => !(d && d.success),
+    summary: (d) => `动作 ${str(d && d.action_id)} · 模型轮次 ${d && d.turn} ${d && d.success ? "完成" : "停止"}${d && d.tool_calls ? ` · ${d.tool_calls} 个工具调用` : ""}`,
+  },
   action_completed: {
-    icon: "✓", cls: "ok",
-    summary: (d) => `动作 ${str(d && d.action_id)} 完成`,
+    icon: "✓",
+    cls: (d) => d && d.success ? "ok" : "err",
+    open: (d) => !(d && d.success),
+    summary: (d) => `动作 ${str(d && d.action_id)} ${d && d.success ? "完成" : "未完成"}`,
     Body: (d) => html`<${Raw} data=${d} />`,
   },
   action_failed: {
@@ -149,20 +186,28 @@ export const RENDERERS = {
     summary: (d) => `调用工具: ${str(d && d.tool)}`,
   },
   tool_completed: {
-    icon: "🔧", cls: "info",
+    icon: "🔧", cls: (d) => d && d.success ? "info" : "err",
+    open: (d) => !(d && d.success),
     summary: (d) => `${str(d && d.tool)}: ${d && d.success ? "成功" : "失败"}`,
     Body: (d) => html`<${Raw} data=${d} />`,
   },
-  task_completed: { icon: "🏁", cls: "ok", summary: () => "任务完成" },
+  task_completed: {
+    icon: "🏁",
+    cls: (d) => d && d.success ? "ok" : "err",
+    open: (d) => !(d && d.success),
+    summary: (d) => d && d.success
+      ? "任务完成"
+      : `任务停止 (${str(d && d.stop_reason)})`,
+  },
   task_failed: {
     icon: "💥", cls: "err", open: true,
     summary: (d) => `任务失败: ${str(d && d.error).slice(0, 100)}`,
   },
-  task_start: { icon: "▶", cls: "info", summary: (d) => str(d && d.task).slice(0, 100) },
-  task_complexity: {
-    icon: "🧭", cls: "info",
-    summary: (d) => `分类: ${d && d.complexity}${d && d.effort ? ` (effort: ${d.effort})` : ""}`,
+  task_cancelled: {
+    icon: "■", cls: "err", open: true,
+    summary: (d) => `任务已取消: ${str(d && d.error).slice(0, 100)}`,
   },
+  task_start: { icon: "▶", cls: "info", summary: (d) => str(d && d.task).slice(0, 100) },
   task_complete: { icon: "🏁", cls: "ok", summary: () => "任务完成（最终答案见下方气泡）" },
   token_usage_summary: {
     icon: "🪙", cls: "info", open: true,
@@ -209,6 +254,10 @@ export const RENDERERS = {
     summary: (d) => `反思: ${d && d.passed ? "通过 ✓" : "未通过 ✗"} score=${d && d.score}`,
     Body: (d) => html`<${KV} data=${d} keys=${["feedback", "suggestions"]} />`,
   },
+  planner_started: { icon: "📋", cls: "info", summary: (d) => `Planner: ${str(d && d.operation)} 开始` },
+  planner_completed: { icon: "📋", cls: "ok", summary: (d) => `Planner: ${str(d && d.operation)} 完成` },
+  reflector_started: { icon: "🪞", cls: "info", summary: (d) => `Reflector: ${str(d && d.operation)} 开始` },
+  reflector_completed: { icon: "🪞", cls: "info", summary: (d) => `Reflector: ${str(d && d.operation)} ${d && d.success ? "通过" : "未通过"}` },
 
   // --- DAG ---
   dag_created: {
@@ -216,6 +265,8 @@ export const RENDERERS = {
     summary: (d) => `DAG 已创建（${d && d.nodes ? Object.keys(d.nodes).length : "?"} 节点）`,
     Body: (d) => html`<${Raw} data=${d} />`,
   },
+  dag_execution_started: { icon: "🕸", cls: "info", summary: () => "DAG 执行开始" },
+  dag_execution_completed: { icon: "🕸", cls: "ok", summary: () => "DAG 执行完成" },
   superstep: {
     icon: "⏩", cls: "info",
     summary: (d) => `Super-step ${d && d.step}：${d && Array.isArray(d.nodes) ? d.nodes.length : "?"} 节点就绪`,
@@ -248,17 +299,6 @@ export const RENDERERS = {
     Body: (d) => html`<${KV} data=${d} />`,
   },
 
-  // --- goal-driven ---
-  goal_anchor: {
-    icon: "🎯", cls: "info", open: true,
-    summary: () => "目标锚定",
-    Body: (d) => html`<${Raw} data=${d} />`,
-  },
-  goal_reflection: { icon: "🎯", cls: "info", summary: () => "目标反思", Body: (d) => html`<${Raw} data=${d} />` },
-  goal_drift_alert: { icon: "⚠", cls: "warn", open: true, summary: () => "目标漂移告警", Body: (d) => html`<${Raw} data=${d} />` },
-  goal_reanchor: { icon: "🎯", cls: "warn", summary: () => "目标重新锚定", Body: (d) => html`<${Raw} data=${d} />` },
-  stagnation_detected: { icon: "🛑", cls: "warn", open: true, summary: () => "检测到停滞（无进展）" },
-
   // --- 记忆 / memory ---
   memory: { icon: "🧠", cls: "info", summary: (d) => str(d).slice(0, 100) },
   knowledge: { icon: "📚", cls: "info", summary: (d) => str(d).slice(0, 100) },
@@ -275,31 +315,6 @@ export const RENDERERS = {
   avoidance_hints_injected: { icon: "🛡", cls: "info", summary: () => "已注入避坑提示" },
   preference_hints_injected: { icon: "💡", cls: "info", summary: () => "已注入偏好提示" },
   preference_learned: { icon: "💡", cls: "ok", summary: (d) => `偏好学习: ${str(d && d.value).slice(0, 80)}` },
-
-  // --- workflow ---
-  workflow_start: { icon: "⚙", cls: "info", summary: (d) => `Workflow ${d && d.name}: ${d && d.steps} 步` },
-  workflow_step_start: { icon: "▸", cls: "info", summary: (d) => `步骤 ${d && d.id} (${d && d.tool})` },
-  workflow_step_complete: { icon: "✓", cls: "ok", summary: (d) => `步骤 ${d && d.id} 完成` },
-  workflow_step_failed: { icon: "✗", cls: "err", open: true, summary: (d) => `步骤 ${d && d.id} 失败: ${str(d && d.error).slice(0, 80)}` },
-  workflow_complete: { icon: "🏁", cls: "ok", summary: () => "Workflow 完成" },
-  workflow_failed: { icon: "💥", cls: "err", open: true, summary: (d) => `Workflow 失败: ${str(d && d.error).slice(0, 80)}` },
-
-  // --- 委派 / delegation ---
-  handoff_start: { icon: "🤝", cls: "info", summary: (d) => `Handoff → ${d && d.target}` },
-  handoff_complete: { icon: "🤝", cls: "ok", summary: () => "Handoff 完成（专家输出即最终结果）" },
-  handoff_failed: { icon: "🤝", cls: "err", open: true, summary: (d) => `Handoff 失败: ${str(d && d.error).slice(0, 80)}` },
-  remote_subagent_start: { icon: "🌐", cls: "info", summary: (d) => `远端委派 → ${d && d.server}` },
-  a2a_card_fetched: {
-    icon: "🪪", cls: "info",
-    summary: (d) => `AgentCard: ${d && d.name}`,
-    Body: (d) => html`<${Raw} data=${d} />`,
-  },
-  remote_subagent_complete: { icon: "🌐", cls: "ok", summary: () => "远端任务完成" },
-  remote_subagent_failed: { icon: "🌐", cls: "err", open: true, summary: (d) => `远端任务失败: ${str(d && d.error).slice(0, 80)}` },
-  subagent_limit_exceeded: {
-    icon: "🚧", cls: "warn",
-    summary: (d) => `SubAgent 调用超限 (${d && d.call_count}/${d && d.max_calls})`,
-  },
 
   // --- 护栏 / guardrail ---
   guardrail_blocked: {
@@ -350,15 +365,13 @@ export const RENDERERS = {
 };
 
 // ---------------------------------------------------------------------
-// TODO 实时卡 / live TODO checklist card
+// Agent-loop todo snapshot card
 // ---------------------------------------------------------------------
 
 const TODO_ICONS = {
   pending: "○",
   in_progress: "▸",
   completed: "✓",
-  blocked: "⏸",
-  failed: "✗",
 };
 
 export function TodoCard({ state, runId }) {
@@ -378,7 +391,6 @@ export function TodoCard({ state, runId }) {
               <li class="todo-item ${item.status}">
                 <span class="todo-icon">${TODO_ICONS[item.status] || "○"}</span>
                 <span class="todo-desc">${item.description}</span>
-                ${item.retry > 0 && html`<span class="badge warn">重试 ${item.retry}</span>`}
               </li>
             `;
           })}
@@ -402,6 +414,7 @@ const SUBAGENT_BADGE = {
   completed: ["ok", "完成"],
   failed: ["err", "失败"],
   timed_out: ["warn", "超时"],
+  cancelled: ["warn", "已取消"],
 };
 
 function subagentLine(evt) {
@@ -409,15 +422,33 @@ function subagentLine(evt) {
   switch (evt.event) {
     case "subagent_start":
       return `▶ 启动: ${str(d.task_description).slice(0, 120)}`;
+    case "agent_loop_started":
+      return `· Child AgentLoop 开始（最多 ${d.max_turns ?? "?"} 轮）`;
     case "subagent_iteration":
       return `· 迭代 ${d.iteration}（${d.tool_calls_count ?? "?"} 次工具调用）`;
+    case "agent_turn_started":
+      return `· 模型轮次 ${d.turn} 开始`;
+    case "agent_turn_completed":
+      return `· 模型轮次 ${d.turn} 完成${d.tool_calls ? `（${d.tool_calls} 个工具调用）` : ""}`;
+    case "tool_started":
+      return `· 调用工具 ${str(d.tool)}`;
+    case "tool_completed":
+      return `· 工具 ${str(d.tool)} ${d.success ? "成功" : "失败"}`;
+    case "agent_loop_completed":
+      return `· Child AgentLoop ${d.success ? "完成" : `停止（${str(d.stop_reason)}）`}`;
+    case "subagent_todo_updated": {
+      const todos = Array.isArray(d.todos) ? d.todos : [];
+      const completed = todos.filter((todo) => todo && todo.status === "completed").length;
+      return `· Todo ${completed}/${todos.length} 已完成`;
+    }
     case "subagent_complete":
-      return `✓ 完成: ${str(d.summary).slice(0, 150)}（${d.iterations_used ?? "?"} 轮 / ${
-        fmtTokens(d.tokens_used ?? 0)} tokens / ${d.duration_ms ?? "?"}ms）`;
+      return `✓ 完成（${d.turns ?? "?"} 轮 / ${fmtTokens(d.tokens ?? 0)} tokens / ${d.tool_calls ?? 0} 次工具调用）`;
     case "subagent_failed":
       return `✗ 失败: ${str(d.error).slice(0, 120)}`;
     case "subagent_timed_out":
       return `⏰ 超时（${d.timeout}s）`;
+    case "subagent_cancelled":
+      return `■ 已取消: ${str(d.error).slice(0, 120)}`;
     default:
       return evt.event;
   }
@@ -430,7 +461,7 @@ export function SubagentCard({ state, subagentId }) {
   return html`
     <details class="event-card subagent" open=${sub.status === "running"}>
       <summary>
-        <span class="event-name">🤖 SubAgent ${subagentId}</span>
+        <span class="event-name">🤖 SubAgent ${sub.subagentId}</span>
         <span class="badge ${badgeCls}">${badgeText}</span>
       </summary>
       <div class="subagent-timeline">

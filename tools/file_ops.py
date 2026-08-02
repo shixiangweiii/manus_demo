@@ -30,6 +30,10 @@ class FileOpsTool(BaseTool):
         self._sandbox = sandbox_dir or config.SANDBOX_DIR
         os.makedirs(self._sandbox, exist_ok=True)  # 确保沙箱目录存在
 
+    def for_sandbox(self, sandbox_dir: str) -> "FileOpsTool":
+        """Return an independent instance rooted at a child sandbox."""
+        return FileOpsTool(sandbox_dir)
+
     @property
     def name(self) -> str:
         return "file_ops"

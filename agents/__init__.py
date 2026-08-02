@@ -5,7 +5,6 @@ from importlib import import_module
 _EXPORTS = {
     "PlannerAgent": ("agents.planner", "PlannerAgent"),
     "ReflectorAgent": ("agents.reflector", "ReflectorAgent"),
-    "SubAgent": ("agents.subagent", "SubAgent"),
 }
 
 __all__ = list(_EXPORTS)

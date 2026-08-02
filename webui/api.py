@@ -132,7 +132,6 @@ async def list_checkpoints() -> dict:
                 "task_id": s.task_id,
                 "task": s.task,
                 "engine": s.engine.value,
-                "executor": s.executor.value,
                 "effort": s.effort.value,
                 "state": s.state.value if hasattr(s.state, "value") else str(s.state),
                 "updated_at": s.updated_at,

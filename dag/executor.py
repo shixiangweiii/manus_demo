@@ -48,6 +48,7 @@ from typing import Any, Callable, Protocol
 from dag.graph import TaskDAG
 from dag.state_machine import NodeStateMachine
 from dag.models import EdgeType, NodeStatus, NodeType, TaskNode
+from core.models import EngineStopReason
 from execution.models import ResolvedEffort, StepResult
 
 
@@ -116,6 +117,7 @@ class DAGExecutor:
         self._node_attempt_counts: dict[str, int] = {}  # 单节点重试计数（检测 FAILED->PENDING 循环）
         self.failed_action_ids: set[str] = set()
         self.condition_skipped_ids: set[str] = set()
+        self.failure_reasons: list[EngineStopReason] = []
 
     # ------------------------------------------------------------------
     # Main execution loop
@@ -143,6 +145,7 @@ class DAGExecutor:
         self._node_attempt_counts.clear()  # Reset per-node retry counters
         self.failed_action_ids.clear()
         self.condition_skipped_ids.clear()
+        self.failure_reasons.clear()
         # 动态性体现：哪些节点在哪一轮执行，完全取决于当时的运行时状态——前序节点的完成情况、失败情况、跳过情况，每一轮都不一样。
         # 如果 act_1_1 意外快速完成而 act_1_2 还在跑，下一轮可能只有依赖 act_1_1 的节点就绪，而依赖两者的节点还要等。
         while not dag.is_complete() and step < max_steps:
@@ -220,6 +223,7 @@ class DAGExecutor:
                     self._sm.transition(node, NodeStatus.FAILED)
                     self._emit("node_failed", {"node": node, "result": None, "reason": "unexpected_exception"})
                     self._track_node_attempt(node)
+                    self.failure_reasons.append(EngineStopReason.ENGINE_ERROR)
                     await self._handle_failure(node, dag)
                     continue
 
@@ -230,11 +234,26 @@ class DAGExecutor:
 
                 if result.success:
                     # 验证 exit criteria（由 Reflector 进行 LLM 校验）
+                    exit_failure_reason = None
                     try:
                         passed = await self._check_exit_criteria(node, result)
                     except Exception as exc:
                         logger.error("[DAGExecutor] Exit criteria check failed for %s: %s", node.id, exc)
                         passed = False
+                        exit_failure_reason = (
+                            EngineStopReason.INVALID_RESPONSE
+                            if isinstance(
+                                exc,
+                                (
+                                    ValueError,
+                                    TypeError,
+                                    KeyError,
+                                    AttributeError,
+                                    IndexError,
+                                ),
+                            )
+                            else EngineStopReason.MODEL_ERROR
+                        )
                     if passed:
                         self._sm.transition(node, NodeStatus.COMPLETED)
                         self._emit("node_completed", {"node": node, "result": result})
@@ -243,12 +262,19 @@ class DAGExecutor:
                         self._sm.transition(node, NodeStatus.FAILED)
                         self._emit("node_failed", {"node": node, "result": result, "reason": "exit_criteria"})
                         self._track_node_attempt(node)
+                        reflector_failure = exit_failure_reason or getattr(
+                            self._reflector, "last_failure_reason", None
+                        )
+                        if reflector_failure is not None:
+                            self.failure_reasons.append(reflector_failure)
                         await self._handle_failure(node, dag)
                 else:
                     # 执行本身失败
                     self._sm.transition(node, NodeStatus.FAILED)
                     self._emit("node_failed", {"node": node, "result": result, "reason": "execution"})
                     self._track_node_attempt(node)
+                    if result.failure_reason is not None:
+                        self.failure_reasons.append(result.failure_reason)
                     await self._handle_failure(node, dag)
 
             # --- Evaluate conditional edges ---
@@ -289,6 +315,7 @@ class DAGExecutor:
                 "max_steps": max_steps,
                 "summary": dag.summary(),
             })
+            self.failure_reasons.append(EngineStopReason.MAX_TURNS)
 
         return self._compile_output(dag)
 
@@ -337,12 +364,31 @@ class DAGExecutor:
             )
         except asyncio.TimeoutError:
             logger.error("[DAGExecutor] Node %s timed out after %ds", node.id, timeout)
-            return StepResult(step_id=node.id, success=False, output=f"Node execution timed out after {timeout}s")
+            result = StepResult(
+                step_id=node.id,
+                success=False,
+                output=f"Node execution timed out after {timeout}s",
+                failure_reason=EngineStopReason.TIMEOUT,
+            )
+            self._record_external_result(result)
+            return result
         except Exception as exc:
             # Catch-all for unexpected exceptions during node execution
             # 捕获节点执行过程中的非预期异常，防止单节点崩溃影响整个批次
             logger.error("[DAGExecutor] Unexpected error executing node %s: %s", node.id, exc, exc_info=True)
-            return StepResult(step_id=node.id, success=False, output=f"Unexpected error: {exc}")
+            result = StepResult(
+                step_id=node.id,
+                success=False,
+                output=f"Unexpected error: {exc}",
+                failure_reason=EngineStopReason.ENGINE_ERROR,
+            )
+            self._record_external_result(result)
+            return result
+
+    def _record_external_result(self, result: StepResult) -> None:
+        recorder = getattr(self._node_executor, "record_external_result", None)
+        if callable(recorder):
+            recorder(result)
 
     # ------------------------------------------------------------------
     # Exit criteria validation
@@ -696,6 +742,9 @@ class DAGExecutor:
         self._emit("phase", f"Adaptive planning check (super-step {step})...")
 
         adaptation = await self._planner.adapt_plan(dag)
+        planner_failure = getattr(self._planner, "last_failure_reason", None)
+        if planner_failure is not None:
+            self.failure_reasons.append(planner_failure)
 
         if not adaptation.should_adapt or not adaptation.adaptations:
             self._emit("plan_adaptation", {

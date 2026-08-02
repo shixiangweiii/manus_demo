@@ -1,48 +1,25 @@
-# Engines and Executors
+# Engines
 
-All general task engines implement `TaskEngine.run(TaskRequest) -> EngineResult` and delegate individual actions to `ActionExecutor`.
+All engines implement the same task/result contract and are selected explicitly. There is no `auto` value.
 
-| Engine | Use case | Automatic effort |
+| Engine | Execution model | Useful for |
 |---|---|---|
-| `sequential` | Bounded work with a flat ordered plan | `low` |
-| `dag` | Parallel steps or explicit dependencies | `medium` |
-| `todo` | Exploration with a changing work list | `high` |
-| `goal` | Long tasks with goals, constraints, and completion criteria | `high` |
-| `workflow` | Explicit deterministic tool graph | `low` |
+| `sequential` | Plan ordered steps, execute and reflect, then replan when needed | Clear linear work and trace comparison |
+| `dag` | Build dependencies and schedule ready nodes; concurrency is configurable | Independent branches followed by joins |
+| `agent_loop` | Let the model repeatedly choose native tool calls and update a full todo snapshot | Open-ended exploration and adaptive work |
 
-Auto-routing checks explicit settings first, then goal markers, exploratory markers, dependency/parallel markers, and finally chooses Sequential. Workflow never participates in auto-routing.
+`effort` is a resource policy, not another engine. In the current implementation it adjusts model temperature, loop or Action turn limits, tool-result truncation, and the Plan-and-Execute ActionLoop reasoning cap while preserving the selected engine's semantics. It does not currently change Planner depth.
 
-## Action executors
-
-The executor values name the runtime mechanism directly:
-
-- `tool_calling` delegates to `ToolCallingLoop`. The model emits structured `tool_calls`; the runtime executes them and returns results as `role="tool"` messages.
-- `reasoning_aware_tool_calling` delegates to `ReasoningAwareToolCallingLoop`, a subclass that additionally handles reasoning-only rounds, a reasoning-token budget, and a reasoning-round limit.
-
-This implementation is not the classic text-form ReAct protocol in which a prompt requires literal labels and a runtime parser extracts them:
-
-```text
-Thought: ...
-Action: ...
-Observation: ...
-```
-
-The semantic correspondence is straightforward—a structured `tool_call` is an action and the matching tool-result message is its observation—but the transport and parser are entirely different. Reasoning may be returned in a provider-specific field, kept internal, or omitted; displaying chain-of-thought is not required by either executor.
-
-In `auto` mode, the executor reads only `llm.supports_reasoning`; model names are not inspected. Explicit `--effort` and `--executor` values always win.
-
-`effort` is the resolved runtime resource level. It can tune planning and
-action-loop iterations, temperature, truncation, and reasoning budgets; it is
-not a request to display private reasoning.
+The engines use one native tool-calling protocol through two scope-specific loops: `ActionToolLoop` completes one planned Action, while `AgentLoop` owns the whole task history. They are implementation helpers, not user-selectable executor identities. Both consume structured `tool_calls` and matching tool-result messages without requiring visible chain-of-thought text.
 
 Examples:
 
 ```bash
-python main.py run "比较三个方案并汇总" --engine dag
-python main.py run "探索这个目录的问题" --engine todo --executor reasoning_aware_tool_calling
-python main.py workflow workflow_spec.json
+python main.py run "检查配置并总结" --engine sequential --effort low
+python main.py run "并行调查三个模块后汇总" --engine dag --effort medium
+python main.py run "探索未知问题并持续修正计划" --engine agent_loop --effort high
 ```
 
-Workflow parameter references use only `${steps.<step_id>}` and the referenced step must be a declared dependency. Write `$${steps.<step_id>}` to produce the literal `${steps.<step_id>}` text. Other strings such as `${HOME}` are left unchanged and are never interpreted as workflow references.
+Agent Loop emits `todo_updated` with the complete current list. Consumers replace the previous snapshot rather than replaying incremental start/complete/fail mutations. Sequential and DAG keep their plan/step and graph/node event families.
 
-DAG success allows action nodes skipped because a condition did not select their branch. An execution failure, rollback, failure cascade, unfinished graph, absence of any completed action, or failed final reflection still makes the DAG unsuccessful. Result metadata separates `failed_action_ids` from `condition_skipped_ids`.
+`settings.toml` currently sets `dag_serial_execution = true` for reproducible local comparisons. Set it to `false` to let DAG execute independent ready nodes concurrently, up to `max_parallel_nodes`.

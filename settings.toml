@@ -1,7 +1,6 @@
 [llm]
 base_url = "https://api.deepseek.com"
 model = "deepseek-v4-flash"
-supports_reasoning = false
 timeout_seconds = 120.0
 retry_enabled = false
 retry_max_attempts = 3
@@ -10,8 +9,7 @@ token_tracking = true
 reasoning_token_tracking = true
 
 [runtime]
-engine = "auto"
-executor = "auto"
+engine = "agent_loop"
 effort = "auto"
 
 [engines]
@@ -22,12 +20,8 @@ node_timeout_seconds = 300
 adaptive_planning = true
 adaptive_interval = 1
 adaptive_min_completed = 1
-max_todo_items = 20
-max_todo_retries = 3
-max_todo_iterations = 60
-goal_reanchor_interval = 5
-goal_reflection_interval = 1
-goal_stagnation_window = 3
+max_agent_turns = 30
+agent_timeout_seconds = 600.0
 planner_temperature = 0.3
 reflector_temperature = 0.1
 
@@ -35,9 +29,7 @@ reflector_temperature = 0.1
 max_context_tokens = 16000
 max_action_iterations = 10
 tool_calling_temperature = 0.5
-reasoning_aware_tool_calling_temperature = 0.5
 max_reasoning_tokens = 10000
-max_reasoning_rounds = 5
 
 [paths]
 state_dir = "~/.manus_demo"
@@ -81,19 +73,16 @@ local_webparser_min_content_length = 120
 local_webparser_cache_size = 64
 
 [capabilities]
-workflow = true
 checkpoint = true
 checkpoint_max_per_task = 5
 subagent = false
 subagent_max_iterations = 10
 subagent_timeout_seconds = 300
 subagent_max_concurrent = 2
-subagent_summary_max_length = 2000
 subagent_max_calls = 3
 subagent_max_tokens = 120000
 subagent_tool_whitelist = ""
 subagent_task_max_length = 2000
-parallel_todos = false
 hitl = false
 hitl_max_prompts = 5
 hitl_timeout_seconds = 120
@@ -121,16 +110,6 @@ skill_auto_distill_confidence_cap = 0.55
 skill_optimize_with_llm = false
 skill_optimize_validation_ratio = 0.2
 skill_optimize_max_tokens = 1200
-handoff = false
-handoff_allow_ask_user = false
-handoff_max_calls = 2
-handoff_timeout_seconds = 300
-handoff_max_iterations = 10
-remote_subagent = false
-remote_agent_server_json = ""
-remote_subagent_max_calls = 2
-remote_subagent_timeout_seconds = 300
-remote_agent_fetch_card = true
 guardrails = false
 guardrail_tool_enabled = true
 guardrail_input_enabled = true

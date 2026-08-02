@@ -2,22 +2,22 @@
 
 The repository has three core layers:
 
-1. `core/` defines stable task, action, result, event, and configuration contracts.
-2. `runtime/` builds tools and optional capabilities, selects policies, runs lifecycle hooks, and owns checkpoints.
-3. `engines/` decides which actions exist; `execution/` selects how one action is carried out; `tool_calling/` implements the reusable structured tool loop.
+1. `core/` defines task, action, result, statistics, event, and configuration contracts.
+2. `runtime/` composes tools and optional capabilities, instantiates one explicitly requested engine, and owns lifecycle work.
+3. `engines/` adapts `sequential`, `dag`, and `agent_loop` to the common result contract. `agent_loop/` owns the task-level autonomous loop; `tool_calling/` owns the bounded per-Action loop and shared tool dispatch.
 
-Hosts (`cli.py`, `webui/`, and `evaluation/`) call `AgentRuntime` and subscribe to the same `EventBus`. They do not inspect implementation-specific log text or branch on engine classes. Tracing, console output, WebUI streaming, and evaluation metrics therefore observe one structured event stream.
+There is no engine selector, executor dimension, or deterministic Workflow layer. A run names its engine and effort directly. Each engine owns its orchestration semantics while depending on shared contracts and tools.
+
+Hosts (`cli.py`, `webui/`, and `evaluation/`) call `AgentRuntime` and subscribe to the same `EventBus`. They consume structured events rather than log text or concrete engine classes. Sequential plan/step events and DAG node events retain dedicated views; Agent Loop publishes `todo_updated` as a complete current snapshot.
 
 `EventBus.emit()` supports synchronous callers and tracks async subscribers until `drain()`. `emit_async()` provides an awaited delivery boundary. Each subscriber receives its own recursive copy of mutable event containers, while opaque runtime objects such as HITL futures retain identity.
 
-`runtime/factory.py` is the composition root. It registers base tools, attaches Tracing when enabled, and optionally adds MCP, AgentBay, Subagent, Handoff, remote Agent, memory, skill, guardrail, and self-evolution adapters. These capabilities may add tools, context, or lifecycle work, but do not choose the orchestration engine.
+`runtime/factory.py` is the composition root. It registers base tools, attaches tracing, and optionally adds MCP, AgentBay, Subagent, memory, skill, guardrail, and self-evolution adapters. Capabilities may add tools, context, or lifecycle work but do not change the requested engine.
 
-Modules in `agents/`, `dag/`, `tool_calling/`, and `workflow/` contain implementation details behind the stable contracts. `ToolCallingLoop` implements the standard structured tool loop, while `ReasoningAwareToolCallingLoop` adds reasoning-model accounting and convergence limits. Neither parses literal `Thought:` / `Action:` / `Observation:` text. `config.py` is a temporary read-only compatibility facade for peripheral modules; new code should use `AppSettings` directly.
+Native tool calls and matching `role="tool"` results form the action/observation protocol. Provider reasoning metadata is normalized dynamically by the same response path, with accounting and convergence limits but no second executor identity and no parsing of literal chain-of-thought labels.
 
-Configuration follows the same separation: `[runtime]` selects engine,
-executor, and effort defaults; `[engines]` contains orchestration tuning; and
-`[execution]` contains action-loop and context limits.
+Tracing follows the execution hierarchy: task → engine → AgentLoop turn → LLM/tool call. Plan-and-Execute adds planner, action, DAG-execution, and reflector spans; every ActionToolLoop model round is represented as action → action-loop turn → LLM/tool call, including failed and cancelled turns.
 
-Checkpoints store only the semantic engine, executor, effort, task, and latest outcome. Older path-specific checkpoint JSON is intentionally ignored.
+Checkpoints store the engine, effort, task, and latest semantic state. Runtime results expose `output`, `stop_reason`, and `stats`; the shared statistics contract records whole-call-tree LLM calls, tool calls, reasoning tokens, and Subagent calls by combining loop-local observations with isolated child-loop aggregates and global usage records.
 
-The runtime owns its LLM HTTP client and exposes idempotent `aclose()`. CLI commands, WebUI sessions, and each evaluation unit close the runtimes they create. The process host owns the shared Tracing provider and flushes it only during overall shutdown. Cancelled tasks publish `task_cancelled` and persist a `cancelled` checkpoint state before re-raising cancellation.
+The runtime owns its LLM HTTP client and exposes idempotent `aclose()`. CLI commands, WebUI sessions, and each evaluation unit close the runtimes they create. The process host owns the shared tracing provider and flushes it only during overall shutdown.

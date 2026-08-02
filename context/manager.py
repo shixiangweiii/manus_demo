@@ -12,11 +12,30 @@ the configured limit, preserving the system prompt and recent messages.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from core.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ContextPreparation:
+    """One model-facing context view plus the cost of preparing it.
+
+    ``messages`` is deliberately a view for the next model call, not a new
+    canonical transcript.  Loops can therefore account for an optional
+    summary call without replacing their exact assistant/tool history.
+    """
+
+    messages: list[dict[str, Any]]
+    compressed: bool = False
+    llm_calls: int = 0
+    reasoning_tokens: int = 0
+    # Estimated usage for calls whose provider record has no token counts.
+    # Callers add this to recorded usage instead of silently losing budget.
+    untracked_tokens: int = 0
 
 
 class ContextManager:
@@ -42,10 +61,15 @@ class ContextManager:
         max_tokens: int | None = None,
         reserve_recent: int = 6,  # 保留的最近消息条数（不参与压缩）
         keep_reasoning_blocks: bool = True,
-    ):
+        summarize_with_llm: bool = True,
+    ) -> None:
         self.max_tokens = max_tokens or get_settings().execution.max_context_tokens
         self.reserve_recent = reserve_recent
         self.keep_reasoning_blocks = keep_reasoning_blocks
+        # Child loops that must not make a hidden summarization call can use
+        # ``ContextManager(..., summarize_with_llm=False)``.  Compression then
+        # uses a deterministic tail summary and reports zero preparation calls.
+        self.summarize_with_llm = summarize_with_llm
 
     # ------------------------------------------------------------------
     # Token estimation
@@ -65,7 +89,11 @@ class ContextManager:
         """
         return max(1, len(text) // 3)
 
-    def estimate_messages_tokens(self, messages: list[dict[str, Any]]) -> int:
+    @classmethod
+    def estimate_messages_tokens(
+        cls,
+        messages: list[dict[str, Any]],
+    ) -> int:
         """
         Estimate total tokens for a list of messages.
         估算消息列表的总 Token 数（包含每条消息的 overhead）。
@@ -80,17 +108,17 @@ class ContextManager:
         total = 0
         for msg in messages:
             content = msg.get("content", "") or ""
-            total += self.estimate_tokens(content) + 4  # 每条消息约 4 个 Token 的固定开销
-            # reasoning_content 由 ReasoningAwareToolCallingLoop 和 ToolCallingLoop 写入
+            total += cls.estimate_tokens(content) + 4  # 每条消息约 4 个 Token 的固定开销
+            # reasoning_content is optional provider metadata recorded by either loop.
             reasoning = msg.get("reasoning_content", "") or ""
             if reasoning:
-                total += self.estimate_tokens(reasoning) + 4
+                total += cls.estimate_tokens(reasoning) + 4
             # Assistant messages may carry tool_calls without textual content —
             # those still consume prompt tokens at the API. Account for them.
             for tc in msg.get("tool_calls", []) or []:
                 fn = tc.get("function", {}) or {}
-                total += self.estimate_tokens(fn.get("name", "") or "")
-                total += self.estimate_tokens(fn.get("arguments", "") or "")
+                total += cls.estimate_tokens(fn.get("name", "") or "")
+                total += cls.estimate_tokens(fn.get("arguments", "") or "")
         return total
 
     # ------------------------------------------------------------------
@@ -113,9 +141,29 @@ class ContextManager:
         Returns a (possibly shorter) list of messages.
         返回（可能更短的）消息列表。
         """
+        prepared = await self.prepare_messages(
+            messages,
+            llm_client,
+            caller_tag=caller_tag,
+        )
+        return prepared.messages
+
+    async def prepare_messages(
+        self,
+        messages: list[dict[str, Any]],
+        llm_client: Any,
+        caller_tag: str = "ContextManager",
+    ) -> ContextPreparation:
+        """Build a temporary model view and report any summarization usage.
+
+        Unlike :meth:`compress_if_needed`, this method makes the distinction
+        between canonical history and model-facing context explicit.  Native
+        loops should use this API and keep their original message list intact.
+        The compatibility method above remains for retained peripheral agents.
+        """
         total = self.estimate_messages_tokens(messages)
         if total <= self.max_tokens:
-            return messages  # 未超限，直接返回
+            return ContextPreparation(messages=messages)
 
         logger.info(
             "Context too long (~%d tokens, limit %d). Compressing...",
@@ -130,14 +178,14 @@ class ContextManager:
         # Keep the most recent messages as-is
         # 保留最近 reserve_recent 条消息原文（提供最新上下文）
         if len(non_system) <= self.reserve_recent:
-            return messages  # 消息数量不够多，无法压缩
+            return ContextPreparation(messages=messages)
 
         # Find a structurally safe split that preserves tool_calls groups
         # 找到不切割 tool_calls 组的安全切分点
         split_idx = self._find_safe_split(non_system, self.reserve_recent)
 
         if split_idx == 0:
-            return messages  # 无法安全切分，放弃压缩
+            return ContextPreparation(messages=messages)
 
         old_msgs = non_system[:split_idx]       # 需要压缩的旧消息
         recent_msgs = non_system[split_idx:]    # 保留的最近消息
@@ -145,7 +193,34 @@ class ContextManager:
         # Build text to summarize（构建待摘要的文本）
         old_text = self._messages_to_text(old_msgs)
 
-        summary = await self._summarize(old_text, llm_client, caller_tag=caller_tag)
+        llm_calls = 0
+        reasoning_tokens = 0
+        untracked_tokens = 0
+        if self.summarize_with_llm:
+            records_before = self._record_count(llm_client)
+            summary = await self._summarize(
+                old_text,
+                llm_client,
+                caller_tag=caller_tag,
+            )
+            # The summary helper attempts exactly one high-level model call,
+            # including its deterministic fallback path on provider failure.
+            llm_calls = 1
+            reasoning_tokens = self._reasoning_tokens_since(
+                llm_client,
+                records_before,
+                caller_tag,
+            )
+            if not self._recorded_tokens_since(
+                llm_client,
+                records_before,
+                caller_tag,
+            ):
+                untracked_tokens = self.estimate_messages_tokens(
+                    self._summary_prompt(old_text)
+                ) + self.estimate_tokens(summary)
+        else:
+            summary = self._truncated_summary(old_text)
 
         # Construct compressed context（构建压缩后的上下文）
         summary_message = {
@@ -160,15 +235,24 @@ class ContextManager:
         compressed = system_msgs + [summary_message] + recent_msgs
         new_total = self.estimate_messages_tokens(compressed)
         logger.info("Compressed context: %d tokens -> ~%d tokens", total, new_total)
-        return compressed
+        return ContextPreparation(
+            messages=compressed,
+            compressed=True,
+            llm_calls=llm_calls,
+            reasoning_tokens=reasoning_tokens,
+            untracked_tokens=untracked_tokens,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # 内部辅助方法
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _find_safe_split(messages: list[dict[str, Any]], reserve: int) -> int:
+    def _find_safe_split(
+        self,
+        messages: list[dict[str, Any]],
+        reserve: int,
+    ) -> int:
         """Find a split index that doesn't break tool_calls structural groups.
         找到不切割 tool_calls 组的安全切分点。
 
@@ -234,13 +318,34 @@ class ContextManager:
         return "\n".join(lines)
 
     @staticmethod
-    async def _summarize(text: str, llm_client: Any, caller_tag: str = "ContextManager") -> str:
+    async def _summarize(
+        text: str,
+        llm_client: Any,
+        caller_tag: str = "ContextManager",
+    ) -> str:
         """
         Use the LLM to produce a concise summary of conversation history.
         使用 LLM 对对话历史进行简洁摘要。
         若摘要失败（网络异常等），降级为截断原文末尾 2000 字符。
         """
-        summary_prompt = [
+        summary_prompt = ContextManager._summary_prompt(text)
+        try:
+            summary = await llm_client.chat(
+                summary_prompt,
+                temperature=0.2,
+                max_tokens=1024,
+                caller_tag=caller_tag,
+            )
+            return summary if isinstance(summary, str) else str(summary or "")
+        except Exception as exc:
+            logger.error("Summarization failed: %s", exc)
+            # Fallback: truncate to last N characters（降级方案：截断为最后 2000 字符）
+            return ContextManager._truncated_summary(text)
+
+    @staticmethod
+    def _summary_prompt(text: str) -> list[dict[str, str]]:
+        """Build the exact prompt used by the optional summary call."""
+        return [
             {
                 "role": "system",
                 "content": (
@@ -257,10 +362,50 @@ class ContextManager:
                 "content": f"Summarize this conversation:\n\n{text}",
             },
         ]
-        try:
-            summary = await llm_client.chat(summary_prompt, temperature=0.2, max_tokens=1024, caller_tag=caller_tag)
-            return summary
-        except Exception as exc:
-            logger.error("Summarization failed: %s", exc)
-            # Fallback: truncate to last N characters（降级方案：截断为最后 2000 字符）
-            return text[-2000:] + "\n[... earlier context truncated ...]"
+
+    @staticmethod
+    def _truncated_summary(text: str) -> str:
+        """Return deterministic compression without making a model call."""
+        return text[-2000:] + "\n[... earlier context truncated ...]"
+
+    @staticmethod
+    def _record_count(llm_client: Any) -> int:
+        getter = getattr(llm_client, "get_call_records", None)
+        return len(getter()) if callable(getter) else 0
+
+    @staticmethod
+    def _reasoning_tokens_since(
+        llm_client: Any,
+        start: int,
+        caller_tag: str,
+    ) -> int:
+        getter = getattr(llm_client, "get_call_records", None)
+        if not callable(getter):
+            return 0
+        return sum(
+            int(getattr(record, "reasoning_tokens", 0) or 0)
+            for record in getter()[start:]
+            if getattr(record, "caller_tag", "") == caller_tag
+        )
+
+    @staticmethod
+    def _recorded_tokens_since(
+        llm_client: Any,
+        start: int,
+        caller_tag: str,
+    ) -> int:
+        getter = getattr(llm_client, "get_call_records", None)
+        if not callable(getter):
+            return 0
+        total = 0
+        for record in getter()[start:]:
+            if getattr(record, "caller_tag", "") != caller_tag:
+                continue
+            recorded_total = int(getattr(record, "total_tokens", 0) or 0)
+            if not recorded_total:
+                recorded_total = int(
+                    (getattr(record, "prompt_tokens", 0) or 0)
+                    + (getattr(record, "completion_tokens", 0) or 0)
+                )
+            total += recorded_total
+        return total

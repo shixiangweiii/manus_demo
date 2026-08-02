@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.events import EventBus, RuntimeEvent
-from core.models import Effort, EngineKind, ExecutorKind
+from core.models import Effort, EngineKind
 from core.settings import AppSettings, RunSettings, get_settings, validate_settings
 from evaluation.metrics import aggregate_results
 from evaluation.models import (
@@ -27,15 +27,12 @@ ProgressCallback = Callable[[int, int, EvaluationCase, ExperimentSpec], None]
 
 _OPTIONAL_CAPABILITIES = (
     "subagent",
-    "parallel_todos",
     "agentic_memory",
     "memory_tools",
     "knowledge",
     "skills",
     "self_evolution",
     "skill_auto_distill",
-    "handoff",
-    "remote_subagent",
     "guardrails",
     "mcp_bridge",
     "agentbay",
@@ -55,9 +52,8 @@ class _Collector:
 
     def selected_runtime(
         self,
-    ) -> tuple[EngineKind | None, ExecutorKind | None, Effort | None]:
+    ) -> tuple[EngineKind | None, Effort | None]:
         engine: EngineKind | None = None
-        executor: ExecutorKind | None = None
         effort: Effort | None = None
         for event in reversed(self.events):
             payload = event.payload if isinstance(event.payload, dict) else {}
@@ -66,24 +62,29 @@ class _Collector:
                     engine = EngineKind(event.engine)
                 except ValueError:
                     pass
-            if executor is None and event.executor:
-                try:
-                    executor = ExecutorKind(event.executor)
-                except ValueError:
-                    pass
             if effort is None and payload.get("effort"):
                 try:
                     effort = Effort(payload["effort"])
                 except ValueError:
                     pass
-            if engine is not None and executor is not None and effort is not None:
+            if engine is not None and effort is not None:
                 break
-        return engine, executor, effort
+        return engine, effort
 
 
 class EvaluationRunner:
     def __init__(self, settings: AppSettings | None = None) -> None:
         self.settings = settings or get_settings()
+
+    def validate_experiments(
+        self,
+        experiments: list[ExperimentSpec],
+    ) -> None:
+        """Validate a matrix before a host displays or persists it."""
+        if not experiments:
+            raise ValueError("evaluation requires at least one experiment")
+        for experiment in experiments:
+            self._settings_for_experiment(experiment)
 
     async def evaluate_case(
         self,
@@ -97,6 +98,7 @@ class EvaluationRunner:
         settings.paths.state_dir = str(sandbox / "state")
         settings.paths.sandbox_dir = str(sandbox)
         settings.paths.checkpoint_dir = str(sandbox / "checkpoints")
+        settings.capabilities.skills_user_dir = str(sandbox / "skills")
         collector = _Collector()
         events = EventBus()
         events.subscribe(collector)
@@ -106,40 +108,28 @@ class EvaluationRunner:
             runtime = await build_runtime(settings, events, interactive=False)
             run = RunSettings(
                 engine=experiment.engine,
-                executor=experiment.executor,
                 effort=experiment.effort,
                 capabilities=tuple(experiment.capabilities),
             )
             engine_result = await runtime.run(case.task_description, run)
             elapsed_ms = (time.perf_counter() - started_at) * 1000
-            verifier = run_verifiers(case.verifiers, engine_result.answer, str(sandbox))
+            verifier = run_verifiers(case.verifiers, engine_result.output, str(sandbox))
             verifier_passed = verifier.all_passed
             success = engine_result.success and verifier_passed is not False
-            expected = self._expected_engine(case)
-            records = runtime.context.llm_client.get_call_records()
             return CaseResult(
                 case_id=case.task_id,
                 experiment=experiment,
                 actual_engine=engine_result.engine,
-                actual_executor=engine_result.executor,
                 actual_effort=engine_result.effort,
-                answer=engine_result.answer,
+                output=engine_result.output,
                 metrics=CaseMetrics(
                     success=success,
                     verifier_passed=verifier_passed,
-                    tokens=sum(record.total_tokens for record in records),
+                    llm_calls=engine_result.stats.llm_calls,
                     latency_ms=elapsed_ms,
-                    tool_calls=collector.count("tool_completed"),
-                    iterations=(
-                        sum(action.iterations for action in engine_result.actions)
-                        + collector.count("subagent_iteration")
-                    ),
-                    replans=collector.count("plan_adaptation", "replan_started"),
-                    selector_correct=(
-                        engine_result.engine.value == expected
-                        if expected and experiment.engine == EngineKind.AUTO
-                        else None
-                    ),
+                    tool_calls=engine_result.stats.tool_calls,
+                    reasoning_tokens=engine_result.stats.reasoning_tokens,
+                    subagent_calls=engine_result.stats.subagent_calls,
                 ),
                 verifier_details=[asdict(detail) for detail in verifier.details],
                 run_id=engine_result.run_id,
@@ -147,12 +137,11 @@ class EvaluationRunner:
             )
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - started_at) * 1000
-            actual_engine, actual_executor, actual_effort = collector.selected_runtime()
+            actual_engine, actual_effort = collector.selected_runtime()
             return CaseResult(
                 case_id=case.task_id,
                 experiment=experiment,
                 actual_engine=actual_engine,
-                actual_executor=actual_executor,
                 actual_effort=actual_effort,
                 metrics=CaseMetrics(success=False, latency_ms=elapsed_ms),
                 error=f"{type(exc).__name__}: {exc}",
@@ -175,12 +164,9 @@ class EvaluationRunner:
     ) -> EvaluationReport:
         if not cases:
             raise ValueError("evaluation requires at least one case")
-        if not experiments:
-            raise ValueError("evaluation requires at least one experiment")
         if not 1 <= repeat <= 5:
             raise ValueError("repeat must be between 1 and 5")
-        for experiment in experiments:
-            self._settings_for_experiment(experiment)
+        self.validate_experiments(experiments)
         total = len(cases) * len(experiments) * repeat
         completed = 0
         results: list[CaseResult] = []
@@ -205,12 +191,3 @@ class EvaluationRunner:
             setattr(settings.capabilities, name, True)
         validate_settings(settings)
         return settings
-
-    @staticmethod
-    def _expected_engine(case: EvaluationCase) -> str:
-        expected = case.ground_truth.expected_engine or case.ground_truth.expected_complexity
-        return {
-            "simple": "sequential",
-            "complex": "dag",
-            "emergent": "todo",
-        }.get(expected, expected)

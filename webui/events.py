@@ -97,7 +97,6 @@ class EventBridge:
                 "run_id": event.run_id or self._run_id_provider(),
                 "task_id": event.task_id,
                 "engine": event.engine,
-                "executor": event.executor,
                 "ts": event.timestamp,
                 "event": event_name,
                 "data": payload,

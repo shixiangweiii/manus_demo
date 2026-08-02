@@ -1,36 +1,28 @@
 # Manus Demo
 
-这是一个用于本地学习和比较 Agent 编排方式的 Python 项目。核心结构是统一运行时、可替换任务引擎和可替换动作执行器；项目不面向生产环境。
+这是一个用于本地学习和比较 Agent 编排方式的 Python 项目，不面向生产环境。统一运行时显式运行三种引擎：
 
-## 架构概览
+- `sequential`：先规划，再按顺序完成步骤。
+- `dag`：构建依赖图并执行就绪节点；可配置并发，当前学习配置为串行，便于复现实验。
+- `agent_loop`：模型在一个原生工具调用循环中持续决定下一步，并用完整 todo 快照记录进度。
 
-`AgentRuntime` 接收任务并由 `EngineSelector` 选择编排引擎。Sequential、DAG、TODO 和 Goal 引擎都通过同一个 `ActionExecutor` 执行动作；Workflow 只接受显式工作流文件。`tool_calling` 使用模型原生工具调用，`reasoning_aware_tool_calling` 在同一执行协议上增加推理模型的独立推理轮次和预算控制；自动选择只依据 `llm.supports_reasoning`。
+项目没有自动引擎选择器、用户可选择的 executor 维度或声明式 Workflow。Plan-and-Execute 内部仍通过一个 `ToolCallingActionExecutor` 完成单个 Action；AgentLoop 不经过它。各引擎共享 `core` 契约、工具注册表、事件总线和底层工具执行协议。
 
 ```text
 CLI / WebUI / Evaluation
           |
      AgentRuntime ---- EventBus ---- Console / Tracing / WebUI / Metrics
           |
- TaskEngine: sequential | dag | todo | goal | workflow
+ sequential | dag | agent_loop
           |
- ActionExecutor: tool_calling | reasoning_aware_tool_calling
-          |
- ToolCallingLoop: standard | reasoning-aware
+   native tool-calling loops
           |
       ToolRegistry
 ```
 
-`ToolCallingLoop` 按实际协议命名：模型通过结构化 `tool_calls` 发起动作，运行时执行工具并以 `role="tool"` 消息回传结果。它不要求模型输出、也不解析经典文本式 ReAct 的字面协议：
+模型通过结构化 `tool_calls` 发起动作，运行时执行工具并以 `role="tool"` 消息回传结果。推理模型可在同一协议中使用独立 reasoning 预算；代码不解析字面 `Thought:` / `Action:` / `Observation:` 文本。
 
-```text
-Thought: ...
-Action: ...
-Observation: ...
-```
-
-`ReasoningAwareToolCallingLoop` 是其推理模型感知子类：模型的 reasoning 内容可以由供应商放在独立字段中，也可以不对外显示；该子类额外处理纯推理轮次、推理 token 预算和推理轮次上限。详细说明见 [引擎与执行器](docs/engines.md)。
-
-A2A、远程 Agent、Subagent、记忆、知识库、技能、自演化、Guardrails 和 Checkpoint 作为可选工具或生命周期钩子接入，不参与核心路由判断。
+Subagent、记忆、知识库、技能、自演化、Guardrails 和 Checkpoint 作为可选工具或生命周期能力接入，不改变引擎身份。
 
 ## 快速开始
 
@@ -40,14 +32,14 @@ pip install -r requirements.txt
 cp .env.example .env
 python main.py --help
 python main.py chat
-python main.py run "整理当前目录结构" --engine sequential --executor tool_calling --effort low
-python main.py workflow workflow_spec.json
-python main.py mcp-server
+python main.py run "整理当前目录结构" --engine sequential --effort low
+python main.py run "按依赖图比较三个方案" --engine dag --effort medium
+python main.py run "探索代码并持续更新计划" --engine agent_loop --effort high
 ```
 
-普通配置写入 `settings.toml`；`.env` 只保存 API Key。CLI 参数仅覆盖当前任务。
+普通配置写入 `settings.toml`；`.env` 只保存 API Key；CLI 参数仅覆盖当前任务。
 
-默认 Shell 工具使用 `restricted` 模式：只允许在 sandbox 内以 argv 方式执行单个白名单命令，不经过 shell 展开。`trusted` 模式会执行完整 bash，拥有当前本机用户权限，必须显式开启。Python 执行器默认不注册，仅 `python_mode = "trusted"` 时可用。
+基础默认值是 Shell `restricted`、Python `disabled`；当前学习配置 `settings.toml` 已显式设置为 `shell_mode = "trusted"` 和 `python_mode = "trusted"`。Trusted 模式拥有当前本机用户权限，不是安全沙箱。
 
 ## 本地服务与评测
 
@@ -60,6 +52,6 @@ python -m evaluation run --dry-run
 python -m evaluation serve
 ```
 
-评测题库位于 `evaluation/cases/`。生成的文档、题集、运行结果和报告默认保存到 `~/.manus_demo/evaluation`，不会写入仓库。评测分别报告成功率、Verifier、Token、延迟、工具次数、迭代、重规划、稳定性和自动选择准确率，不使用单一综合分替代各维度。
+评测题库位于 `evaluation/cases/`。矩阵维度是 `engine × effort × capabilities`；报告分别展示成功率、Verifier、LLM 调用、工具调用、reasoning token、Subagent 调用、延迟和重复运行稳定性，不计算单一综合分。生成结果默认保存到 `~/.manus_demo/evaluation`。
 
 更多说明见 [架构](docs/architecture.md)、[引擎](docs/engines.md)、[配置](docs/configuration.md) 和 [评测](docs/evaluation.md)。

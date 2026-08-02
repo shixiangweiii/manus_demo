@@ -6,7 +6,7 @@ MCP 桥接工具 —— 将发现的 MCP 工具包装为 BaseTool 实例。
 
 Lifecycle:
   1. Created during discovery with MCP tool metadata + schema
-  2. Registered in ToolCallingLoop's tool dict alongside native tools
+  2. Registered in a tool loop's tool dict alongside native tools
   3. execute() delegates to MCPClientManager.call_tool()
   4. Returns "Error: ..." strings on failure (BaseTool convention)
 """

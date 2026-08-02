@@ -7,11 +7,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agents.prompt_utils import (
-    set_hitl_runtime_enabled,
-    set_skill_descriptions,
-    set_subagent_runtime_enabled,
-)
 from context.manager import ContextManager
 from core.events import EventBus
 from core.redaction import redact_text
@@ -41,13 +36,6 @@ async def _register_capability_tools(context: RuntimeContext) -> None:
     caps = settings.capabilities
     registry = context.tools
     event_callback = context.events.legacy_callback
-    set_subagent_runtime_enabled(caps.subagent)
-    set_skill_descriptions(
-        "",
-        enabled=caps.skills,
-        max_activations=caps.skills_max_activations,
-    )
-
     if caps.agentbay:
         from tools.agentbay import AgentBayBrowserTool, AgentBayCodeTool
 
@@ -110,11 +98,6 @@ async def _register_capability_tools(context: RuntimeContext) -> None:
         skill_registry = SkillRegistry()
         for skill in SkillLoader.discover(skill_dirs):
             skill_registry.register(skill)
-        set_skill_descriptions(
-            skill_registry.format_descriptions(),
-            enabled=True,
-            max_activations=caps.skills_max_activations,
-        )
         activation = SkillActivationTool(
             registry=skill_registry,
             on_event=event_callback,
@@ -127,7 +110,6 @@ async def _register_capability_tools(context: RuntimeContext) -> None:
         context.skill_activation = activation
 
     hitl_active = caps.hitl and context.interactive
-    set_hitl_runtime_enabled(hitl_active)
     if hitl_active:
         from tools.ask_user import AskUserTool
 
@@ -167,48 +149,16 @@ async def _register_capability_tools(context: RuntimeContext) -> None:
             max_concurrent=caps.subagent_max_concurrent,
             default_tool_whitelist=caps.subagent_tool_whitelist,
             max_task_description_length=caps.subagent_task_max_length,
-            summary_max_length=caps.subagent_summary_max_length,
             sandbox_dir=settings.paths.sandbox_dir,
             parent_name="AgentRuntime",
+            guardrail=context.guardrail,
+            temperature=settings.execution.tool_calling_temperature,
+            result_truncation_limit=settings.tools.result_truncation_limit,
+            python_command=settings.tools.python_command,
+            max_reasoning_tokens=settings.execution.max_reasoning_tokens,
         )
         registry.register(subagent)
         context.resettable_capabilities.append(subagent)
-
-    if caps.handoff:
-        from tools.handoff_tool import HandoffTool
-
-        handoff = HandoffTool(
-            llm_client=context.llm_client,
-            available_tools=registry.as_dict(),
-            context_manager=context.context_manager,
-            on_event=event_callback,
-            allow_ask_user=caps.handoff_allow_ask_user,
-            interactive=context.interactive,
-            max_calls_per_task=caps.handoff_max_calls,
-            timeout=caps.handoff_timeout_seconds,
-            max_iterations=caps.handoff_max_iterations,
-            parent_name="AgentRuntime",
-        )
-        registry.register(handoff)
-        context.resettable_capabilities.append(handoff)
-
-    if caps.remote_subagent:
-        from tools.remote_subagent_tool import RemoteSubAgentTool, build_remote_server_config
-
-        server = build_remote_server_config(caps.remote_agent_server_json)
-        if server is None:
-            logger.warning("Remote subagent is enabled but its server configuration is invalid")
-        else:
-            remote = RemoteSubAgentTool(
-                server_config=server,
-                on_event=event_callback,
-                max_calls_per_task=caps.remote_subagent_max_calls,
-                timeout=caps.remote_subagent_timeout_seconds,
-                parent_name="AgentRuntime",
-                fetch_card=caps.remote_agent_fetch_card,
-            )
-            registry.register(remote)
-            context.resettable_capabilities.append(remote)
 
 
 async def build_runtime(

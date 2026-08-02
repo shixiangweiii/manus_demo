@@ -59,7 +59,10 @@ export function ConfigPanel({ running, onApply, sessionOverrides }) {
     try {
       const [s, v] = await Promise.all([api.getConfigSchema(), api.getConfigValues()]);
       setSchema(s);
-      setValues(v);
+      // /config/values contains repository defaults.  A WebUI session keeps
+      // its own explicit overrides, so display the effective session values
+      // instead of snapping back to defaults after every session rebuild.
+      setValues({ ...v, ...(sessionOverrides || {}) });
       setEdits({});
       setFieldErrors({});
       setError(null);
@@ -96,8 +99,15 @@ export function ConfigPanel({ running, onApply, sessionOverrides }) {
     setFieldErrors({});
     setError(null);
     try {
-      await onApply(edits);
-      await load();
+      // A session is replaced as a whole. Preserve its previous choices when
+      // the user changes only one field in a later apply operation.
+      const nextOverrides = { ...(sessionOverrides || {}), ...edits };
+      await onApply(nextOverrides);
+      // The parent session update will trigger load() with the new props. Keep
+      // this render coherent in the meantime instead of racing an old-props
+      // load against that effect.
+      setValues((prev) => ({ ...prev, ...nextOverrides }));
+      setEdits({});
     } catch (e) {
       if (e.status === 422 && e.data && e.data.errors) setFieldErrors(e.data.errors);
       else setError(e.message);

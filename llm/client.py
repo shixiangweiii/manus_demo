@@ -127,6 +127,7 @@ class LLMClient:
             )
         defaults = settings_snapshot
         self._closed = False
+        self._close_lock = asyncio.Lock()
         self.model = defaults.llm.model if model is None else model
         self._client = AsyncOpenAI(
             base_url=defaults.llm.base_url if base_url is None else base_url,
@@ -187,11 +188,12 @@ class LLMClient:
         )
 
     async def aclose(self) -> None:
-        """Close the owned async HTTP client exactly once."""
-        if self._closed:
-            return
-        self._closed = True
-        await self._client.close()
+        """Close the owned async HTTP client once, with retry on close failure."""
+        async with self._close_lock:
+            if self._closed:
+                return
+            await self._client.close()
+            self._closed = True
 
     # ------------------------------------------------------------------
     # Core chat completion
@@ -234,10 +236,9 @@ class LLMClient:
                         max_tokens=max_tokens,
                         **kwargs,
                     )
-                    if self.token_tracking:
-                        call_record = self._record_call(
-                            resp.usage, "chat", messages, caller_tag=caller_tag
-                        )
+                    call_record = self._record_call(
+                        resp.usage, "chat", messages, caller_tag=caller_tag
+                    )
                     result = resp.choices[0].message.content or ""
                     response_data = self._extract_response_data(resp, "chat")
                     self._end_llm_span(
@@ -257,6 +258,14 @@ class LLMClient:
                         raise
             raise last_error or RuntimeError("LLM call failed")
         except Exception as exc:
+            if call_record is None:
+                call_record = self._record_call(
+                    None,
+                    "chat",
+                    messages,
+                    caller_tag=caller_tag,
+                    warn_missing_usage=False,
+                )
             self._end_llm_span(span_ctx, success=False, error=exc)
             raise
 
@@ -307,13 +316,12 @@ class LLMClient:
                         max_tokens=max_tokens,
                         **kwargs,
                     )
-                    if self.token_tracking:
-                        call_record = self._record_call(
-                            resp.usage,
-                            "chat_with_tools",
-                            messages,
-                            caller_tag=caller_tag,
-                        )
+                    call_record = self._record_call(
+                        resp.usage,
+                        "chat_with_tools",
+                        messages,
+                        caller_tag=caller_tag,
+                    )
                     result = resp.choices[0].message
                     response_data = self._extract_response_data(resp, "chat_with_tools")
                     self._end_llm_span(
@@ -333,6 +341,14 @@ class LLMClient:
                         raise
             raise last_error or RuntimeError("LLM call failed")
         except Exception as exc:
+            if call_record is None:
+                call_record = self._record_call(
+                    None,
+                    "chat_with_tools",
+                    messages,
+                    caller_tag=caller_tag,
+                    warn_missing_usage=False,
+                )
             self._end_llm_span(span_ctx, success=False, error=exc)
             raise
 
@@ -368,6 +384,7 @@ class LLMClient:
         )
         response_data: dict[str, Any] | None = None
         call_record: LLMCallRecord | None = None
+        records_at_start = len(self._call_records)
         api_messages = _sanitize_messages_for_api(messages)
         try:
             last_error: Exception | None = None
@@ -382,10 +399,9 @@ class LLMClient:
                         response_format={"type": "json_object"},
                         **kwargs,
                     )
-                    if self.token_tracking:
-                        call_record = self._record_call(
-                            resp.usage, "chat_json", messages, caller_tag=caller_tag
-                        )
+                    call_record = self._record_call(
+                        resp.usage, "chat_json", messages, caller_tag=caller_tag
+                    )
                     text = resp.choices[0].message.content or "{}"
                     logger.debug("[chat_json] Raw response: %.500s", text)
                     response_data = self._extract_response_data(resp, "chat_json")
@@ -436,6 +452,14 @@ class LLMClient:
             )
             return result
         except Exception as exc:
+            if call_record is None and len(self._call_records) == records_at_start:
+                call_record = self._record_call(
+                    None,
+                    "chat_json",
+                    messages,
+                    caller_tag=caller_tag,
+                    warn_missing_usage=False,
+                )
             self._end_llm_span(span_ctx, success=False, error=exc)
             raise
 
@@ -487,16 +511,15 @@ class LLMClient:
         call_type: str,
         messages: list[dict[str, Any]],
         caller_tag: str = "",
-    ) -> LLMCallRecord | None:
-        """Record token usage for a single LLM API call.
+        warn_missing_usage: bool = True,
+    ) -> LLMCallRecord:
+        """Record every successful LLM call and optionally its token usage.
 
         caller_tag identifies which agent issued the call so the
-        Orchestrator can build a by_caller token view (SubAgent gets its
-        own bucket separate from the parent).
+        runtime can build a by-caller view without relying on a shared-list
+        slice.  ``token_tracking`` controls token fields, not whether the call
+        itself exists in ``EngineStats.llm_calls``.
         """
-        if not self.token_tracking:
-            return None
-
         prompt_summary = ""
         for msg in messages:
             if msg.get("role") == "user":
@@ -507,24 +530,24 @@ class LLMClient:
         if not prompt_summary:
             prompt_summary = call_type
 
-        if usage is None:
+        if self.token_tracking and usage is None and warn_missing_usage:
             logger.warning("[LLMClient] API response missing usage data (model=%s)", self.model)
-            return None
 
-        prompt_tokens = getattr(usage, 'prompt_tokens', 0) or 0
-        completion_tokens = getattr(usage, 'completion_tokens', 0) or 0
-        total_tokens = getattr(usage, 'total_tokens', 0) or 0
+        tracked_usage = usage if self.token_tracking else None
+        prompt_tokens = getattr(tracked_usage, 'prompt_tokens', 0) or 0
+        completion_tokens = getattr(tracked_usage, 'completion_tokens', 0) or 0
+        total_tokens = getattr(tracked_usage, 'total_tokens', 0) or 0
 
         # 提取 reasoning tokens（如 OpenAI o 系列 / DeepSeek R1）。
         reasoning_tokens = 0
-        if self.reasoning_token_tracking:
+        if self.token_tracking and self.reasoning_token_tracking:
             # OpenAI: usage.completion_tokens_details.reasoning_tokens
-            details = getattr(usage, 'completion_tokens_details', None)
+            details = getattr(tracked_usage, 'completion_tokens_details', None)
             if details:
                 reasoning_tokens = getattr(details, 'reasoning_tokens', 0) or 0
             # DeepSeek: usage.reasoning_tokens（部分版本直接暴露）
             if not reasoning_tokens:
-                reasoning_tokens = getattr(usage, 'reasoning_tokens', 0) or 0
+                reasoning_tokens = getattr(tracked_usage, 'reasoning_tokens', 0) or 0
 
         record = LLMCallRecord(
             call_type=call_type,

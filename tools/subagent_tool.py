@@ -1,41 +1,44 @@
-"""
-SubAgentTool - Meta-tool that spawns SubAgents for complex subtasks.
-子智能体工具 —— 为复杂子任务派生子智能体的元工具。
-
-This tool allows any action executor to delegate complex subtasks to an isolated
-SubAgent through the standard native tool-calling interface.
-
-Anti-pattern defenses:
-- #3 depth=1: SubAgent tool list never includes "subagent" — structural enforcement
-- #4 dual-write: SubAgent sandbox directory isolation
-- #6 Summary Loss: Returns structured SubAgentSummary JSON, not free text
-- #8 Token Explosion: Call count limit + per-call token budget
-"""
+"""Ordinary tool that delegates one bounded subtask to a child AgentLoop."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
+import shutil
+import tempfile
+from copy import copy
 from typing import Any, Callable
 
-import config
+from agent_loop.loop import AgentLoop
+from agents.prompt_utils import PromptCapabilities, build_system_prompt
 from context.manager import ContextManager
+from core.models import Effort, EngineStats, EngineStopReason
 from llm.client import LLMClient
-from agents.subagent_models import SubAgentResult, SubAgentStatus
 from tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
 
+_BLOCKED_CHILD_TOOLS = {
+    "subagent",
+    "ask_user",
+    "memory_store",
+    "memory_consolidate",
+    "memory_revoke",
+}
+
+_SUBAGENT_SYSTEM_PROMPT = """\
+You are a focused child agent responsible for one bounded subtask.
+
+Use the available tools when needed, stay within the assigned scope, and return
+your result directly as a clear final answer. Do not ask the user questions and
+do not attempt to delegate to another agent. If the task cannot be completed,
+start the final answer with `BLOCKED:` followed by the concrete blocker.
+"""
+
 
 class SubAgentTool(BaseTool):
-    """
-    Meta-tool that spawns a SubAgent for complex subtasks.
-    When the LLM calls this tool, it creates an isolated SubAgent
-    with a restricted tool set, runs its structured tool-calling loop, and returns
-    only a structured summary of the results.
-    """
+    """Run an isolated depth-one AgentLoop and return its final text."""
 
     def __init__(
         self,
@@ -43,43 +46,45 @@ class SubAgentTool(BaseTool):
         available_tools: dict[str, BaseTool],
         context_manager: ContextManager | None = None,
         on_event: Callable[[str, Any], None] | None = None,
-        max_subagent_iterations: int | None = None,
-        subagent_timeout: int | None = None,
-        max_calls_per_task: int | None = None,
-        max_tokens_per_call: int | None = None,
-        max_concurrent: int | None = None,
-        default_tool_whitelist: str | None = None,
-        max_task_description_length: int | None = None,
-        summary_max_length: int | None = None,
-        sandbox_dir: str | None = None,
+        max_subagent_iterations: int = 10,
+        subagent_timeout: int = 300,
+        max_calls_per_task: int = 3,
+        max_tokens_per_call: int = 120000,
+        max_concurrent: int = 2,
+        default_tool_whitelist: str = "",
+        max_task_description_length: int = 2000,
+        sandbox_dir: str = "",
         parent_name: str = "AgentRuntime",
-    ):
+        guardrail: Any | None = None,
+        temperature: float = 0.5,
+        result_truncation_limit: int = 2000,
+        python_command: str = "python3",
+        max_reasoning_tokens: int = 10_000,
+    ) -> None:
         self._llm_client = llm_client
-        self._available_tools = available_tools
-        self._context_manager = context_manager or ContextManager()
-        self._on_event = on_event or (lambda *_: None)
-        self._max_iterations = max_subagent_iterations or config.SUBAGENT_MAX_ITERATIONS
-        self._timeout = subagent_timeout or config.SUBAGENT_TIMEOUT
-        self._max_calls = max_calls_per_task or config.SUBAGENT_MAX_CALLS_PER_TASK
-        self._max_tokens = max_tokens_per_call or config.SUBAGENT_MAX_TOKENS_PER_CALL
-        self._default_whitelist = (
-            config.SUBAGENT_DEFAULT_TOOL_WHITELIST
-            if default_tool_whitelist is None
-            else default_tool_whitelist
+        self._available_tools = dict(available_tools)
+        self._context_max_tokens = (
+            context_manager.max_tokens if context_manager is not None else 16000
         )
-        self._max_task_description_length = (
-            config.SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH
-            if max_task_description_length is None
-            else max_task_description_length
-        )
-        self._summary_max_length = summary_max_length or config.SUBAGENT_SUMMARY_MAX_LENGTH
-        self._sandbox_dir = sandbox_dir or config.SANDBOX_DIR
+        self._on_event = on_event
+        self._max_turns = max_subagent_iterations
+        self._timeout = subagent_timeout
+        self._max_calls = max_calls_per_task
+        self._max_tokens = max_tokens_per_call
+        self._default_whitelist = default_tool_whitelist
+        self._max_task_length = max_task_description_length
+        self._sandbox_dir = sandbox_dir
         self._parent_name = parent_name
-        self._subagent_counter = 0
+        self._guardrail = guardrail
+        self._temperature = temperature
+        self._result_truncation_limit = result_truncation_limit
+        self._python_command = python_command
+        self._max_reasoning_tokens = max_reasoning_tokens
+        self._semaphore = asyncio.Semaphore(max_concurrent)
         self._call_count = 0
-        # Limit concurrent SubAgent runs.
-        # 限制并发 SubAgent 数量。
-        self._semaphore = asyncio.Semaphore(max_concurrent or config.SUBAGENT_MAX_CONCURRENT)
+        self._subagent_counter = 0
+        self._child_sandboxes: set[str] = set()
+        self.aggregate_stats = EngineStats()
 
     @property
     def name(self) -> str:
@@ -88,296 +93,328 @@ class SubAgentTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Spawn a sub-agent to handle a complex subtask independently. "
-            "The sub-agent has its own context and can use a specified subset of tools. "
-            "Use this for tasks that benefit from focused, isolated execution "
-            "(e.g., searching a codebase, performing multi-step analysis). "
-            "Returns a structured JSON summary of what the sub-agent accomplished."
+            "Run a complex, self-contained subtask in an isolated child agent. "
+            "The child has its own conversation and a restricted tool set; its final "
+            "answer is returned as this tool result."
         )
 
     @property
     def parameters_schema(self) -> dict[str, Any]:
-        available_names = [n for n in self._available_tools.keys() if n != "subagent"]
-        # Support configurable default whitelist
-        default_hint = "all available tools"
-        default_whitelist = self._default_whitelist
-        if default_whitelist:
-            default_hint = f"defaults to: {default_whitelist}"
+        names = sorted(
+            name
+            for name in self._available_tools
+            if name not in _BLOCKED_CHILD_TOOLS
+        )
         return {
             "type": "object",
             "properties": {
                 "task_description": {
                     "type": "string",
-                    "description": "A clear description of the subtask for the sub-agent to execute",
+                    "description": "A complete, bounded description of the subtask.",
                 },
                 "tool_whitelist": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "List of tool names the sub-agent is allowed to use "
-                        f"(available: {', '.join(available_names)}). "
-                        f"If omitted, {default_hint} are permitted. "
-                        "Prefer specifying a minimal subset for safety."
+                        "Optional tool names allowed for the child. Available: "
+                        + ", ".join(names)
                     ),
                 },
             },
             "required": ["task_description"],
+            "additionalProperties": False,
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        """
-        Spawn a SubAgent, run its tool-calling loop, and return a structured summary.
-        派生子智能体，运行其结构化工具调用循环，返回结构化摘要。
-        """
-        # Capture _parent_name into a local immediately, before any await.
-        # This function later calls `await asyncio.to_thread(os.makedirs, ...)`, so the
-        # local snapshot is now actively load-bearing rather than purely
-        # defensive: while we await on makedirs, another task on a shared
-        # SubAgentTool instance could call set_caller(...) and overwrite
-        # self._parent_name. local_parent is captured BEFORE the increment +
-        # await, so the SubAgent we eventually construct is attributed to
-        # the agent that actually invoked us, not to whoever happened to
-        # write self._parent_name last.
-        # 立即拷贝到局部，makedirs await 期间不被并发 set_caller 覆盖。
         local_parent = self._parent_name
-
-        # Anti-pattern #3/8: Call count limit
         if self._call_count >= self._max_calls:
-            logger.warning("[SubAgentTool] Call limit reached: %d/%d, rejecting task",
-                           self._call_count, self._max_calls)
-            self._on_event("subagent_limit_exceeded", {
-                "call_count": self._call_count,
-                "max_calls": self._max_calls,
-            })
-            return f"Error: SubAgent call limit reached ({self._max_calls} per task). Please continue without spawning more sub-agents."
+            return f"Error: SubAgent call limit reached ({self._max_calls} per task)."
 
-        task_description = kwargs.get("task_description", "")
-        if not task_description:
+        task = str(kwargs.get("task_description", "")).strip()
+        if not task:
             return "Error: task_description is required for subagent tool."
+        if len(task) > self._max_task_length:
+            task = task[: self._max_task_length] + "\n\n[Task description truncated]"
 
-        # Bound task_description length so an over-eager parent LLM
-        # cannot pass tens of thousands of characters and immediately blow up
-        # the SubAgent's own context window. Truncate + log a warning rather
-        # than rejecting outright — partial work is better than a hard fail.
-        # 防止父 LLM 传超长任务描述把子 SubAgent 上下文撑满,直接截断 + 警告。
-        max_desc = self._max_task_description_length
-        if len(task_description) > max_desc:
-            logger.warning(
-                "[SubAgentTool] task_description length %d exceeds limit %d; truncating",
-                len(task_description), max_desc,
-            )
-            task_description = task_description[:max_desc] + "\n\n[Description truncated due to SUBAGENT_MAX_TASK_DESCRIPTION_LENGTH]"
-
-        # Reserve budget atomically before any await.
-        # In single-threaded asyncio, the (check + reserve) above is race-free
-        # as long as no `await` sits between them. Failures DO NOT refund the
-        # slot — repeated SubAgent crashes must not bypass the budget.
-        # 检查与预扣在同一同步段内完成；失败不退款，避免崩溃→重试无限循环。
         self._call_count += 1
-
-        logger.info("[SubAgentTool] Spawning SubAgent (call #%d/%d) for task: '%s'",
-                    self._call_count, self._max_calls, task_description[:100])
-
-        tool_whitelist = kwargs.get("tool_whitelist", [])
-        requested_whitelist = list(tool_whitelist) if isinstance(tool_whitelist, list) else []
-
-        # Validate and filter tool whitelist — always exclude blocked tools
-        # Also block memory mutation tools to protect the parent runtime's memory.
-        _BLOCKED_TOOLS = ("subagent", "ask_user", "memory_store", "memory_revoke", "handoff", "remote_subagent")
-        validated_whitelist = []
-        for name in tool_whitelist:
-            if name in _BLOCKED_TOOLS:
-                continue  # Structural depth=1 enforcement + HITL isolation + memory write protection
-            if name in self._available_tools:
-                validated_whitelist.append(name)
-            else:
-                logger.warning("[SubAgentTool] Ignoring invalid tool name in whitelist: %s", name)
-
-        # If whitelist is empty, use config default or fall back to all available tools
-        if not validated_whitelist:
-            default_whitelist = self._default_whitelist
-            if default_whitelist:
-                for name in default_whitelist.split(","):
-                    name = name.strip()
-                    if name and name not in _BLOCKED_TOOLS and name in self._available_tools:
-                        validated_whitelist.append(name)
-            if not validated_whitelist:
-                validated_whitelist = [
-                    name for name in self._available_tools.keys()
-                    if name not in _BLOCKED_TOOLS
-                ]
-
-        # Build restricted tool list
-        restricted_tools = [
-            self._available_tools[name]
-            for name in validated_whitelist
-            if name in self._available_tools
-        ]
-
-        logger.debug("[SubAgentTool] Resolved whitelist: requested=%s, final=%s",
-                     tool_whitelist if tool_whitelist else "(empty→default)",
-                     validated_whitelist)
-
-        # Generate unique SubAgent name. Capture the id into a LOCAL immediately:
-        # under parallel dispatch multiple execute() coroutines share this tool
-        # instance, so reading self._subagent_counter again AFTER an await (e.g.
-        # in the completion log below) would print whatever value the counter has
-        # advanced to — making all concurrent completions log the same id.
-        # 并发派发下多个 execute() 共享本实例，await 后再读 self._subagent_counter 会串号，
-        # 故此处立即拷贝到局部 local_counter，后续日志一律用它。
         self._subagent_counter += 1
-        local_counter = self._subagent_counter
-        subagent_name = f"SubAgent-{local_counter}"
+        local_id = self._subagent_counter
+        name = f"SubAgent-{local_id}"
 
-        # Create isolated sandbox directory (anti-pattern #4)
-        # makedirs runs in a thread to avoid blocking the asyncio
-        # event loop on slow disks (NFS / network mounts). makedirs itself is
-        # microseconds on local SSDs but can be 100ms+ on hostile mounts —
-        # blocking would freeze concurrent DAG nodes / SubAgents.
-        # makedirs 改异步,避免慢盘上阻塞事件循环冻结其它并行 Task。
-        sandbox_subdir = ""
-        try:
-            sandbox_base = self._sandbox_dir
-            sandbox_subdir = os.path.join(sandbox_base, f"subagent_{local_counter}")
-            await asyncio.to_thread(os.makedirs, sandbox_subdir, exist_ok=True)
-            logger.debug("[SubAgentTool] Sandbox created: %s", sandbox_subdir)
-        except OSError:
-            logger.debug("[SubAgentTool] Failed to create sandbox subdir, continuing without isolation")
+        def on_child_event(event: str, payload: Any = None) -> None:
+            data = dict(payload) if isinstance(payload, dict) else {"data": payload}
+            data.setdefault("subagent_id", name)
+            data.setdefault("parent_agent", local_parent)
+            # A child owns a private Todo list. Namespace its full snapshots so
+            # consumers never replace the root AgentLoop Todo with child state.
+            forwarded_event = (
+                "subagent_todo_updated" if event == "todo_updated" else event
+            )
+            self._emit(forwarded_event, data)
+            if event == "agent_turn_completed":
+                self._emit(
+                    "subagent_iteration",
+                    {
+                        "subagent_id": name,
+                        "parent_agent": local_parent,
+                        "iteration": data.get("turn", 0),
+                        "tool_calls_count": data.get("tool_calls", 0),
+                    },
+                )
 
-        # Create and run SubAgent
-        try:
-            from agents.subagent import SubAgent
-
-            subagent = SubAgent(
-                name=subagent_name,
-                task_description=task_description,
-                llm_client=self._llm_client,
-                tools=restricted_tools,
-                context_manager=self._context_manager,
-                max_iterations=self._max_iterations,
-                timeout=self._timeout,
-                max_tokens=self._max_tokens,
-                on_event=self._on_event,
-                parent_agent_name=local_parent,
-                sandbox_subdir=sandbox_subdir,
-                summary_max_length=self._summary_max_length,
+        sandbox = await self._prepare_sandbox(local_id)
+        tools, resolved_names = self._resolve_tools(
+            kwargs.get("tool_whitelist"),
+            sandbox=sandbox,
+            on_event=on_child_event,
+        )
+        activation = next(
+            (tool for tool in tools if tool.name == "activate_skill"),
+            None,
+        )
+        prompt_capabilities = PromptCapabilities.from_tools(
+            tools,
+            python_command=self._python_command,
+            skill_descriptions=getattr(activation, "skill_descriptions", ""),
+            skills_max_activations=getattr(activation, "max_activations", 1),
+        )
+        system_prompt = build_system_prompt(
+            _SUBAGENT_SYSTEM_PROMPT,
+            inject_context=True,
+            inject_subagent_guidance=False,
+            inject_hitl_guidance=False,
+            capabilities=prompt_capabilities,
+        )
+        if sandbox:
+            system_prompt += (
+                f"\nYour isolated working directory is {sandbox}. "
+                "Keep file operations inside it."
             )
 
-            # Only the expensive SubAgent.run() is gated by Semaphore;
-            # whitelist validation / sandbox creation above already ran in parallel.
-            # 信号量只 wrap 真正昂贵的工具调用循环；快路径不挤占并发槽。
-            async with self._semaphore:
-                result: SubAgentResult = await subagent.run(context="")
+        self._emit(
+            "subagent_start",
+            {
+                "subagent_id": name,
+                "parent_agent": local_parent,
+                "task_description": task,
+                "tool_whitelist": resolved_names,
+            },
+        )
+        loop = AgentLoop(
+            llm_client=self._llm_client,
+            tools=tools,
+            max_turns=self._max_turns,
+            timeout_seconds=self._timeout,
+            context_manager=ContextManager(
+                max_tokens=self._context_max_tokens,
+                summarize_with_llm=False,
+            ),
+            agent_name=name,
+            guardrail=self._guardrail,
+            temperature=self._temperature,
+            result_truncation_limit=self._result_truncation_limit,
+            on_event=on_child_event,
+            max_total_tokens=self._max_tokens,
+            max_reasoning_tokens=self._max_reasoning_tokens,
+        )
+        if activation is not None:
+            activation.set_tool_filter_callback(loop.set_allowed_tools)
 
-            logger.info("[SubAgentTool] SubAgent-%d completed: status=%s, iterations=%d, tokens=%d, duration=%.0fms, artifacts=%s",
-                        local_counter, result.status.value, result.iterations_used,
-                        result.tokens_used, result.duration_ms, result.summary.artifacts)
-            logger.debug("[SubAgentTool] SubAgent-%d summary: accomplished='%s', issues='%s'",
-                        local_counter,
-                        result.summary.accomplished[:200],
-                        result.summary.issues[:200])
-
-            # Return structured summary as JSON string (anti-pattern #6).
-            # A non-COMPLETED status (FAILED / TIMED_OUT) must surface as an
-            # `Error:`-prefixed string so callers detect it via classify_tool_result
-            # (both the standard tool-calling path and emergent parallel dispatch).
-            # The full summary is preserved after the marker so no info is lost.
-            # 非 COMPLETED 状态加 `Error:` 前缀，让 classify_tool_result 能识别失败；摘要保留不丢。
-            summary_text = self._add_tool_metadata(
-                result.summary_text,
-                requested_whitelist=requested_whitelist,
-                resolved_whitelist=validated_whitelist,
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with self._semaphore:
+                    result = await loop.run(
+                        task,
+                        system_prompt=system_prompt,
+                        effort=Effort.HIGH,
+                    )
+        except TimeoutError:
+            self._accumulate_stats(loop.stats_snapshot)
+            on_child_event(
+                "agent_loop_completed",
+                {
+                    "success": False,
+                    "stop_reason": EngineStopReason.TIMEOUT.value,
+                    "turns": loop.turns,
+                    "stats": loop.stats_snapshot.model_dump(),
+                },
             )
-            if result.status != SubAgentStatus.COMPLETED:
-                return f"Error: SubAgent {result.status.value} - {summary_text}"
-            return summary_text
-
-        # There is intentionally no `except asyncio.TimeoutError` branch — there
-        # is no `wait_for` at this layer (SubAgent.run() owns the timeout) so
-        # TimeoutError can never reach here. CancelledError IS possible though
-        # (parent task being cancelled mid-await), so we honor it explicitly
-        # by re-raising without producing a misleading "SubAgent error: ...".
-        # 删掉死的 TimeoutError except;CancelledError 保留 re-raise 不吞。
-        except asyncio.CancelledError:
-            logger.warning("[SubAgentTool] SubAgent-%d cancelled by parent task",
-                           local_counter)
-            raise
-
-        except Exception as exc:
-            # Budget is already reserved at the top; failures do not refund it.
-            logger.error("[SubAgentTool] SubAgent execution failed: %s", exc, exc_info=True)
-            error_summary = {
-                "accomplished": "",
-                "findings": "",
-                "issues": f"SubAgent error: {str(exc)[:300]}",
-                "artifacts": [],
-                "tool_calls_summary": "",
+            payload = {
+                "subagent_id": name,
+                "parent_agent": local_parent,
+                "timeout": self._timeout,
             }
-            # `Error:` prefix so callers detect the hard failure (see above).
-            return "Error: " + json.dumps(error_summary, ensure_ascii=False)
+            self._emit("subagent_timed_out", payload)
+            return f"Error: SubAgent timed out after {self._timeout:g} seconds."
+        except asyncio.CancelledError:
+            self._accumulate_stats(loop.stats_snapshot)
+            on_child_event(
+                "agent_loop_completed",
+                {
+                    "success": False,
+                    "stop_reason": "cancelled",
+                    "turns": loop.turns,
+                    "stats": loop.stats_snapshot.model_dump(),
+                },
+            )
+            self._emit(
+                "subagent_cancelled",
+                {
+                    "subagent_id": name,
+                    "parent_agent": local_parent,
+                    "error": "parent task cancelled",
+                },
+            )
+            raise
+        except Exception as exc:
+            self._accumulate_stats(loop.stats_snapshot)
+            on_child_event(
+                "agent_loop_completed",
+                {
+                    "success": False,
+                    "stop_reason": EngineStopReason.ENGINE_ERROR.value,
+                    "turns": loop.turns,
+                    "stats": loop.stats_snapshot.model_dump(),
+                },
+            )
+            logger.error("[SubAgentTool] child execution failed", exc_info=True)
+            self._emit(
+                "subagent_failed",
+                {
+                    "subagent_id": name,
+                    "parent_agent": local_parent,
+                    "error": str(exc),
+                },
+            )
+            return f"Error: SubAgent failed: {type(exc).__name__}: {exc}"
 
-    @staticmethod
-    def _add_tool_metadata(
-        summary_text: str,
+        total_tokens = loop.tokens_used
+        self._accumulate_stats(result.stats)
+        payload = {
+            "subagent_id": name,
+            "parent_agent": local_parent,
+            "success": result.success,
+            "stop_reason": result.stop_reason.value,
+            "turns": result.turns,
+            "tool_calls": result.stats.tool_calls,
+            "tokens": total_tokens,
+        }
+        if total_tokens > self._max_tokens:
+            payload["success"] = False
+            payload["error"] = "token budget exceeded"
+            self._emit("subagent_failed", payload)
+            return (
+                f"Error: SubAgent token budget exceeded "
+                f"({total_tokens} > {self._max_tokens})."
+            )
+        if not result.success:
+            payload["error"] = result.output[:300]
+            if result.stop_reason == EngineStopReason.TIMEOUT:
+                payload["timeout"] = self._timeout
+                self._emit("subagent_timed_out", payload)
+            else:
+                self._emit("subagent_failed", payload)
+            return f"Error: SubAgent {result.stop_reason.value}: {result.output}"
+
+        if result.output.lstrip().upper().startswith("BLOCKED:"):
+            payload["success"] = False
+            payload["error"] = result.output[:300]
+            self._emit("subagent_failed", payload)
+            return f"Error: SubAgent blocked: {result.output.strip()[8:].strip()}"
+
+        self._emit("subagent_complete", payload)
+        return result.output
+
+    def _resolve_tools(
+        self,
+        requested: Any,
         *,
-        requested_whitelist: list[str],
-        resolved_whitelist: list[str],
-    ) -> str:
-        """Attach requested vs actual SubAgent tool metadata to parent-visible JSON."""
-        try:
-            data = json.loads(summary_text) if summary_text else {}
-        except json.JSONDecodeError:
-            data = {"findings": summary_text}
-        if not isinstance(data, dict):
-            data = {"findings": str(data)}
+        sandbox: str,
+        on_event: Callable[[str, Any], None] | None = None,
+    ) -> tuple[list[BaseTool], list[str]]:
+        requested_names = (
+            [str(name).strip() for name in requested if str(name).strip()]
+            if isinstance(requested, list)
+            else []
+        )
+        if not requested_names and self._default_whitelist:
+            requested_names = [
+                name.strip()
+                for name in self._default_whitelist.split(",")
+                if name.strip()
+            ]
+        if not requested_names:
+            requested_names = list(self._available_tools)
 
-        data["requested_tool_whitelist"] = requested_whitelist
-        data["tool_whitelist"] = resolved_whitelist
-        return json.dumps(data, ensure_ascii=False)
+        names = list(dict.fromkeys(
+            name
+            for name in requested_names
+            if name not in _BLOCKED_CHILD_TOOLS and name in self._available_tools
+        ))
+        tools: list[BaseTool] = []
+        resolved_names: list[str] = []
+        for name in names:
+            tool = self._available_tools[name]
+            if name == "activate_skill":
+                clone = getattr(tool, "clone", None)
+                if callable(clone):
+                    tool = clone(on_event=on_event)
+            elif on_event is not None and hasattr(tool, "_on_event"):
+                # Tool instances belong to the parent runtime. A shallow copy
+                # preserves their service/client dependencies while making the
+                # mutable event callback child-local and concurrency-safe.
+                tool = copy(tool)
+                setattr(tool, "_on_event", on_event)
+            bind_sandbox = getattr(tool, "for_sandbox", None)
+            if callable(bind_sandbox):
+                # Never fall back to a parent-rooted filesystem/subprocess tool
+                # when the child sandbox could not be created.
+                if not sandbox:
+                    continue
+                tool = bind_sandbox(sandbox)
+            tools.append(tool)
+            resolved_names.append(name)
+        return tools, resolved_names
+
+    async def _prepare_sandbox(self, child_id: int) -> str:
+        if not self._sandbox_dir:
+            return ""
+        try:
+            root = os.path.realpath(os.path.expanduser(self._sandbox_dir))
+            await asyncio.to_thread(os.makedirs, root, exist_ok=True)
+            path = await asyncio.to_thread(
+                tempfile.mkdtemp,
+                prefix=f"subagent_{child_id}_",
+                dir=root,
+            )
+            self._child_sandboxes.add(path)
+            return path
+        except OSError:
+            logger.debug("[SubAgentTool] could not create child sandbox", exc_info=True)
+            return ""
+
+    def _accumulate_stats(self, stats: EngineStats) -> None:
+        self.aggregate_stats.llm_calls += stats.llm_calls
+        self.aggregate_stats.tool_calls += stats.tool_calls
+        self.aggregate_stats.reasoning_tokens += stats.reasoning_tokens
+        self.aggregate_stats.subagent_calls += 1
 
     def reset_task_state(self) -> None:
-        """Reset state before a new runtime task.
-
-        Also clean up `subagent_*` sandbox subdirectories from the
-        previous task. Without this, files written by SubAgent-1 in task A
-        would still be visible to a freshly-numbered SubAgent-1 in task B
-        (since the counter resets to 1 each task). Previous-task leftovers
-        would cause "ghost context" — the SubAgent sees files it didn't
-        write. Only directories matching the `subagent_<digits>` pattern
-        under SANDBOX_DIR are removed; the SANDBOX_DIR root itself and any
-        non-SubAgent-owned files are untouched.
-        清理上一任务的 subagent_N 子目录,避免新任务的 SubAgent 看到旧任务遗留文件。
-        """
-        import re
-        import shutil
-
-        logger.debug("[SubAgentTool] Resetting task state: call_count=%d→0, subagent_counter=%d→0",
-                     self._call_count, self._subagent_counter)
         self._call_count = 0
         self._subagent_counter = 0
-
-        # M3: clean up previous task's SubAgent sandbox subdirs
-        try:
-            sandbox_base = self._sandbox_dir
-            if os.path.isdir(sandbox_base):
-                pattern = re.compile(r"^subagent_\d+$")
-                for entry in os.listdir(sandbox_base):
-                    if pattern.match(entry):
-                        target = os.path.join(sandbox_base, entry)
-                        if os.path.isdir(target):
-                            shutil.rmtree(target, ignore_errors=True)
-                            logger.debug("[SubAgentTool] Removed stale sandbox subdir: %s", target)
-        except OSError:
-            logger.debug("[SubAgentTool] Sandbox cleanup encountered OSError (non-fatal)", exc_info=True)
+        self.aggregate_stats = EngineStats()
+        for target in tuple(self._child_sandboxes):
+            shutil.rmtree(target, ignore_errors=True)
+        self._child_sandboxes.clear()
 
     def set_caller(self, name: str) -> None:
-        """The action loop calls this immediately before traced_execute()
-        to inject the actual caller agent's name. asyncio single-threaded model
-        guarantees no other task interleaves between set_caller and the
-        synchronous prologue of execute() that captures self._parent_name into
-        a local variable for the SubAgent constructor.
-
-        动作循环在每次工具调用前同步注入实际 caller 名称，让 tracing/eval 准确归因。
-        """
         if name:
             self._parent_name = name
+
+    def _emit(self, name: str, payload: Any) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(name, payload)
+        except Exception:
+            logger.debug("[SubAgentTool] event callback failed", exc_info=True)

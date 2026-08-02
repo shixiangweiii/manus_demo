@@ -8,7 +8,7 @@ import logging
 
 from console import ConsoleRenderer, console, setup_logging
 from core.events import EventBus
-from core.models import Effort, EngineKind, ExecutorKind
+from core.models import Effort, EngineKind
 from core.settings import get_settings
 from rich.panel import Panel
 from runtime.factory import build_runtime
@@ -17,15 +17,9 @@ from runtime.factory import build_runtime
 def _add_run_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--engine",
-        choices=[kind.value for kind in EngineKind if kind != EngineKind.WORKFLOW],
+        choices=[kind.value for kind in EngineKind],
         default=None,
         help="Orchestration engine (default: settings.toml)",
-    )
-    parser.add_argument(
-        "--executor",
-        choices=[kind.value for kind in ExecutorKind],
-        default=None,
-        help="Per-action executor (default: settings.toml)",
     )
     parser.add_argument(
         "--effort",
@@ -50,12 +44,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("task", help="Task text")
     _add_run_options(run_parser)
 
-    workflow_parser = subparsers.add_parser(
-        "workflow",
-        help="Execute a deterministic workflow JSON file",
-    )
-    workflow_parser.add_argument("path", help="Path to workflow specification")
-
     subparsers.add_parser(
         "mcp-server",
         help="Expose configured local tools through the MCP server",
@@ -79,7 +67,6 @@ async def _runtime(interactive: bool):
 def _overrides(args: argparse.Namespace) -> dict:
     values = {
         "engine": args.engine,
-        "executor": args.executor,
         "effort": args.effort,
     }
     return {name: value for name, value in values.items() if value is not None}
@@ -96,7 +83,7 @@ async def _run_command(args: argparse.Namespace) -> None:
         for record in records:
             console.print(
                 f"{record.task_id}  {record.state.value:<10}  "
-                f"{record.engine.value}/{record.executor.value}/{record.effort.value}  "
+                f"{record.engine.value}/{record.effort.value}  "
                 f"{record.task[:80]}"
             )
         return
@@ -135,18 +122,13 @@ async def _run_command(args: argparse.Namespace) -> None:
         if args.command == "run":
             await runtime.run(args.task, _overrides(args))
             return
-        if args.command == "workflow":
-            from workflow.loader import load_workflow_spec
-
-            await runtime.run_workflow(load_workflow_spec(args.path))
-            return
         if args.command == "resume":
             await runtime.resume(args.task_id)
             return
 
         console.print(
             Panel(
-                "Available engines: sequential, dag, todo, goal\n"
+                "Available engines: sequential, dag, agent_loop\n"
                 "Type a task, or type quit to exit.",
                 title="[bold blue]Manus Demo[/bold blue]",
             )

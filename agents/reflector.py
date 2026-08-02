@@ -25,8 +25,9 @@ import re
 from typing import Any
 
 from agents.base import BaseAgent
-from agents.prompt_utils import build_system_prompt
+from agents.prompt_utils import PromptCapabilities, build_system_prompt
 from context.manager import ContextManager
+from core.models import EngineStopReason
 from llm.client import LLMClient
 from dag.models import TaskNode
 from engines.sequential_models import Plan, Reflection
@@ -106,6 +107,7 @@ class ReflectorAgent(BaseAgent):
         llm_client: LLMClient,
         context_manager: ContextManager | None = None,
         temperature: float = 0.1,
+        prompt_capabilities: PromptCapabilities | None = None,
     ):
         system_prompt = build_system_prompt(
             REFLECTOR_SYSTEM_PROMPT,
@@ -113,6 +115,8 @@ class ReflectorAgent(BaseAgent):
             inject_search_guidance=False,
             inject_subagent_guidance=False,
             inject_hitl_guidance=False,
+            inject_skill_guidance=False,
+            capabilities=prompt_capabilities,
         )
         super().__init__(
             name="Reflector",
@@ -121,6 +125,45 @@ class ReflectorAgent(BaseAgent):
             context_manager=context_manager,
         )
         self.temperature = temperature
+        self.last_failure_reason: EngineStopReason | None = None
+
+    @staticmethod
+    def _classify_model_failure(exc: Exception) -> EngineStopReason:
+        if isinstance(
+            exc,
+            (ValueError, TypeError, KeyError, AttributeError, IndexError),
+        ):
+            return EngineStopReason.INVALID_RESPONSE
+        return EngineStopReason.MODEL_ERROR
+
+    @staticmethod
+    def _reflection_from_data(data: Any) -> Reflection:
+        if not isinstance(data, dict):
+            raise ValueError("reflection response must be an object")
+        passed = data.get("passed")
+        score = data.get("score")
+        feedback = data.get("feedback")
+        suggestions = data.get("suggestions")
+        if type(passed) is not bool:
+            raise ValueError("reflection.passed must be a boolean")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not 0.0 <= float(score) <= 1.0
+        ):
+            raise ValueError("reflection.score must be between 0 and 1")
+        if not isinstance(feedback, str):
+            raise ValueError("reflection.feedback must be text")
+        if not isinstance(suggestions, list) or any(
+            not isinstance(item, str) for item in suggestions
+        ):
+            raise ValueError("reflection.suggestions must be a string array")
+        return Reflection(
+            passed=passed,
+            score=float(score),
+            feedback=feedback,
+            suggestions=suggestions,
+        )
 
     # ------------------------------------------------------------------
     # Per-node DAG exit-criteria validation
@@ -140,6 +183,7 @@ class ReflectorAgent(BaseAgent):
         Returns:
             True 表示完成判据满足，False 表示不满足（将触发节点失败处理）。
         """
+        self.last_failure_reason = None
         if not node.exit_criteria.validation_prompt:
             return result.success  # 无自定义验证 prompt，以执行结果为准
 
@@ -154,8 +198,12 @@ class ReflectorAgent(BaseAgent):
 
         try:
             data = await self.think_json(prompt, temperature=self.temperature)
-            passed = data.get("passed", True)
+            if not isinstance(data, dict) or type(data.get("passed")) is not bool:
+                raise ValueError("exit-criteria response must contain boolean passed")
             reason = data.get("reason", "")
+            if not isinstance(reason, str):
+                raise ValueError("exit-criteria reason must be text")
+            passed = data["passed"]
             logger.info(
                 "[Reflector] Exit criteria for %s: %s (%s)",
                 node.id, "PASSED" if passed else "FAILED", reason[:100],
@@ -165,6 +213,7 @@ class ReflectorAgent(BaseAgent):
             # 修复 High #4: 验证失败时返回 False，触发重规划
             # 而不是默认通过（默认通过会抑制重规划，导致失败被静默放过）
             logger.error("[Reflector] Exit criteria check failed for %s: %s. Marking as failed to trigger replan.", node.id, exc)
+            self.last_failure_reason = self._classify_model_failure(exc)
             return False
 
     # ------------------------------------------------------------------
@@ -186,6 +235,7 @@ class ReflectorAgent(BaseAgent):
             包含通过/失败判定、质量评分和具体反馈的 Reflection 对象。
         """
         self.reset()
+        self.last_failure_reason = None
 
         # 构建节点状态摘要（供 LLM 一览全局执行情况）
         nodes_summary = "\n".join(
@@ -220,21 +270,18 @@ class ReflectorAgent(BaseAgent):
 
         try:
             data = await self.think_json(prompt, temperature=self.temperature)
-            reflection = Reflection(
-                passed=data.get("passed", False),
-                score=float(data.get("score", 0.5)),
-                feedback=data.get("feedback", ""),
-                suggestions=data.get("suggestions", []),
-            )
+            reflection = self._reflection_from_data(data)
         except Exception as exc:
             # 修复 High #4: 解析失败时返回 False，触发重规划
             # 而不是默认通过（默认通过会抑制重规划，导致失败被静默放过）
             logger.error("[Reflector] Failed to parse reflection: %s. Triggering replan.", exc)
+            self.last_failure_reason = self._classify_model_failure(exc)
             reflection = Reflection(
                 passed=False,
                 score=0.3,
                 feedback=f"Reflection parsing failed: {exc}. Re-planning recommended.",
                 suggestions=["Check LLM output format", "Retry with simpler prompt"],
+                failure_reason=self.last_failure_reason,
             )
 
         logger.info(
@@ -260,6 +307,7 @@ class ReflectorAgent(BaseAgent):
         评估顺序计划的执行结果是否满足原始任务要求。
         """
         self.reset()
+        self.last_failure_reason = None
 
         artifact_reflection = self._maybe_pass_synthetic_file_artifact_task(task, results)
         if artifact_reflection is not None:
@@ -301,19 +349,16 @@ class ReflectorAgent(BaseAgent):
 
         try:
             data = await self.think_json(prompt, temperature=self.temperature)
-            reflection = Reflection(
-                passed=data.get("passed", False),
-                score=float(data.get("score", 0.5)),
-                feedback=data.get("feedback", ""),
-                suggestions=data.get("suggestions", []),
-            )
+            reflection = self._reflection_from_data(data)
         except Exception as exc:
             logger.error("[Reflector] Failed to parse reflection: %s. Triggering replan.", exc)
+            self.last_failure_reason = self._classify_model_failure(exc)
             reflection = Reflection(
                 passed=False,
                 score=0.3,
                 feedback=f"Reflection parsing failed: {exc}. Re-planning recommended.",
                 suggestions=["Check LLM output format", "Retry with simpler prompt"],
+                failure_reason=self.last_failure_reason,
             )
 
         logger.info(

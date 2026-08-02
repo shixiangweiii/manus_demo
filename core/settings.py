@@ -16,7 +16,7 @@ from typing import Any
 
 from dotenv import dotenv_values
 
-from core.models import Effort, EngineKind, ExecutorKind
+from core.models import Effort, EngineKind
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -33,7 +33,6 @@ class LLMSettings:
     base_url: str = "https://api.deepseek.com/v1"
     api_key: str = ""
     model: str = "deepseek-chat"
-    supports_reasoning: bool = False
     timeout_seconds: float = 120.0
     retry_enabled: bool = False
     retry_max_attempts: int = 3
@@ -44,8 +43,7 @@ class LLMSettings:
 
 @dataclass
 class RuntimeSettings:
-    engine: EngineKind = EngineKind.AUTO
-    executor: ExecutorKind = ExecutorKind.AUTO
+    engine: EngineKind = EngineKind.AGENT_LOOP
     effort: Effort = Effort.AUTO
 
 
@@ -58,12 +56,8 @@ class EngineSettings:
     adaptive_planning: bool = True
     adaptive_interval: int = 1
     adaptive_min_completed: int = 1
-    max_todo_items: int = 20
-    max_todo_retries: int = 3
-    max_todo_iterations: int = 60
-    goal_reanchor_interval: int = 5
-    goal_reflection_interval: int = 1
-    goal_stagnation_window: int = 3
+    max_agent_turns: int = 30
+    agent_timeout_seconds: float = 600.0
     planner_temperature: float = 0.3
     reflector_temperature: float = 0.1
 
@@ -73,9 +67,7 @@ class ExecutionSettings:
     max_context_tokens: int = 16000
     max_action_iterations: int = 10
     tool_calling_temperature: float = 0.5
-    reasoning_aware_tool_calling_temperature: float = 0.5
     max_reasoning_tokens: int = 10000
-    max_reasoning_rounds: int = 5
 
 
 @dataclass
@@ -132,19 +124,16 @@ class ToolSettings:
 
 @dataclass
 class CapabilitySettings:
-    workflow: bool = True
     checkpoint: bool = True
     checkpoint_max_per_task: int = 5
     subagent: bool = False
     subagent_max_iterations: int = 10
     subagent_timeout_seconds: int = 300
     subagent_max_concurrent: int = 2
-    subagent_summary_max_length: int = 2000
     subagent_max_calls: int = 3
     subagent_max_tokens: int = 120000
     subagent_tool_whitelist: str = ""
     subagent_task_max_length: int = 2000
-    parallel_todos: bool = False
     hitl: bool = False
     hitl_max_prompts: int = 5
     hitl_timeout_seconds: int = 120
@@ -172,16 +161,6 @@ class CapabilitySettings:
     skill_optimize_with_llm: bool = False
     skill_optimize_validation_ratio: float = 0.2
     skill_optimize_max_tokens: int = 1200
-    handoff: bool = False
-    handoff_allow_ask_user: bool = False
-    handoff_max_calls: int = 2
-    handoff_timeout_seconds: int = 300
-    handoff_max_iterations: int = 10
-    remote_subagent: bool = False
-    remote_agent_server_json: str = ""
-    remote_subagent_max_calls: int = 2
-    remote_subagent_timeout_seconds: int = 300
-    remote_agent_fetch_card: bool = True
     guardrails: bool = False
     guardrail_tool_enabled: bool = True
     guardrail_input_enabled: bool = True
@@ -275,8 +254,7 @@ class AppSettings:
 
 @dataclass(frozen=True)
 class RunSettings:
-    engine: EngineKind = EngineKind.AUTO
-    executor: ExecutorKind = ExecutorKind.AUTO
+    engine: EngineKind = EngineKind.AGENT_LOOP
     effort: Effort = Effort.AUTO
     capabilities: tuple[str, ...] = ()
 
@@ -284,14 +262,13 @@ class RunSettings:
     def from_app(cls, settings: AppSettings) -> "RunSettings":
         return cls(
             engine=settings.runtime.engine,
-            executor=settings.runtime.executor,
             effort=settings.runtime.effort,
         )
 
     def with_overrides(self, overrides: dict[str, Any] | None) -> "RunSettings":
         if not overrides:
             return self
-        allowed = {"engine", "executor", "effort", "capabilities"}
+        allowed = {"engine", "effort", "capabilities"}
         unknown = set(overrides) - allowed
         if unknown:
             raise ValueError(f"Unknown run setting(s): {', '.join(sorted(unknown))}")
@@ -309,7 +286,6 @@ class RunSettings:
             )
         return RunSettings(
             engine=EngineKind(overrides.get("engine", self.engine)),
-            executor=ExecutorKind(overrides.get("executor", self.executor)),
             effort=Effort(overrides.get("effort", self.effort)),
             capabilities=tuple(name.strip() for name in capabilities),
         )
@@ -345,8 +321,6 @@ def _coerce_value(current: Any, value: Any, dotted_name: str) -> Any:
     try:
         if isinstance(current, EngineKind):
             return EngineKind(value)
-        if isinstance(current, ExecutorKind):
-            return ExecutorKind(value)
         if isinstance(current, Effort):
             return Effort(value)
         if isinstance(current, bool):
@@ -453,13 +427,10 @@ def validate_settings(settings: AppSettings) -> None:
         "execution.max_action_iterations": settings.execution.max_action_iterations,
         "engines.max_parallel_nodes": settings.engines.max_parallel_nodes,
         "engines.adaptive_interval": settings.engines.adaptive_interval,
-        "engines.max_todo_iterations": settings.engines.max_todo_iterations,
         "engines.node_timeout_seconds": settings.engines.node_timeout_seconds,
-        "engines.max_todo_items": settings.engines.max_todo_items,
+        "engines.max_agent_turns": settings.engines.max_agent_turns,
+        "engines.agent_timeout_seconds": settings.engines.agent_timeout_seconds,
         "execution.max_reasoning_tokens": settings.execution.max_reasoning_tokens,
-        "execution.max_reasoning_rounds": settings.execution.max_reasoning_rounds,
-        "engines.goal_reflection_interval": settings.engines.goal_reflection_interval,
-        "engines.goal_stagnation_window": settings.engines.goal_stagnation_window,
         "tools.code_timeout_seconds": settings.tools.code_timeout_seconds,
         "tools.shell_timeout_seconds": settings.tools.shell_timeout_seconds,
         "tools.web_search_max_results": settings.tools.web_search_max_results,
@@ -487,7 +458,6 @@ def validate_settings(settings: AppSettings) -> None:
         "capabilities.subagent_max_iterations": settings.capabilities.subagent_max_iterations,
         "capabilities.subagent_timeout_seconds": settings.capabilities.subagent_timeout_seconds,
         "capabilities.subagent_max_concurrent": settings.capabilities.subagent_max_concurrent,
-        "capabilities.subagent_summary_max_length": settings.capabilities.subagent_summary_max_length,
         "capabilities.subagent_max_calls": settings.capabilities.subagent_max_calls,
         "capabilities.subagent_max_tokens": settings.capabilities.subagent_max_tokens,
         "capabilities.subagent_task_max_length": settings.capabilities.subagent_task_max_length,
@@ -502,11 +472,6 @@ def validate_settings(settings: AppSettings) -> None:
         "capabilities.skills_max_content_tokens": settings.capabilities.skills_max_content_tokens,
         "capabilities.skill_auto_distill_min_successes": settings.capabilities.skill_auto_distill_min_successes,
         "capabilities.skill_optimize_max_tokens": settings.capabilities.skill_optimize_max_tokens,
-        "capabilities.handoff_max_calls": settings.capabilities.handoff_max_calls,
-        "capabilities.handoff_timeout_seconds": settings.capabilities.handoff_timeout_seconds,
-        "capabilities.handoff_max_iterations": settings.capabilities.handoff_max_iterations,
-        "capabilities.remote_subagent_max_calls": settings.capabilities.remote_subagent_max_calls,
-        "capabilities.remote_subagent_timeout_seconds": settings.capabilities.remote_subagent_timeout_seconds,
         "capabilities.mcp_bridge_discovery_ttl": settings.capabilities.mcp_bridge_discovery_ttl,
         "capabilities.mcp_bridge_call_timeout": settings.capabilities.mcp_bridge_call_timeout,
         "capabilities.agentbay_max_concurrent": settings.capabilities.agentbay_max_concurrent,
@@ -520,9 +485,7 @@ def validate_settings(settings: AppSettings) -> None:
             raise ValueError(f"Invalid setting {name}: must be greater than zero")
     nonnegative_fields = {
         "engines.max_replan_attempts": settings.engines.max_replan_attempts,
-        "engines.max_todo_retries": settings.engines.max_todo_retries,
         "engines.adaptive_min_completed": settings.engines.adaptive_min_completed,
-        "engines.goal_reanchor_interval": settings.engines.goal_reanchor_interval,
         "tools.bailian_max_retries": settings.tools.bailian_max_retries,
         "tools.local_webparser_cache_size": settings.tools.local_webparser_cache_size,
         "tools.bailian_webparser_min_interval": settings.tools.bailian_webparser_min_interval,
@@ -551,17 +514,12 @@ def validate_settings(settings: AppSettings) -> None:
             raise ValueError(f"Invalid setting {name}: must be between 0 and 1")
     temperature_fields = {
         "execution.tool_calling_temperature": settings.execution.tool_calling_temperature,
-        "execution.reasoning_aware_tool_calling_temperature": settings.execution.reasoning_aware_tool_calling_temperature,
         "engines.planner_temperature": settings.engines.planner_temperature,
         "engines.reflector_temperature": settings.engines.reflector_temperature,
     }
     for name, value in temperature_fields.items():
         if not 0.0 <= value <= 2.0:
             raise ValueError(f"Invalid setting {name}: must be between 0 and 2")
-    if settings.runtime.engine == EngineKind.WORKFLOW:
-        raise ValueError(
-            "Invalid setting runtime.engine: workflow requires an explicit workflow file"
-        )
     if settings.tracing.backend in {"otlp", "phoenix"} and not settings.tracing.endpoint.strip():
         raise ValueError(
             "Invalid setting tracing.endpoint: required for the selected tracing backend"
@@ -569,10 +527,6 @@ def validate_settings(settings: AppSettings) -> None:
     if capabilities.memory_tools and not capabilities.agentic_memory:
         raise ValueError(
             "Invalid settings: capabilities.memory_tools requires capabilities.agentic_memory"
-        )
-    if capabilities.parallel_todos and not capabilities.subagent:
-        raise ValueError(
-            "Invalid settings: capabilities.parallel_todos requires capabilities.subagent"
         )
     if capabilities.self_evolution and not capabilities.agentic_memory:
         raise ValueError(
@@ -591,25 +545,6 @@ def validate_settings(settings: AppSettings) -> None:
     ):
         raise ValueError(
             "Invalid settings: capabilities.agentbay requires at least one AgentBay tool"
-        )
-    if capabilities.remote_subagent and not capabilities.remote_agent_server_json.strip():
-        raise ValueError(
-            "Invalid setting capabilities.remote_agent_server_json: required for remote_subagent"
-        )
-    if capabilities.remote_agent_server_json.strip():
-        try:
-            remote_server = json.loads(capabilities.remote_agent_server_json)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Invalid setting capabilities.remote_agent_server_json: {exc}"
-            ) from exc
-        if not isinstance(remote_server, dict):
-            raise ValueError(
-                "Invalid setting capabilities.remote_agent_server_json: must be a JSON object"
-            )
-        validate_server_entry(
-            remote_server,
-            "capabilities.remote_agent_server_json",
         )
     if capabilities.mcp_bridge:
         if not capabilities.mcp_bridge_tool_prefix.strip():

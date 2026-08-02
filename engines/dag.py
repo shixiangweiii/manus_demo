@@ -1,4 +1,4 @@
-"""Hierarchical dependency-graph engine."""
+"""Adaptive Plan-and-Execute engine backed by a dependency graph."""
 
 from __future__ import annotations
 
@@ -9,13 +9,20 @@ from agents.planner import PlannerAgent
 from agents.reflector import ReflectorAgent
 from core.models import Action, Effort, EngineKind, TaskRequest
 from dag.executor import DAGExecutor
-from engines.base import TaskEngine
-from execution.models import resolve_effort
 from dag.models import NodeStatus, NodeType
+from engines.base import PlanAndExecuteEngine
+from engines.sequential_models import Reflection
+from execution.base import ActionExecutor
+from execution.models import resolve_effort
 
 
 class _DagActionAdapter:
-    def __init__(self, engine: TaskEngine, action_executor=None, results=None) -> None:
+    def __init__(
+        self,
+        engine: PlanAndExecuteEngine,
+        action_executor=None,
+        results=None,
+    ) -> None:
         self._engine = engine
         self._action_executor = action_executor or engine.new_action_executor()
         self.results: list[Any] = results if results is not None else []
@@ -46,24 +53,54 @@ class _DagActionAdapter:
         self.results.append(result)
         return result
 
+    def record_external_result(self, result) -> None:
+        """Record timeout/unexpected DAG results created outside the adapter."""
+        self._engine.executor.results.append(ActionExecutor.from_legacy(result))
+        self.results.append(result)
 
-class DagEngine(TaskEngine):
+
+class DagPlanAndExecuteEngine(PlanAndExecuteEngine):
     kind = EngineKind.DAG
 
     async def run(self, request: TaskRequest):
+        return await self.run_with_failure_boundary(request, self._run_unchecked)
+
+    async def _run_unchecked(self, request: TaskRequest):
         started_at = time.time()
+        records_before = self.usage_marker()
         self.events.emit("engine_started", {"engine": self.kind.value})
         planner = PlannerAgent(
             self.llm_client,
             self.context_manager,
             temperature=self.settings.engines.planner_temperature,
+            prompt_capabilities=self.prompt_capabilities,
         )
         reflector = ReflectorAgent(
             self.llm_client,
             self.context_manager,
             temperature=self.settings.engines.reflector_temperature,
+            prompt_capabilities=self.prompt_capabilities,
         )
-        dag = await planner.create_dag(request.task, request.context)
+        self.events.emit("planner_started", {"operation": "create_dag"})
+        dag = await self.model_operation(
+            planner.create_dag(request.task, request.context),
+            label="Planner",
+        )
+        planned_actions = [
+            node for node in dag.nodes.values() if node.node_type == NodeType.ACTION
+        ]
+        if not planned_actions:
+            self.reject_invalid_response(
+                "Planner returned a DAG with no executable actions"
+            )
+        if any(
+            not str(node.id).strip() or not node.description.strip()
+            for node in planned_actions
+        ):
+            self.reject_invalid_response(
+                "Planner returned a DAG action without an ID or description"
+            )
+        self.events.emit("planner_completed", {"operation": "create_dag"})
         dag.max_checkpoints = self.settings.capabilities.checkpoint_max_per_task
         self.events.emit("dag_created", dag.to_dict())
 
@@ -84,8 +121,22 @@ class DagEngine(TaskEngine):
             adaptive_interval=self.settings.engines.adaptive_interval,
             adaptive_min_completed=self.settings.engines.adaptive_min_completed,
         )
+        self.events.emit("dag_execution_started", {"operation": "execute"})
         raw = await runner.execute(dag)
-        reflection = await reflector.reflect_dag(request.task, dag, adapter.results)
+        self.events.emit("dag_execution_completed", {"operation": "execute"})
+        self.events.emit("reflector_started", {"operation": "reflect_dag"})
+        reflection = await self.model_operation(
+            reflector.reflect_dag(request.task, dag, adapter.results),
+            label="Reflector",
+        )
+        if not isinstance(reflection, Reflection):
+            self.reject_invalid_response(
+                "Reflector returned an invalid response object"
+            )
+        self.events.emit(
+            "reflector_completed",
+            {"operation": "reflect_dag", "success": reflection.passed},
+        )
         answer = await self.synthesize(request.task, raw)
         action_nodes = [
             node for node in dag.nodes.values() if node.node_type == NodeType.ACTION
@@ -99,16 +150,24 @@ class DagEngine(TaskEngine):
             and not runner.failed_action_ids
             and reflection.passed
         )
-        result = self.result(
+        failure_reason = reflection.failure_reason or (
+            runner.failure_reasons[-1] if runner.failure_reasons else None
+        )
+        result = self.plan_result(
             request,
-            answer=answer,
+            output=answer,
             success=success,
             started_at=started_at,
+            records_before=records_before,
+            stop_reason=failure_reason,
             metadata={
                 "reflection": reflection.model_dump(),
                 "dag": dag.to_dict(),
                 "failed_action_ids": sorted(runner.failed_action_ids),
                 "condition_skipped_ids": sorted(runner.condition_skipped_ids),
+                "failure_reasons": [
+                    reason.value for reason in runner.failure_reasons
+                ],
             },
         )
         self.emit_completed(result)

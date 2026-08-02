@@ -15,7 +15,7 @@
 </head>
 <body>
   <h1>统一评测平台</h1>
-  <p>上传材料、生成评测集，并按 engine × executor × effort 直接运行。</p>
+  <p>上传材料、生成评测集，并按 engine × effort × capabilities 直接运行。</p>
   <section>
     <h2>1. 上传文本</h2>
     <input id="filename" value="document.md">
@@ -31,9 +31,9 @@
     <h2>3. 运行</h2>
     <input id="evalsetId" placeholder="evalset_id">
     <div class="grid">
-      <input id="engines" value="auto,sequential,dag,todo,goal" aria-label="engines">
-      <input id="executors" value="tool_calling,reasoning_aware_tool_calling" aria-label="executors">
+      <input id="engines" value="sequential,dag,agent_loop" aria-label="engines">
       <input id="efforts" value="low,medium,high" aria-label="efforts">
+      <input id="capabilitySets" placeholder="capability sets: comma within a set; semicolon between sets" aria-label="capability sets">
     </div>
     <button onclick="runSet()">开始运行</button>
   </section>
@@ -44,6 +44,10 @@
       return response.json();
     };
     const split = id => document.getElementById(id).value.split(',').map(x => x.trim()).filter(Boolean);
+    const capabilitySets = () => {
+      const value = document.getElementById('capabilitySets').value.trim();
+      return value ? value.split(';').map(set => set.split(',').map(x => x.trim()).filter(Boolean)) : [[]];
+    };
     async function upload() {
       const result = await api('/documents', {method:'POST', body:JSON.stringify({filename:filename.value, content:content.value})});
       docId.value = result.doc_id || ''; await refresh();
@@ -53,7 +57,7 @@
       evalsetId.value = result.evalset_id || ''; await refresh();
     }
     async function runSet() {
-      await api('/runs', {method:'POST', body:JSON.stringify({evalset_id:evalsetId.value, engines:split('engines'), executors:split('executors'), efforts:split('efforts')})});
+      await api('/runs', {method:'POST', body:JSON.stringify({evalset_id:evalsetId.value, engines:split('engines'), efforts:split('efforts'), capability_sets:capabilitySets()})});
       await refresh();
     }
     async function refresh() { output.textContent = JSON.stringify(await api('/overview'), null, 2); }

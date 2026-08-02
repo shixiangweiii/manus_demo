@@ -3,11 +3,9 @@
 // WS messages are the single source of run state (multi-tab sync for
 // free); seq-based dedupe supports replay after reconnect.
 //
-// todo_* / subagent_* 事件不逐条成卡，而是折叠进聚合状态：
-// 每个 run 一张实时 TODO 卡、每个 subagent_id 一张归组卡。
-// todo_*/subagent_* events fold into aggregate state instead of
-// appending one card each: one live TODO card per run, one grouped
-// card per subagent_id.
+// todo_updated / subagent_* events fold into aggregate state instead of
+// appending one card each: one live todo snapshot per run, one grouped
+// card per (run_id, subagent_id).
 
 export const initialState = {
   connected: false,
@@ -19,65 +17,51 @@ export const initialState = {
   chat: [],              // 交错条目 / interleaved entries
   checkpoints: [],
   todoState: {},         // runId → {items:{id→item}, order:[], summary}
-  subagents: {},         // subagentId → {events:[], status, runId}
+  subagents: {},         // runId::subagentId → {events:[], status, runId, subagentId}
 };
 
-const TODO_EVENTS = [
-  "todo_list_initialized", "todo_list_update",
-  "todo_start", "todo_complete", "todo_blocked", "todo_failed",
-];
-
-const SUBAGENT_GROUP_EVENTS = [
-  "subagent_start", "subagent_iteration",
-  "subagent_complete", "subagent_failed", "subagent_timed_out",
-];
-
-const TODO_STATUS_BY_EVENT = {
-  todo_start: "in_progress",
-  todo_complete: "completed",
-  todo_blocked: "blocked",
-  todo_failed: "failed",
-};
+const TODO_EVENTS = ["todo_updated"];
 
 const SUBAGENT_STATUS_BY_EVENT = {
+  subagent_start: "running",
   subagent_complete: "completed",
   subagent_failed: "failed",
   subagent_timed_out: "timed_out",
+  subagent_cancelled: "cancelled",
 };
 
 function pushChat(state, entry) {
   return { ...state, chat: [...state.chat, entry] };
 }
 
-// 归一化两种 TODO 列表 payload：emergent 是字符串摘要，goal-driven 是
-// {total, todos:[str]} —— 见 emergent_planner.py / goal_driven_planner.py。
-// Normalize both todo-list payload shapes (emergent: string summary;
-// goal-driven: {total, todos:[str]}).
-function normalizeTodoSummary(data) {
-  if (typeof data === "string") return data;
-  if (data && Array.isArray(data.todos)) return data.todos;
-  if (data == null) return null;
-  try { return JSON.stringify(data); } catch { return String(data); }
+function todoSnapshot(data) {
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== "object") return [];
+  if (Array.isArray(data.todos)) return data.todos;
+  if (Array.isArray(data.items)) return data.items;
+  if (Array.isArray(data.snapshot)) return data.snapshot;
+  return [];
 }
 
 function foldTodoEvent(state, msg) {
   const runId = msg.run_id || "unknown";
-  const prev = state.todoState[runId] || { items: {}, order: [], summary: null };
-  const next = { ...prev, items: { ...prev.items }, order: [...prev.order] };
-
-  if (msg.event === "todo_list_initialized" || msg.event === "todo_list_update") {
-    next.summary = normalizeTodoSummary(msg.data);
-  } else if (msg.data && typeof msg.data.todo === "object" && msg.data.todo) {
-    const todo = msg.data.todo;
-    const id = todo.id ?? next.order.length;
-    if (!(id in next.items)) next.order.push(id);
-    next.items[id] = {
+  const items = {};
+  const order = [];
+  todoSnapshot(msg.data).forEach((todo, index) => {
+    const value = typeof todo === "string" ? { description: todo } : (todo || {});
+    const id = value.id ?? index;
+    order.push(id);
+    items[id] = {
       id,
-      description: todo.description || "",
-      status: TODO_STATUS_BY_EVENT[msg.event] || todo.status || "pending",
-      retry: todo.retry_count || 0,
+      description: value.content || value.description || value.task || value.title || "",
+      status: value.status || "pending",
     };
-  }
+  });
+  const next = {
+    items,
+    order,
+    summary: msg.data && typeof msg.data === "object" ? (msg.data.reason || null) : null,
+  };
 
   let newState = { ...state, todoState: { ...state.todoState, [runId]: next } };
   if (!state.todoState[runId]) {
@@ -87,17 +71,21 @@ function foldTodoEvent(state, msg) {
 }
 
 function foldSubagentEvent(state, msg) {
+  const runId = msg.run_id || "unknown";
   const sid = msg.data.subagent_id;
-  const prev = state.subagents[sid] || { events: [], status: "running", runId: msg.run_id };
+  const stateKey = `${runId}::${sid}`;
+  const prev = state.subagents[stateKey] || {
+    events: [], status: "running", runId, subagentId: sid,
+  };
   const next = {
     ...prev,
     events: [...prev.events, { event: msg.event, data: msg.data, seq: msg.seq }],
     status: SUBAGENT_STATUS_BY_EVENT[msg.event] || prev.status,
   };
-  let newState = { ...state, subagents: { ...state.subagents, [sid]: next } };
-  if (!state.subagents[sid]) {
+  let newState = { ...state, subagents: { ...state.subagents, [stateKey]: next } };
+  if (!state.subagents[stateKey]) {
     newState = pushChat(newState, {
-      kind: "subagent_card", seq: msg.seq, subagentId: sid, runId: msg.run_id,
+      kind: "subagent_card", seq: msg.seq, subagentId: stateKey, runId,
     });
   }
   return newState;
@@ -106,7 +94,9 @@ function foldSubagentEvent(state, msg) {
 function handleAgentEvent(state, msg) {
   // 折叠聚合 / aggregate folds
   if (TODO_EVENTS.includes(msg.event)) return foldTodoEvent(state, msg);
-  if (SUBAGENT_GROUP_EVENTS.includes(msg.event) && msg.data && msg.data.subagent_id) {
+  // Every child-namespaced event belongs to the child card, including events
+  // emitted internally by skill, memory, MCP, or future optional tools.
+  if (msg.data && msg.data.subagent_id) {
     return foldSubagentEvent(state, msg);
   }
 
@@ -203,6 +193,7 @@ export function reducer(state, action) {
           status: msg.status,
           answer: msg.answer,
           error: msg.error,
+          stopReason: msg.stop_reason,
           trace: msg.trace,
           ts: msg.ts,
         }

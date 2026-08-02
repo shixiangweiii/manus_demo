@@ -55,7 +55,6 @@ export function Sidebar({ state, onResume, onNewSession, onRefresh }) {
               <div class="ckpt-meta">
                 <span class="badge ${cls}">${label}</span>
                 <span class="badge">${t.engine || "?"}</span>
-                <span class="badge">${t.executor || "?"}</span>
                 <span class="ckpt-time">${relativeTime(t.updated_at)}</span>
                 ${resumable && html`
                   <button class="ckpt-resume" disabled=${state.running}

@@ -190,8 +190,10 @@ class SkillActivationTool(BaseTool):
             "trust_level": skill.meta.license,
         })
 
-        # Apply the tool filter when the skill declares allowed_tools.
-        if self._tool_filter_callback is not None and skill.meta.allowed_tools:
+        # Apply every skill's policy. An empty allowed_tools list explicitly
+        # means "all tools", so it must also clear a previous restrictive
+        # skill filter when multiple activations are allowed in one task.
+        if self._tool_filter_callback is not None:
             self._tool_filter_callback(skill.meta.allowed_tools)
 
         logger.info(
@@ -217,6 +219,37 @@ class SkillActivationTool(BaseTool):
         设置技能激活后过滤可用工具的回调。
         """
         self._tool_filter_callback = callback
+
+    def clone(
+        self,
+        *,
+        tool_filter_callback: Callable[[list[str]], None] | None = None,
+        on_event: Callable[[str, Any], None] | None = None,
+    ) -> "SkillActivationTool":
+        """Return an independent task-local activation tool.
+
+        The registry is immutable during execution and can be shared, while
+        activation counters and the tool-filter callback must belong to one
+        concrete loop.  In particular, a child AgentLoop must never mutate the
+        parent loop's filter callback.
+        """
+        return SkillActivationTool(
+            registry=self._registry,
+            on_event=on_event if on_event is not None else self._on_event,
+            tool_filter_callback=tool_filter_callback,
+            max_activations=self._max_activations,
+            max_content_tokens=self._max_content_tokens,
+            guardrail=self._guardrail,
+        )
+
+    @property
+    def skill_descriptions(self) -> str:
+        """Formatted progressive-disclosure summary for this tool's registry."""
+        return self._registry.format_descriptions()
+
+    @property
+    def max_activations(self) -> int:
+        return self._max_activations
 
     @property
     def active_skills(self) -> list[str]:

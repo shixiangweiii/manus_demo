@@ -34,7 +34,7 @@ class ConsoleRenderer:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.name == "task_started":
             console.print(
-                f"[dim]engine={event.engine} executor={event.executor} "
+                f"[dim]engine={event.engine} "
                 f"effort={payload.get('effort', 'auto')}[/dim]"
             )
         elif event.name == "action_started":
@@ -44,7 +44,7 @@ class ConsoleRenderer:
             success = payload.get("success") is not False
             console.print(
                 Panel(
-                    str(payload.get("answer", "")),
+                    str(payload.get("output", "")),
                     title=(
                         "[bold green]Final Answer[/bold green]"
                         if success

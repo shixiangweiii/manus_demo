@@ -12,6 +12,8 @@ from pydantic import ValidationError
 
 from checkpoint.models import (
     CheckpointCorruptedError,
+    CheckpointError,
+    CheckpointIncompatibleError,
     RuntimeCheckpoint,
     RuntimeCheckpointSummary,
 )
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeCheckpointStore:
-    """Store one latest checkpoint per task and ignore legacy checkpoint files."""
+    """Store one latest v2 checkpoint per task and reject incompatible v1 data."""
 
     def __init__(self, checkpoint_dir: str | None = None) -> None:
         configured = checkpoint_dir or get_settings().paths.checkpoint_dir
@@ -52,7 +54,13 @@ class RuntimeCheckpointStore:
             return None
         try:
             with path.open("r", encoding="utf-8") as handle:
-                return RuntimeCheckpoint.model_validate(json.load(handle))
+                raw = json.load(handle)
+            if isinstance(raw, dict) and raw.get("schema_version") == 1:
+                raise CheckpointIncompatibleError(
+                    "Runtime checkpoint schema v1 is incompatible with v2: "
+                    "executor-based engine choices were removed. Start the task again."
+                )
+            return RuntimeCheckpoint.model_validate(raw)
         except (OSError, json.JSONDecodeError, ValidationError) as exc:
             raise CheckpointCorruptedError(f"Invalid runtime checkpoint {path}: {exc}") from exc
 
@@ -61,7 +69,7 @@ class RuntimeCheckpointStore:
         for path in self.directory.glob("*.runtime.json"):
             try:
                 checkpoint = self.load(path.name.removesuffix(".runtime.json"))
-            except (CheckpointCorruptedError, ValueError) as exc:
+            except (CheckpointError, ValueError) as exc:
                 logger.warning("Skipping invalid runtime checkpoint: %s (%s)", path, exc)
                 continue
             if checkpoint is None:
@@ -71,7 +79,6 @@ class RuntimeCheckpointStore:
                     task_id=checkpoint.task_id,
                     task=checkpoint.task,
                     engine=checkpoint.engine,
-                    executor=checkpoint.executor,
                     effort=checkpoint.effort,
                     state=checkpoint.state,
                     updated_at=checkpoint.updated_at,

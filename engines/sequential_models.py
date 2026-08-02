@@ -4,6 +4,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from core.models import EngineStopReason
+
 
 class StepStatus(str, Enum):
     PENDING = "pending"
@@ -32,3 +34,4 @@ class Reflection(BaseModel):
     score: float = 0.0
     feedback: str = ""
     suggestions: list[str] = Field(default_factory=list)
+    failure_reason: EngineStopReason | None = None
