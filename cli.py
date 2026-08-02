@@ -60,6 +60,7 @@ async def _runtime(interactive: bool):
     events = EventBus()
     renderer = ConsoleRenderer()
     events.subscribe(renderer)
+    # 构建运行时
     runtime = await build_runtime(settings, events, interactive=interactive)
     return runtime, renderer
 
@@ -73,6 +74,8 @@ def _overrides(args: argparse.Namespace) -> dict:
 
 
 async def _run_command(args: argparse.Namespace) -> None:
+    # 例如：python main.py run "明天天气怎么样？" --engine agent_loop --effort high
+    # args.command 为 "run"
     if args.command == "tasks":
         from checkpoint.store import RuntimeCheckpointStore
 
@@ -115,11 +118,13 @@ async def _run_command(args: argparse.Namespace) -> None:
             await runtime.aclose()
         return
 
+    # 构建运行时相关必要上下文和工具配置等
     runtime, renderer = await _runtime(
         interactive=args.command in {"chat", "resume"}
     )
     try:
         if args.command == "run":
+            # runtime.app.AgentRuntime.run
             await runtime.run(args.task, _overrides(args))
             return
         if args.command == "resume":

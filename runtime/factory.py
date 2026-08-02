@@ -190,7 +190,7 @@ async def build_runtime(
         context = RuntimeContext(
             settings=settings,
             llm_client=llm_client,
-            tools=build_default_tools(settings, events),
+            tools=build_default_tools(settings, events), # 默认内置工具
             events=events,
             context_manager=context_manager,
             interactive=interactive,

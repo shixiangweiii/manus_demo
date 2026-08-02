@@ -62,6 +62,9 @@ class AgentRuntime:
         self._validate_run_capabilities(run_settings)
 
         self.context.llm_client.reset_usage()
+        # 根据命令参数解析用哪种引擎
+        # 例如：python main.py run "明天天气怎么样？" --engine agent_loop --effort high
+        # 对应 --engine agent_loop
         engine_kind = run_settings.engine
         effort = (
             _DEFAULT_EFFORT[engine_kind]
@@ -93,6 +96,7 @@ class AgentRuntime:
                     reset()
 
             request.context = self._gather_context(request)
+            # 构建引擎（plan引擎和exec执行引擎）
             engine = self._build_engine(engine_kind, effort)
             result = await engine.run(request)
             result.output = self._apply_output_guardrail(result.output)

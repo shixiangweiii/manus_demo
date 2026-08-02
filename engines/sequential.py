@@ -59,9 +59,11 @@ class SequentialPlanAndExecuteEngine(PlanAndExecuteEngine):
             raise RuntimeError("Sequential engine requires one ActionExecutor")
         while True:
             current_results = []
+            # 循环执行执行计划中的步骤
             for step in plan.steps:
                 step.status = StepStatus.RUNNING
                 action = Action(id=str(step.id), description=step.description)
+                # 执行本次循环中的步骤
                 action_result = await self.executor.execute_legacy(
                     action,
                     context=accumulated_context,
